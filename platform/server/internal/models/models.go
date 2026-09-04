@@ -5,6 +5,7 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -35,20 +36,88 @@ func (j *JSONB) Scan(v any) error {
 // StringSlice text[] 映射。
 type StringSlice []string
 
+// encodePGTextArray 编码为 Postgres 数组字面量（{"a","b"}，含引号/反斜杠转义）。
+func encodePGTextArray(items []string) string {
+	var b strings.Builder
+	b.WriteByte('{')
+	for i, v := range items {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteByte('"')
+		for _, r := range v {
+			if r == '"' || r == '\\' {
+				b.WriteByte('\\')
+			}
+			b.WriteRune(r)
+		}
+		b.WriteByte('"')
+	}
+	b.WriteByte('}')
+	return b.String()
+}
+
+// decodePGTextArray 解析 Postgres 数组字面量；兼容 JSON 数组格式。
+func decodePGTextArray(s string) ([]string, error) {
+	s = strings.TrimSpace(s)
+	if s == "" || s == "{}" || s == "NULL" {
+		return nil, nil
+	}
+	if s[0] != '{' {
+		var out []string
+		if err := json.Unmarshal([]byte(s), &out); err != nil {
+			return nil, err
+		}
+		return out, nil
+	}
+	inner := s[1 : len(s)-1]
+	var out []string
+	var cur strings.Builder
+	inQuote, escaped := false, false
+	for i := 0; i < len(inner); i++ {
+		ch := inner[i]
+		switch {
+		case escaped:
+			cur.WriteByte(ch)
+			escaped = false
+		case ch == '\\':
+			escaped = true
+		case ch == '"':
+			inQuote = !inQuote
+		case ch == ',' && !inQuote:
+			out = append(out, cur.String())
+			cur.Reset()
+		default:
+			cur.WriteByte(ch)
+		}
+	}
+	out = append(out, cur.String())
+	return out, nil
+}
+
 func (s StringSlice) Value() (driver.Value, error) {
 	if s == nil {
 		return "{}", nil
 	}
-	b, err := json.Marshal(s)
-	return string(b), err
+	return encodePGTextArray(s), nil
 }
 
 func (s *StringSlice) Scan(v any) error {
 	switch x := v.(type) {
 	case []byte:
-		return json.Unmarshal(x, &s)
+		parsed, err := decodePGTextArray(string(x))
+		if err != nil {
+			return err
+		}
+		*s = parsed
+		return nil
 	case string:
-		return json.Unmarshal([]byte(x), &s)
+		parsed, err := decodePGTextArray(x)
+		if err != nil {
+			return err
+		}
+		*s = parsed
+		return nil
 	case nil:
 		*s = nil
 		return nil

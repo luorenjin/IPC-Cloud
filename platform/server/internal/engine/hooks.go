@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -73,6 +74,17 @@ func (e *Engine) RegisterHooks(g *gin.RouterGroup) {
 func (e *Engine) onPublish(c *gin.Context) {
 	p := hookParams(c)
 	app, stream := p["app"], p["stream"]
+	// GB28181 RTP 收流端口由平台 openRtpServer 按需开启，设备侧 RTP 无法携带
+	// 推流 token；仅校验流键归属已存在通道，防止任意伪造。
+	if app == "rtp" {
+		if _, _, ok := devsvc.FindChannelByStreamKey(app, stream); !ok {
+			log.Printf("[hook] publish denied %s/%s: unknown rtp stream", app, stream)
+			hookFail(c, "unknown rtp stream")
+			return
+		}
+		hookOK(c, nil)
+		return
+	}
 	token := p["token"]
 	if token == "" {
 		token = paramFromParams(p["params"], "token")
@@ -205,25 +217,27 @@ func (e *Engine) onFlowReport(c *gin.Context) {
 }
 
 // onRecordMP4 平台录像索引。
+// 注意 ZLM 的 start_time/time_len/file_size 是浮点（JSON 序列化可能为科学计数法），须用 ParseFloat。
+// Path 存 hook 的 url 相对路径（record/<app>/<stream>/…mp4），回放按 ZLM HTTP 静态服务拼接。
 func (e *Engine) onRecordMP4(c *gin.Context) {
 	p := hookParams(c)
 	app, stream := p["app"], p["stream"]
-	if app != "live" { // ZLM startRecord 落在 live app
-		hookOK(c, nil)
-		return
-	}
 	ch, _, found := devsvc.FindChannelByStreamKey(app, stream)
 	if !found {
 		hookOK(c, nil)
 		return
 	}
-	var startTs, durS int64
-	fmt.Sscanf(p["start_time"], "%d", &startTs)
-	fmt.Sscanf(p["time_len"], "%d", &durS)
+	startTs, _ := strconv.ParseFloat(p["start_time"], 64)
+	durS, _ := strconv.ParseFloat(p["time_len"], 64)
+	size, _ := strconv.ParseFloat(p["file_size"], 64)
+	path := p["url"]
+	if path == "" {
+		path = p["file_path"]
+	}
 	rec := models.RecordIndex{
 		ID: "ri_" + models.NewID(), ChannelID: ch.ID, Source: "platform",
-		StartTs: startTs * 1000, EndTs: (startTs + durS) * 1000,
-		Type: "timer", Path: p["file_path"], Size: 0,
+		StartTs: int64(startTs * 1000), EndTs: int64((startTs + durS) * 1000),
+		Type: "timer", Path: path, Size: int64(size),
 	}
 	store.DB.Create(&rec)
 	hookOK(c, nil)

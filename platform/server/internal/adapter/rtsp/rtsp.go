@@ -46,7 +46,7 @@ func Probe(rawURL string, timeout time.Duration) (map[string]any, error) {
 	_ = conn.SetDeadline(time.Now().Add(timeout))
 
 	send := func(req string) (map[string]string, string, error) {
-		if _, err := conn.Write([]byte(req + "\r\n")); err != nil {
+		if _, err := conn.Write([]byte(req)); err != nil {
 			return nil, "", err
 		}
 		r := bufio.NewReader(conn)

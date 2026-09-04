@@ -29,6 +29,22 @@ func NewZLM(apiURL, secret string) *ZLM {
 
 // Call 调用 ZLM API，返回解析后的 data（失败返回 error）。
 func (z *ZLM) Call(ctx context.Context, api string, params url.Values) (map[string]any, error) {
+	top, err := z.callTop(ctx, api, params)
+	if err != nil {
+		return nil, err
+	}
+	data := map[string]any{}
+	if raw, ok := top["data"]; ok {
+		if b, err := json.Marshal(raw); err == nil {
+			_ = json.Unmarshal(b, &data)
+		}
+	}
+	return data, nil
+}
+
+// callTop 调用 ZLM API 并返回完整顶层响应。
+// 部分接口的业务字段不在 data 内（如 openRtpServer 的 port 为顶层字段）。
+func (z *ZLM) callTop(ctx context.Context, api string, params url.Values) (map[string]any, error) {
 	if params == nil {
 		params = url.Values{}
 	}
@@ -44,26 +60,26 @@ func (z *ZLM) Call(ctx context.Context, api string, params url.Values) (map[stri
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
-	var out struct {
-		Code int             `json:"code"`
-		Msg  string          `json:"msg"`
-		Data json.RawMessage `json:"data"`
-	}
+	var out map[string]any
 	if err := json.Unmarshal(body, &out); err != nil {
 		return nil, fmt.Errorf("zlm %s bad response: %w", api, err)
 	}
-	if out.Code != 0 {
-		return nil, fmt.Errorf("zlm %s: code=%d %s", api, out.Code, out.Msg)
+	if cf, _ := out["code"].(float64); cf != 0 {
+		msg, _ := out["msg"].(string)
+		return nil, fmt.Errorf("zlm %s: code=%v %s", api, out["code"], msg)
 	}
-	data := map[string]any{}
-	if len(out.Data) > 0 {
-		_ = json.Unmarshal(out.Data, &data)
-	}
-	return data, nil
+	return out, nil
 }
 
+// AddStreamProxy 创建拉流代理。key 格式 __defaultVhost__/<app>/<stream>；
+// 新版 ZLM 要求 vhost/app/stream/url 为独立参数（不再接受 key）。
 func (z *ZLM) AddStreamProxy(key, proxyURL string, timeoutSec int) error {
-	p := url.Values{"key": {key}, "url": {proxyURL}, "timeout_sec": {fmt.Sprint(timeoutSec)},
+	parts := strings.Split(key, "/")
+	if len(parts) != 3 {
+		return fmt.Errorf("bad proxy key %s", key)
+	}
+	p := url.Values{"vhost": {parts[0]}, "app": {parts[1]}, "stream": {parts[2]}, "url": {proxyURL},
+		"timeout_sec": {fmt.Sprint(timeoutSec)},
 		"enable_rtsp": {"1"}, "enable_rtmp": {"1"}, "enable_hls": {"0"}, "retry_count": {"3"}}
 	_, err := z.Call(context.Background(), "addStreamProxy", p)
 	return err
@@ -75,13 +91,14 @@ func (z *ZLM) DelStreamProxy(key string) error {
 }
 
 // OpenRtpServer 打开收流端口；tcp_mode 0=UDP 1=TCP 被动 2=TCP 主动。
+// 注意：port 在 ZLM 响应顶层而非 data 内，须用 callTop。
 func (z *ZLM) OpenRtpServer(ctx context.Context, port int, tcpMode int, streamID string) (int, error) {
-	data, err := z.Call(ctx, "openRtpServer",
+	top, err := z.callTop(ctx, "openRtpServer",
 		url.Values{"port": {fmt.Sprint(port)}, "tcp_mode": {fmt.Sprint(tcpMode)}, "stream_id": {streamID}})
 	if err != nil {
 		return 0, err
 	}
-	pf, _ := data["port"].(float64)
+	pf, _ := top["port"].(float64)
 	return int(pf), nil
 }
 
@@ -101,6 +118,13 @@ func (z *ZLM) GetMediaList(ctx context.Context) ([]map[string]any, error) {
 	return list, nil
 }
 
+// ZLM startRecord/stopRecord 的 type 参数：0=HLS，1=MP4（注意不是"自动/手动"）。
+const (
+	RecordTypeHLS = 0
+	RecordTypeMP4 = 1
+)
+
+// StartRecord 启动录制（typ 取 RecordTypeMP4/RecordTypeHLS）。
 func (z *ZLM) StartRecord(app, stream string, typ int) error {
 	_, err := z.Call(context.Background(), "startRecord",
 		url.Values{"type": {fmt.Sprint(typ)}, "vhost": {"__defaultVhost__"}, "app": {app}, "stream": {stream}})

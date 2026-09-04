@@ -1,4 +1,4 @@
-﻿// Package idp IDP v1 MQTT 适配器（接入规范 §5）。
+// Package idp IDP v1 MQTT 适配器（接入规范 §5）。
 package idp
 
 import (
@@ -116,6 +116,9 @@ func (a *Adapter) onMessage(_ mqtt.Client, msg mqtt.Message) {
 	case strings.HasSuffix(msg.Topic(), "/up/ota"):
 		a.handleOtaProgress(deviceID, env)
 	default:
+		if env.MsgID == "" {
+			return // 无 msgId 的消息无法关联请求，忽略之（回执会与设备互相触发风暴）
+		}
 		a.reply(deviceID, "cmd", env.MsgID, codeE0400, "unknown type", nil)
 	}
 }

@@ -1,4 +1,4 @@
-﻿package idp
+package idp
 
 import (
 	"context"
@@ -127,6 +127,9 @@ func (a *Adapter) handleReport(deviceID string, env Envelope) {
 	devsvc.TouchDevice(deviceID)
 	var dev models.Device
 	if store.DB.First(&dev, "id = ?", deviceID).Error == nil && dev.ProjectID != "" {
+		if dev.Meta == nil {
+			dev.Meta = models.JSONB{}
+		}
 		dev.Meta["metrics"] = env.Data
 		store.DB.Model(&dev).Update("meta", dev.Meta)
 	}
@@ -165,7 +168,11 @@ func (a *Adapter) Bind(projectID, groupID, name, deviceID, verifyCode string) er
 	_ = cnt
 
 	var dev models.Device
-	if store.DB.First(&dev, "id = ?", deviceID).Error == nil && dev.ProjectID != "" && dev.ProjectID != projectID {
+	if store.DB.First(&dev, "id = ?", deviceID).Error != nil {
+		// 设备尚未经 hello 建档，拒绝绑定避免生成脏记录
+		return errs.ENotFound
+	}
+	if dev.ProjectID != "" && dev.ProjectID != projectID {
 		return errs.EAlreadyBound
 	}
 

@@ -1,4 +1,4 @@
-﻿// Package engine 起播编排、ZLM Hook 处理、告警联动与回放会话管理。
+// Package engine 起播编排、ZLM Hook 处理、告警联动与回放会话管理。
 package engine
 
 import (
@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/jetscam/ipccloud/server/internal/adapter"
@@ -102,7 +103,7 @@ func (e *Engine) StartPlay(userID, channelID, profile string) (map[string]any, e
 		app = "live"
 		stream = fmt.Sprintf("%s_%d_%s", dev.ID, ch.Idx, profile)
 		pushToken, _ := media.PushToken(node.ID, app, stream)
-		pushURL := fmt.Sprintf("rtmp://%s:%d/%s/%s", node.PublicHost, node.RTMPPort, app, stream)
+		pushURL := fmt.Sprintf("rtmp://%s:%d/%s/%s", media.DevicePushHost(node), node.RTMPPort, app, stream)
 		idp := adapter.Get("idp")
 		devsvc.SetChannelStream(channelID, "starting")
 		go func() {
@@ -120,12 +121,14 @@ func (e *Engine) StartPlay(userID, channelID, profile string) (map[string]any, e
 		if profile == "sub" {
 			key = "gbStreamSub"
 		}
-		gbCh, _ := ch.Meta[key].(string)
-		if gbCh == "" {
-			gbCh, _ = ch.Meta["gbChannelId"].(string)
+		gbCh, ok := ch.Meta[key].(string)
+		if !ok || gbCh == "" {
+			// meta 缺失时按 <gbChannelId>_<profile> 构造
+			gbChID, _ := ch.Meta["gbChannelId"].(string)
+			gbCh = gbChID + "_" + profile
 		}
-		stream = gbCh + "_" + profile
-		ch.Meta["gbStreamKeyMain"] = ch.Meta["gbStreamKeyMain"] // noop
+		// meta.gbStream 本身已含码流后缀（<gbChannelId>_<profile>），直接作为流名
+		stream = gbCh
 		port, err := zlm.OpenRtpServer(context.Background(), 0, 1, stream)
 		if err != nil {
 			return nil, errs.ENodeOffline.WithMsg("openRtpServer 失败")
@@ -217,8 +220,13 @@ func (e *Engine) StopPlay(channelID, profile, reason string) {
 		if profile == "sub" {
 			key = "gbStreamSub"
 		}
-		gbCh, _ := ch.Meta[key].(string)
-		stream = gbCh + "_" + profile
+		gbCh, ok := ch.Meta[key].(string)
+		if !ok || gbCh == "" {
+			gbChID, _ := ch.Meta["gbChannelId"].(string)
+			gbCh = gbChID + "_" + profile
+		}
+		// 与 StartPlay 一致：meta.gbStream 已含码流后缀
+		stream = gbCh
 	default:
 		stream = ch.ID + "_" + profile
 	}
@@ -300,6 +308,10 @@ func (e *Engine) SubscribeEvents() {
 			if st, _ := ev.Data["status"].(string); st == "offline" {
 				e.platformEvent(ev, "node_offline")
 			}
+		case strings.HasPrefix(ev.Type, "alarm.") && ev.Type != "alarm.new":
+			// 适配器归一化后的设备告警（motion/tamper/io/humanoid…），按策略落库；
+			// alarm.new 是落库后的通知事件，不得再次消费（会递归放大）
+			e.platformEvent(ev, strings.TrimPrefix(ev.Type, "alarm."))
 		case ev.Type == "ota.progress":
 			e.taskProgress(ev)
 		}

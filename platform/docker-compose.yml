@@ -45,7 +45,8 @@ services:
     environment:
       MODE: "standalone"
     volumes:
-      - zlmdata:/opt/media/www/record
+      - zlmdata:/opt/media/bin/www/record
+      - ./zlm/config.ini:/opt/media/conf/config.ini
 
   server:
     build: ./server
@@ -70,6 +71,7 @@ services:
       SIP_PORT: "5060"
       SIP_SERVER_ID: "34020000002000000001"
       SIP_REALM: "3402000000"
+      MEDIA_DEVICE_HOST: "zlm"
       ADMIN_USER: "admin"
       ADMIN_PASSWORD: "Admin@12345"
       STREAM_IDLE_SEC: "30"
@@ -85,6 +87,23 @@ services:
       - server
     ports:
       - "3000:3000"
+
+  simulator:
+    build: ../simulator
+    depends_on:
+      - emqx
+      - zlm
+      - server
+    command:
+      - -mode=all
+      - -broker=tcp://emqx:1883
+      - -platform=http://server:8080
+      - -sip-host=server
+      - -sip-port=5060
+      - -adv-host=simulator
+      - -assets=/assets
+      - -alarm-sec=90
+    restart: unless-stopped
 
 volumes:
   pgdata:

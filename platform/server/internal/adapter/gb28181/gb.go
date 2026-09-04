@@ -15,6 +15,7 @@ import (
 	"github.com/jetscam/ipccloud/server/internal/config"
 	"github.com/jetscam/ipccloud/server/internal/crypto"
 	"github.com/jetscam/ipccloud/server/internal/devsvc"
+	"github.com/jetscam/ipccloud/server/internal/media"
 	"github.com/jetscam/ipccloud/server/internal/models"
 	"github.com/jetscam/ipccloud/server/internal/store"
 )
@@ -205,7 +206,10 @@ func (a *Adapter) onRegistered(gbID string, peer *Peer) {
 	// 未在白名单：进入待确认（归入最早项目展示）
 	store.DB.Where("gb_id = ?", gbID).Assign(models.GbPending{
 		GbID: gbID, IP: peer.ip(), FirstSeen: models.NowMilli(),
-	}).FirstOrCreate(&models.GbPending{GbID: gbID})
+	}).FirstOrCreate(&models.GbPending{
+		ID: "gbp_" + models.NewID(), GbID: gbID,
+		IP: peer.ip(), FirstSeen: models.NowMilli(),
+	})
 	var proj models.Project
 	if store.DB.Order("created_at ASC").First(&proj).Error == nil {
 		bus.Default.Publish(bus.Event{Type: "gb.pending", ProjectID: proj.ID,
@@ -273,6 +277,11 @@ func gbDefaultCaps() []string {
 	return []string{"live.main", "live.sub", "snapshot", "record.platform", "reboot"}
 }
 
+// gbDeviceCaps GB28181 设备能力（与适配器实际实现一致：直播、录像查询/回放、平台录像）。
+func gbDeviceCaps() []string {
+	return []string{"live.main", "live.sub", "record.device.query", "record.device.play", "record.platform"}
+}
+
 // ---------- MESSAGE（MANSCDP） ----------
 
 func (a *Adapter) handleMessage(peer *Peer, msg *SIPMessage) {
@@ -286,13 +295,16 @@ func (a *Adapter) handleMessage(peer *Peer, msg *SIPMessage) {
 	if gbID == "" {
 		gbID = fromUser(msg.From)
 	}
+	// 仅 Response 根元素参与 SN 事务匹配：设备侧 Keepalive/Alarm 等 Notify
+	// 的 SN 独立计数，若误匹配会吞掉查询响应导致 Catalog 超时。
+	isResp := m.XMLName.Local == "Response"
 	a.mu.Lock()
 	ch, waiting := a.snWait[m.SN]
-	if waiting {
+	if waiting && isResp {
 		delete(a.snWait, m.SN)
 	}
 	a.mu.Unlock()
-	if waiting {
+	if waiting && isResp {
 		select {
 		case ch <- m:
 		default:
@@ -543,7 +555,7 @@ func (a *Adapter) Invite(gbChannelID, session, start, end string, ssrcPrefix str
 	if remote == nil {
 		return "", "", fmt.Errorf("E1002 设备未注册")
 	}
-	host := node.PublicHost
+	host := media.DevicePushHost(node)
 	if host == "" {
 		host = a.sipHost
 	}

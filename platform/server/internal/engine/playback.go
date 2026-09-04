@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/jetscam/ipccloud/server/internal/adapter"
@@ -135,8 +136,9 @@ func (e *Engine) StartPlayback(userID, channelID string, start, end int64, speed
 		s := &pbSession{ChannelID: channelID, SessionID: sessionID, Source: "platform",
 			NodeID: node.ID, App: "vod", Start: start, End: end}
 		e.savePb(s)
-		// 录像文件位于节点本地：经节点 HTTP 文件服务访问
-		url := fmt.Sprintf("http://%s:%d/vod%s", node.PublicHost, node.HTTPPort, rec.Path)
+		// 录像文件位于节点 ZLM www 根下（Path 为相对路径 record/…），经 ZLM HTTP 静态服务点播
+		rel := strings.TrimPrefix(rec.Path, "/")
+		url := fmt.Sprintf("http://%s:%d/%s", node.PublicHost, node.HTTPPort, rel)
 		return map[string]any{
 			"sessionId": sessionID, "source": "platform", "url": url,
 			"seekable": true,
@@ -162,7 +164,7 @@ func (e *Engine) StartPlayback(userID, channelID string, start, end int64, speed
 
 	if dev.Source == "idp" {
 		pushToken, _ := media.PushToken(node.ID, app, stream)
-		pushURL := fmt.Sprintf("rtmp://%s:%d/%s/%s", node.PublicHost, node.RTMPPort, app, stream)
+		pushURL := fmt.Sprintf("rtmp://%s:%d/%s/%s", media.DevicePushHost(node), node.RTMPPort, app, stream)
 		err = adapter.Get("idp").StartPlayback(context.Background(), adapter.PlaybackStart{
 			ChannelID: channelID, SessionID: sessionID, Start: start, End: end,
 			Speed: speed, PushURL: pushURL, PushToken: pushToken,

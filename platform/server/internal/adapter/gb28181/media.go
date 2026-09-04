@@ -29,14 +29,8 @@ func devChannel(channelID string) (*models.Device, *models.Channel, error) {
 }
 
 func gbChannelIDOf(dev *models.Device, ch *models.Channel, profile string) string {
-	key := "gbStream"
-	if profile == "sub" {
-		key = "gbStreamSub"
-	}
-	if v, ok := ch.Meta[key].(string); ok && v != "" {
-		return v
-	}
-	if v, ok := ch.Meta["gbChannelId"].(string); ok {
+	// INVITE/RecordInfo 的目标为通道真实国标编号；gbStream/gbStreamSub 是平台侧流命名键，不用于寻址。
+	if v, ok := ch.Meta["gbChannelId"].(string); ok && v != "" {
 		return v
 	}
 	if v, ok := dev.Identity["gbId"].(string); ok {

@@ -238,20 +238,18 @@ func (a *Adapter) Probe(ctx context.Context, xaddr, user, pass string) (*ProbeIn
 			Token string `xml:"token,attr"`
 			Name  string `xml:"Name"`
 			Video struct {
-				Encoder struct {
-					Resolution struct {
-						Width  int `xml:"Width"`
-						Height int `xml:"Height"`
-					} `xml:"Resolution"`
-				} `xml:"VideoEncoderConfiguration"`
+				Resolution struct {
+					Width  int `xml:"Width"`
+					Height int `xml:"Height"`
+				} `xml:"Resolution"`
 			} `xml:"VideoEncoderConfiguration"`
 		} `xml:"Profiles"`
 	}
-	if xml.Unmarshal([]byte(out), &pr) == nil {
+	if xml.Unmarshal([]byte(soapBodyOf(out)), &pr) == nil {
 		for _, p := range pr.Profiles {
 			info.Profiles = append(info.Profiles, Profile{
 				Token: p.Token, Name: p.Name,
-				Width: p.Video.Encoder.Resolution.Width, Height: p.Video.Encoder.Resolution.Height,
+				Width: p.Video.Resolution.Width, Height: p.Video.Resolution.Height,
 			})
 		}
 	}
@@ -363,6 +361,9 @@ func (a *Adapter) statusWatcher(ctx context.Context) {
 						Updates(map[string]any{"status": "online", "last_seen_at": models.NowMilli()})
 				} else if !ok && d.Status == "online" {
 					n := failCount(&d) + 1
+					if d.Meta == nil {
+						d.Meta = models.JSONB{}
+					}
 					d.Meta["probeFails"] = n
 					if n >= 3 {
 						store.DB.Model(&models.Device{}).Where("id = ?", d.ID).
@@ -396,15 +397,57 @@ func xmlEscape(s string) string {
 	return r.Replace(s)
 }
 
+// soapBodyOf 提取 SOAP 响应 Body 的内部 XML（兼容 s:/soap: 前缀），供结构化解析。
+func soapBodyOf(doc string) string {
+	open := -1
+	for _, n := range []string{"<s:Body>", "<soap:Body>", "<Body>"} {
+		if i := strings.Index(doc, n); i >= 0 {
+			open = i + len(n)
+			break
+		}
+	}
+	if open < 0 {
+		return doc
+	}
+	close := -1
+	for _, n := range []string{"</s:Body>", "</soap:Body>", "</Body>"} {
+		if j := strings.LastIndex(doc, n); j >= 0 {
+			close = j
+			break
+		}
+	}
+	if close < open {
+		return doc
+	}
+	return doc[open:close]
+}
+
+// xmlText 提取元素文本，兼容无前缀 <tag> 与命名空间前缀 <prefix:tag>（真实 ONVIF 设备多用后者）。
 func xmlText(doc, tag string) string {
-	i := strings.Index(doc, "<"+tag+">")
-	if i < 0 {
-		return ""
+	for _, n := range []string{"<" + tag, ":" + tag} {
+		i := strings.Index(doc, n)
+		if i < 0 {
+			continue
+		}
+		gt := strings.Index(doc[i:], ">")
+		if gt < 0 {
+			continue
+		}
+		openEnd := i + gt
+		// 回溯得到完整开始标签名（如 tt:Uri / Manufacturer）
+		lt := strings.LastIndex(doc[:openEnd], "<")
+		if lt < 0 {
+			continue
+		}
+		name := strings.SplitN(doc[lt+1:openEnd], " ", 2)[0]
+		if !strings.HasSuffix(name, tag) {
+			continue
+		}
+		start := openEnd + 1
+		j := strings.Index(doc[start:], "</"+name+">")
+		if j >= 0 {
+			return strings.TrimSpace(doc[start : start+j])
+		}
 	}
-	rest := doc[i+len(tag)+2:]
-	j := strings.Index(rest, "</"+tag+">")
-	if j < 0 {
-		return ""
-	}
-	return strings.TrimSpace(rest[:j])
+	return ""
 }

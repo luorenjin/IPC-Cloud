@@ -3,6 +3,7 @@ package devsvc
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 
 	"github.com/jetscam/ipccloud/server/internal/bus"
@@ -139,16 +140,23 @@ func FindChannelByStreamKey(app, stream string) (models.Channel, string, bool) {
 			return ch, "", false
 		}
 		devID := base[:cut]
-		if store.DB.First(&ch, "device_id = ? AND deleted_at = 0", devID).Error == nil {
+		idx, errI := strconv.Atoi(base[cut+1:])
+		if errI == nil {
+			// 流名含通道序号，优先精确匹配 idx
+			if store.DB.First(&ch, "device_id = ? AND idx = ?", devID, idx).Error == nil {
+				return ch, prof, true
+			}
+		}
+		if store.DB.First(&ch, "device_id = ?", devID).Error == nil {
 			return ch, prof, true
 		}
 	case "proxy": // <channelId>_<profile>
-		if store.DB.First(&ch, "id = ? AND deleted_at = 0", base).Error == nil {
+		if store.DB.First(&ch, "id = ?", base).Error == nil {
 			return ch, prof, true
 		}
-	case "rtp":
+	case "rtp": // 流名即 meta.gbStream/gbStreamSub（<gbChannelId>_<profile>，已含后缀）
 		if store.DB.First(&ch, "meta->>'gbStream' = ? OR meta->>'gbStreamSub' = ?",
-			base, base).Error == nil {
+			stream, stream).Error == nil {
 			return ch, prof, true
 		}
 	}

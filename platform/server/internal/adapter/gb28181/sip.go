@@ -356,7 +356,9 @@ func readSIPMessage(r *bufio.Reader) ([]byte, error) {
 // dispatch 分发：响应按 Via branch 唤醒等待事务；请求交订阅者。
 func (t *Transport) dispatch(peer *Peer, msg *SIPMessage) {
 	if msg.IsResp {
-		if len(msg.Via) == 0 {
+		// 1xx 临时响应（如 INVITE 的 100 Trying）不唤醒事务，
+		// 仅 2xx+ 最终响应参与 Via branch 匹配。
+		if len(msg.Via) == 0 || msg.Status < 200 {
 			return
 		}
 		branch := viaBranch(msg.Via[0])

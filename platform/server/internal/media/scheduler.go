@@ -3,6 +3,7 @@ package media
 import (
 	"context"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 
@@ -102,4 +103,14 @@ func NodeStreamsAdd(nodeID string, delta int) {
 		n.Streams = 0
 	}
 	store.DB.Model(&n).Update("streams", n.Streams)
+}
+
+// DevicePushHost 设备侧媒体接入地址（IDP RTMP 推流、GB SDP 收流地址）。
+// Docker 编排等部署形态下设备与浏览器接入地址不同：浏览器用 PublicHost，
+// 设备用 MEDIA_DEVICE_HOST 指向编排网络内的媒体节点地址；未设置时回落 PublicHost。
+func DevicePushHost(node *models.MediaNode) string {
+	if h := os.Getenv("MEDIA_DEVICE_HOST"); h != "" {
+		return h
+	}
+	return node.PublicHost
 }
