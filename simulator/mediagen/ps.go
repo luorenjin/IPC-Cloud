@@ -8,22 +8,22 @@ type PSMuxer struct {
 // NewPSMuxer 构造 PS 封装器。
 func NewPSMuxer() *PSMuxer { return &PSMuxer{} }
 
-// psPackHeader 生成 PS pack header（00 00 01 BA + SCR）。
+// psPackHeader 生成 PS pack header（00 00 01 BA + SCR，共 14 字节）。
+// SCR 与 TS PCR 同构：'01' base[32..30] marker base[29..28] / base[27..20] /
+// base[19..15] marker ext[8..7] / ext[6..0] marker / base[14..7] / base[6..0] marker。
 func (m *PSMuxer) psPackHeader(scr90k int64) []byte {
-	scr := uint64(scr90k) * 300 // 27MHz
+	scrBase := uint64(scr90k) & ((1 << 33) - 1) // 90kHz
+	scrExt := uint64(0)
 	b := make([]byte, 14)
 	b[0], b[1], b[2] = 0x00, 0x00, 0x01
 	b[3] = 0xBA
-	// SCR 字段（33bit）+ extension（9bit）
-	scrBase := scr / 300
-	scrExt := scr % 300
-	b[4] = 0x44 | byte(scrBase>>27)&0x38 | 0x04
+	b[4] = byte(0x40 | ((scrBase>>30)&0x07)<<3 | 0x04 | (scrBase>>28)&0x03)
 	b[5] = byte(scrBase >> 20)
-	b[6] = byte(scrBase>>15)&0xF8 | 0x04
-	b[7] = byte(scrBase >> 7)
-	b[8] = byte(scrBase<<1)&0xFE | 0x04
-	b[9] = byte(scrExt<<3)&0xF8 | 0x04 | 1
-	// mux rate + marker
+	b[6] = byte((scrBase>>15)&0x1F)<<3 | 0x04 | byte(scrExt>>7)&0x03
+	b[7] = byte(scrExt&0x7F)<<1 | 0x01
+	b[8] = byte(scrBase >> 7)
+	b[9] = byte(scrBase&0x7F)<<1 | 0x01
+	// program_mux_rate(22bit) + 2 marker bits；末字节 '11111' + stuffing_length=0
 	b[10] = 0x01
 	b[11] = 0x89
 	b[12] = 0xC3
@@ -84,21 +84,25 @@ func encTS(ts int64, prefix byte) []byte {
 	return b
 }
 
-// pesHeader 生成 PES 头（stream 0xE0，PTS=DTS 时仅写 PTS）。
+// pesHeader 生成 PES 头（stream 0xE0）。
+// flags 字节 1 恒为 0x80（'10' marker + 无加密），PTS_DTS_flags 位于字节 2 —— ffmpeg
+// (libavformat/mpeg.c) 与 libmpeg(ZLM) 均从字节 2 的 0x80/0xC0 位判断 PTS/DTS 是否存在，
+// 写错字节会导致整个时间戳被跳过（表现为 duration=0 / pts_time=N/A）。
+// PTS_DTS_flags='11' 时规范顺序为 PTS('0011' 前缀) 在前、DTS('0001' 前缀) 在后。
 func pesHeader(pts90k, dts90k int64, payloadLen int) []byte {
 	var hdr []byte
-	flags := byte(0x80) // '10' + PTS only
+	flags2 := byte(0x80) // '10' → 仅 PTS
 	if dts90k != pts90k {
-		flags = 0xC0 // PTS+DTS
-		hdr = append(hdr, encTS(dts90k, 0x2)...) // '0010'
-		hdr = append(hdr, encTS(pts90k, 0x3)...) // '0011'
+		flags2 = 0xC0                            // '11' → PTS + DTS
+		hdr = append(hdr, encTS(pts90k, 0x3)...) // '0011' PTS 在前
+		hdr = append(hdr, encTS(dts90k, 0x1)...) // '0001' DTS 在后
 	} else {
-		hdr = append(hdr, encTS(pts90k, 0x2)...) // '0010'
+		hdr = append(hdr, encTS(pts90k, 0x2)...) // '0010' 仅 PTS
 	}
 	pesLen := 3 + len(hdr) + payloadLen
 	out := []byte{0x00, 0x00, 0x01, 0xE0}
 	out = append(out, byte(pesLen>>8), byte(pesLen))
-	out = append(out, flags, 0x00, byte(len(hdr)))
+	out = append(out, 0x80, flags2, byte(len(hdr)))
 	return append(out, hdr...)
 }
 

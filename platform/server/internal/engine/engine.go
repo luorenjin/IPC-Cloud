@@ -98,10 +98,16 @@ func (e *Engine) StartPlay(userID, channelID, profile string) (map[string]any, e
 	zlm := media.ForNode(node)
 
 	var app, stream string
+	up := false // 流已在节点注册（常驻推流/代理），可直接复用
 	switch dev.Source {
 	case "idp":
 		app = "live"
 		stream = fmt.Sprintf("%s_%d_%s", dev.ID, ch.Idx, profile)
+		// 流已注册时不会再触发 regist 事件，重复起流会令 waitStreaming 死等超时
+		if streamAlive(node, app, stream) {
+			up = true
+			break
+		}
 		pushToken, _ := media.PushToken(node.ID, app, stream)
 		pushURL := fmt.Sprintf("rtmp://%s:%d/%s/%s", media.DevicePushHost(node), node.RTMPPort, app, stream)
 		idp := adapter.Get("idp")
@@ -129,6 +135,11 @@ func (e *Engine) StartPlay(userID, channelID, profile string) (map[string]any, e
 		}
 		// meta.gbStream 本身已含码流后缀（<gbChannelId>_<profile>），直接作为流名
 		stream = gbCh
+		// 流已注册说明收流端口仍开放且设备在推流，复用即可
+		if streamAlive(node, app, stream) {
+			up = true
+			break
+		}
 		port, err := zlm.OpenRtpServer(context.Background(), 0, 1, stream)
 		if err != nil {
 			return nil, errs.ENodeOffline.WithMsg("openRtpServer 失败")
@@ -148,6 +159,11 @@ func (e *Engine) StartPlay(userID, channelID, profile string) (map[string]any, e
 	default: // onvif / rtsp：addStreamProxy
 		app = "proxy"
 		stream = ch.ID + "_" + profile
+		// 代理流常驻时无新 regist 事件，直接复用，避免 addStreamProxy 幂等+死等
+		if streamAlive(node, app, stream) {
+			up = true
+			break
+		}
 		url := pullURL(&dev, &ch, profile)
 		if url == "" {
 			return nil, errs.EForbid.WithMsg("缺少拉流地址，请重新同步设备")
@@ -160,8 +176,10 @@ func (e *Engine) StartPlay(userID, channelID, profile string) (map[string]any, e
 		}
 	}
 
-	// 等待出流（≤10s，§8.6）
-	if !e.waitStreaming(channelID, 10*time.Second) {
+	// 复用已注册流：状态本就是 streaming，无需等待
+	if up {
+		devsvc.SetChannelStream(channelID, "streaming")
+	} else if !e.waitStreaming(channelID, 10*time.Second) { // 等待出流（≤10s，§8.6）
 		devsvc.SetChannelStream(channelID, "error")
 		go e.StopPlay(channelID, profile, "timeout")
 		return nil, errs.EStreamTimeout

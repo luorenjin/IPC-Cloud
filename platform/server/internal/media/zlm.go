@@ -81,8 +81,13 @@ func (z *ZLM) AddStreamProxy(key, proxyURL string, timeoutSec int) error {
 	p := url.Values{"vhost": {parts[0]}, "app": {parts[1]}, "stream": {parts[2]}, "url": {proxyURL},
 		"timeout_sec": {fmt.Sprint(timeoutSec)},
 		"enable_rtsp": {"1"}, "enable_rtmp": {"1"}, "enable_hls": {"0"}, "retry_count": {"3"}}
-	_, err := z.Call(context.Background(), "addStreamProxy", p)
-	return err
+	if _, err := z.Call(context.Background(), "addStreamProxy", p); err != nil {
+		// 同 key 代理已存在视为成功（幂等）：key 由通道/码流决定，URL 一致
+		if !strings.Contains(err.Error(), "already exists") {
+			return err
+		}
+	}
+	return nil
 }
 
 func (z *ZLM) DelStreamProxy(key string) error {
@@ -108,11 +113,12 @@ func (z *ZLM) CloseRtpServer(streamID string) error {
 }
 
 func (z *ZLM) GetMediaList(ctx context.Context) ([]map[string]any, error) {
-	data, err := z.Call(ctx, "getMediaList", nil)
+	// getMediaList 的 data 是顶层数组（无 "list" 包装），须经 callTop 读取
+	top, err := z.callTop(ctx, "getMediaList", nil)
 	if err != nil {
 		return nil, err
 	}
-	raw, _ := json.Marshal(data["list"])
+	raw, _ := json.Marshal(top["data"])
 	var list []map[string]any
 	_ = json.Unmarshal(raw, &list)
 	return list, nil
@@ -125,9 +131,12 @@ const (
 )
 
 // StartRecord 启动录制（typ 取 RecordTypeMP4/RecordTypeHLS）。
+// max_second 控制分段时长：分段完成才触发 on_record_mp4 落库回放索引；
+// config.ini 的 fileSecond 键名无效（正确键为 mp4_max_second），故经 API 显式指定。
 func (z *ZLM) StartRecord(app, stream string, typ int) error {
 	_, err := z.Call(context.Background(), "startRecord",
-		url.Values{"type": {fmt.Sprint(typ)}, "vhost": {"__defaultVhost__"}, "app": {app}, "stream": {stream}})
+		url.Values{"type": {fmt.Sprint(typ)}, "vhost": {"__defaultVhost__"},
+			"app": {app}, "stream": {stream}, "max_second": {"60"}})
 	return err
 }
 

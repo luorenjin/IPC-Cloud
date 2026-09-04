@@ -99,11 +99,13 @@ func (e *Engine) recordStreamKey(dev *models.Device, ch *models.Channel, profile
 		if profile == "sub" {
 			key = "gbStreamSub"
 		}
-		gbCh, _ := ch.Meta[key].(string)
-		if gbCh == "" {
-			gbCh, _ = ch.Meta["gbChannelId"].(string)
+		// meta.gbStream 本身已含码流后缀（<gbChannelId>_<profile>），直接作为流名；
+		// 缺失时按 gbChannelId + profile 构造（与 StartPlay/StopPlay 一致）
+		if gbCh, _ := ch.Meta[key].(string); gbCh != "" {
+			return "rtp", gbCh
 		}
-		return "rtp", gbCh + "_" + profile
+		gbChID, _ := ch.Meta["gbChannelId"].(string)
+		return "rtp", gbChID + "_" + profile
 	default:
 		return "proxy", ch.ID + "_" + profile
 	}
