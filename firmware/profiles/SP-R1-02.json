@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "identity": {
+    "model": "SP-R1-02",
+    "vendor": "IpcCloud",
+    "hw": "A1",
+    "platform": "gk7205v200",
+    "gb_manufacturer": "IpcCloud"
+  },
+  "video": {
+    "sensors": ["sc230ai"],
+    "lens": { "type": "fixed", "af": false, "zoom": false },
+    "channels": [
+      { "ch": 0, "name": "main", "codecs": ["h265", "h264"],
+        "max":     { "w": 1920, "h": 1080, "fps": 30 },
+        "default": { "codec": "h265", "w": 1920, "h": 1080, "fps": 25, "kbps": 2048, "rc": "vbr", "gop": 50 } },
+      { "ch": 1, "name": "sub", "codecs": ["h264"],
+        "max":     { "w": 704, "h": 396, "fps": 30 },
+        "default": { "codec": "h264", "w": 640, "h": 360, "fps": 15, "kbps": 512, "rc": "cbr", "gop": 30 } }
+    ],
+    "isp": { "wdr": true, "hdr": true, "3dnr": true, "daynight": "icr_auto" },
+    "snapshot": { "codec": "mjpeg", "max": { "w": 1920, "h": 1080 } }
+  },
+  "audio": { "in": ["mic", "line"], "out": [], "codecs": ["g711a", "g711u", "aac"], "aec": false },
+  "ivs": { "engine": "ive", "motion": true, "humanoid": true, "intrusion": false, "linecross": false, "tamper": true, "max_regions": 4 },
+  "storage": { "tf": true, "max_gb": 256, "fs": ["exfat", "fat32"], "segment_s": 60, "reserve_pct": 5 },
+  "network": {
+    "eth": true,
+    "wifi": { "module": "TBD", "bus": "sdio", "power_gpio": 20, "bands": ["2.4g"], "security": ["wpa2", "wpa3"], "stack": "nl80211+wpa_supplicant" }
+  },
+  "gpio_map": {
+    "ircut_a":      { "pin": 12 },
+    "ircut_b":      { "pin": 13 },
+    "ir_led":       { "pin": 14, "pwm": true, "pwm_hz": 1000 },
+    "status_led":   { "pin": 15 },
+    "reset_key":    { "pin": 16, "active_low": true, "debounce_ms": 50 },
+    "light_sensor": { "adc": 0, "night_below": 800, "day_above": 1500 },
+    "wifi_power":   { "pin": 20 }
+  },
+  "protocols": {
+    "idp":     { "enabled": true, "broker": "mqtts://idp.example.com:8883", "auth": "cert", "keepalive_s": 60 },
+    "rtsp":    { "enabled": true, "port": 554, "max_sessions": 2 },
+    "onvif":   { "enabled": true, "port": 80, "profiles": ["S"], "events": "on_demand", "discovery": true },
+    "gb28181": { "enabled": false, "transport": "tcp", "playback": false, "alarm": true }
+  },
+  "limits": { "frame_bus_consumers": 4, "rtsp_sessions": 2, "playback_sessions": 1, "mem_budget_mb": 56, "cpu_budget_pct": 70 },
+  "security": { "hw_secure": false, "force_password_change": true, "telnet": false, "ssh": false },
+  "ota": { "ab": true, "slot_size_mb": 40, "confirm_timeout_s": 60 }
+}

@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "identity": { "model": "MOCK-X86", "vendor": "IpcCloud", "hw": "sim", "platform": "mock" },
+  "video": {
+    "sensors": ["mocksensor"],
+    "lens": { "type": "motorized", "af": true, "zoom": true, "driver": "mock" },
+    "channels": [
+      { "ch": 0, "name": "main", "codecs": ["h265", "h264"],
+        "max":     { "w": 1920, "h": 1080, "fps": 30 },
+        "default": { "codec": "h265", "w": 1920, "h": 1080, "fps": 25, "kbps": 2048, "rc": "vbr", "gop": 50 } },
+      { "ch": 1, "name": "sub", "codecs": ["h264"],
+        "max":     { "w": 704, "h": 396, "fps": 30 },
+        "default": { "codec": "h264", "w": 640, "h": 360, "fps": 15, "kbps": 512, "rc": "cbr", "gop": 30 } }
+    ],
+    "isp": { "wdr": true, "hdr": true, "3dnr": true, "daynight": "software" },
+    "snapshot": { "codec": "mjpeg", "max": { "w": 1920, "h": 1080 } }
+  },
+  "audio": { "in": ["mic"], "out": ["speaker"], "codecs": ["g711a", "pcm"], "aec": false },
+  "ivs": { "engine": "sw", "motion": true, "humanoid": false, "intrusion": false, "linecross": false, "tamper": false, "max_regions": 4 },
+  "storage": { "tf": true, "max_gb": 256, "fs": ["exfat"], "segment_s": 60, "reserve_pct": 5 },
+  "network": { "eth": true },
+  "gpio_map": {
+    "ircut_a":    { "pin": 1 },
+    "ircut_b":    { "pin": 2 },
+    "ir_led":     { "pin": 3, "pwm": true, "pwm_hz": 1000 },
+    "status_led": { "pin": 4 },
+    "reset_key":  { "pin": 5 }
+  },
+  "protocols": {
+    "idp":     { "enabled": true, "broker": "mqtts://localhost:8883", "auth": "psk" },
+    "rtsp":    { "enabled": true, "port": 8554, "max_sessions": 4 },
+    "onvif":   { "enabled": true, "port": 8080, "profiles": ["S"], "events": "on", "discovery": true },
+    "gb28181": { "enabled": true, "transport": "tcp", "playback": true, "alarm": true }
+  },
+  "limits": { "frame_bus_consumers": 8, "rtsp_sessions": 4, "playback_sessions": 2, "mem_budget_mb": 512 },
+  "security": { "hw_secure": false, "force_password_change": false },
+  "ota": { "ab": true, "slot_size_mb": 40, "confirm_timeout_s": 60 }
+}

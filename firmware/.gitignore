@@ -1,0 +1,9 @@
+# 构建产物与运行状态
+build*/
+*.log
+mock_state/
+
+# IDE
+.vs/
+.vscode/
+*.user

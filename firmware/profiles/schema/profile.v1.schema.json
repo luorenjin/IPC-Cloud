@@ -1,0 +1,278 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ipccloud.example.com/schemas/firmware/profile.v1.json",
+  "title": "IpcCloud 固件产品能力清单 (Profile) v1",
+  "description": "每个产品型号一份。固件启动时加载，驱动 ONVIF GetCapabilities、IDP status.hello、GB28181 DeviceInfo、本地控制台菜单与 HAL 引脚映射。",
+  "type": "object",
+  "required": ["schema_version", "identity", "video", "audio", "storage", "network", "gpio_map", "protocols", "limits"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "const": 1 },
+
+    "identity": {
+      "type": "object",
+      "required": ["model", "vendor", "hw", "platform"],
+      "additionalProperties": false,
+      "properties": {
+        "model":    { "type": "string", "minLength": 1, "maxLength": 32 },
+        "vendor":   { "type": "string", "minLength": 1, "maxLength": 32 },
+        "hw":       { "type": "string", "description": "硬件版本，如 A1" },
+        "platform": { "type": "string", "pattern": "^[a-z0-9_]+$", "description": "与 hal_ops_t.platform_id 一致，如 gk7205v200 / mock" },
+        "gb_manufacturer": { "type": "string", "description": "GB28181 DeviceInfo.Manufacturer，缺省取 vendor" },
+        "onvif_hardware_id": { "type": "string" }
+      }
+    },
+
+    "video": {
+      "type": "object",
+      "required": ["sensors", "lens", "channels", "isp", "snapshot"],
+      "additionalProperties": false,
+      "properties": {
+        "sensors": {
+          "type": "array", "minItems": 1, "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[a-z0-9]+$" },
+          "description": "允许的传感器白名单，运行期 probe_sensor 匹配其一"
+        },
+        "lens": {
+          "type": "object",
+          "required": ["type", "af", "zoom"],
+          "additionalProperties": false,
+          "properties": {
+            "type":   { "enum": ["fixed", "motorized"] },
+            "af":     { "type": "boolean" },
+            "zoom":   { "type": "boolean" },
+            "driver": { "type": "string", "description": "马达驱动插件名，type=motorized 时必填" }
+          },
+          "if":   { "properties": { "type": { "const": "motorized" } } },
+          "then": { "required": ["driver"] }
+        },
+        "channels": {
+          "type": "array", "minItems": 1, "maxItems": 3,
+          "items": {
+            "type": "object",
+            "required": ["ch", "name", "codecs", "max", "default"],
+            "additionalProperties": false,
+            "properties": {
+              "ch":     { "type": "integer", "minimum": 0, "maximum": 2 },
+              "name":   { "enum": ["main", "sub", "third"] },
+              "codecs": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "enum": ["h264", "h265", "mjpeg"] } },
+              "max":    { "$ref": "#/$defs/videoMode" },
+              "default": {
+                "allOf": [
+                  { "$ref": "#/$defs/videoMode" },
+                  { "type": "object", "required": ["codec", "kbps", "rc", "gop"],
+                    "properties": {
+                      "codec": { "enum": ["h264", "h265", "mjpeg"] },
+                      "kbps":  { "type": "integer", "minimum": 32, "maximum": 16384 },
+                      "rc":    { "enum": ["cbr", "vbr", "avbr", "fixqp"] },
+                      "gop":   { "type": "integer", "minimum": 1, "maximum": 300 }
+                    } }
+                ]
+              }
+            }
+          }
+        },
+        "isp": {
+          "type": "object",
+          "required": ["wdr", "hdr", "3dnr", "daynight"],
+          "additionalProperties": false,
+          "properties": {
+            "wdr":      { "type": "boolean" },
+            "hdr":      { "type": "boolean", "description": "传感器行交叠 HDR" },
+            "3dnr":     { "type": "boolean" },
+            "daynight": { "enum": ["none", "icr_auto", "icr_manual", "software"] },
+            "tuning":   { "type": "string", "description": "调优资产文件名，缺省为 isp_<sensor>_<platform>.bin" }
+          }
+        },
+        "snapshot": {
+          "type": "object",
+          "required": ["codec", "max"],
+          "additionalProperties": false,
+          "properties": {
+            "codec": { "const": "mjpeg" },
+            "max":   { "$ref": "#/$defs/size" }
+          }
+        }
+      }
+    },
+
+    "audio": {
+      "type": "object",
+      "required": ["in", "out", "codecs"],
+      "additionalProperties": false,
+      "properties": {
+        "in":     { "type": "array", "uniqueItems": true, "items": { "enum": ["mic", "line"] } },
+        "out":    { "type": "array", "uniqueItems": true, "items": { "enum": ["line", "speaker"] }, "description": "为空则对讲能力关闭" },
+        "codecs": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "enum": ["g711a", "g711u", "aac", "pcm"] } },
+        "aec":    { "type": "boolean", "default": false }
+      }
+    },
+
+    "ivs": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "engine":    { "enum": ["ive", "npu", "sw", "none"] },
+        "motion":    { "type": "boolean" },
+        "humanoid":  { "type": "boolean" },
+        "intrusion": { "type": "boolean" },
+        "linecross": { "type": "boolean" },
+        "tamper":    { "type": "boolean" },
+        "max_regions": { "type": "integer", "minimum": 1, "maximum": 8 }
+      },
+      "description": "缺省或 engine=none 表示无智能分析，hal_ops_t.ivs 应为 NULL"
+    },
+
+    "storage": {
+      "type": "object",
+      "required": ["tf"],
+      "additionalProperties": false,
+      "properties": {
+        "tf":       { "type": "boolean" },
+        "max_gb":   { "type": "integer", "minimum": 1 },
+        "fs":       { "type": "array", "uniqueItems": true, "items": { "enum": ["fat32", "exfat", "ext4"] } },
+        "segment_s": { "type": "integer", "minimum": 10, "maximum": 600, "default": 60, "description": "录像分段时长" },
+        "reserve_pct": { "type": "integer", "minimum": 1, "maximum": 20, "default": 5, "description": "循环覆盖触发的剩余空间百分比" }
+      }
+    },
+
+    "network": {
+      "type": "object",
+      "required": ["eth"],
+      "additionalProperties": false,
+      "properties": {
+        "eth": { "type": "boolean" },
+        "wifi": {
+          "type": "object",
+          "required": ["module", "bus", "bands", "security"],
+          "additionalProperties": false,
+          "properties": {
+            "module":     { "type": "string", "description": "模块型号，决定 BSP 驱动；TBD 表示未定" },
+            "bus":        { "enum": ["sdio", "usb"] },
+            "power_gpio": { "type": "integer", "minimum": -1, "description": "物理 GPIO 号，-1 表示无" },
+            "bands":      { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "enum": ["2.4g", "5g"] } },
+            "security":   { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "enum": ["open", "wpa2", "wpa3"] } },
+            "stack":      { "const": "nl80211+wpa_supplicant" }
+          }
+        }
+      }
+    },
+
+    "gpio_map": {
+      "type": "object",
+      "description": "逻辑引脚 → 物理 GPIO 号；未列出的逻辑引脚视为未映射（HAL 返回 ENOTSUP）",
+      "additionalProperties": false,
+      "properties": {
+        "ircut_a":      { "$ref": "#/$defs/gpio" },
+        "ircut_b":      { "$ref": "#/$defs/gpio" },
+        "ir_led":       { "$ref": "#/$defs/gpioPwm" },
+        "white_led":    { "$ref": "#/$defs/gpioPwm" },
+        "status_led":   { "$ref": "#/$defs/gpio" },
+        "reset_key":    { "$ref": "#/$defs/gpioIn" },
+        "alarm_in1":    { "$ref": "#/$defs/gpioIn" },
+        "alarm_in2":    { "$ref": "#/$defs/gpioIn" },
+        "alarm_out1":   { "$ref": "#/$defs/gpio" },
+        "alarm_out2":   { "$ref": "#/$defs/gpio" },
+        "light_sensor": { "oneOf": [ { "$ref": "#/$defs/gpioIn" }, { "type": "object", "required": ["adc"], "properties": { "adc": { "type": "integer", "minimum": 0 }, "night_below": { "type": "integer" }, "day_above": { "type": "integer" } } } ] },
+        "wifi_power":   { "$ref": "#/$defs/gpio" }
+      }
+    },
+
+    "protocols": {
+      "type": "object",
+      "required": ["idp", "rtsp", "onvif", "gb28181"],
+      "additionalProperties": false,
+      "properties": {
+        "idp": {
+          "type": "object", "required": ["enabled"], "additionalProperties": false,
+          "properties": {
+            "enabled":   { "type": "boolean" },
+            "broker":    { "type": "string", "pattern": "^mqtts://" },
+            "broker_alt": { "type": "array", "items": { "type": "string", "pattern": "^mqtts://" } },
+            "auth":      { "enum": ["cert", "psk"], "default": "cert" },
+            "keepalive_s": { "type": "integer", "minimum": 15, "maximum": 300, "default": 60 }
+          }
+        },
+        "rtsp": {
+          "type": "object", "required": ["enabled"], "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "port":    { "type": "integer", "minimum": 1, "maximum": 65535, "default": 554 },
+            "max_sessions": { "type": "integer", "minimum": 1, "default": 2 }
+          }
+        },
+        "onvif": {
+          "type": "object", "required": ["enabled"], "additionalProperties": false,
+          "properties": {
+            "enabled":  { "type": "boolean" },
+            "port":     { "type": "integer", "minimum": 1, "maximum": 65535, "default": 80 },
+            "profiles": { "type": "array", "items": { "enum": ["S", "T", "G"] }, "default": ["S"] },
+            "events":   { "enum": ["off", "on", "on_demand"], "default": "on_demand", "description": "on_demand：PullPoint 服务按需启动进程" },
+            "discovery": { "type": "boolean", "default": true }
+          }
+        },
+        "gb28181": {
+          "type": "object", "required": ["enabled"], "additionalProperties": false,
+          "properties": {
+            "enabled":   { "type": "boolean" },
+            "transport": { "enum": ["tcp", "udp"], "default": "tcp" },
+            "playback":  { "type": "boolean", "default": true, "description": "是否提供 RecordInfo/Playback（低内存平台可关）" },
+            "alarm":     { "type": "boolean", "default": true }
+          }
+        }
+      }
+    },
+
+    "limits": {
+      "type": "object",
+      "required": ["frame_bus_consumers", "rtsp_sessions", "playback_sessions", "mem_budget_mb"],
+      "additionalProperties": false,
+      "properties": {
+        "frame_bus_consumers": { "type": "integer", "minimum": 2, "maximum": 16 },
+        "rtsp_sessions":       { "type": "integer", "minimum": 1 },
+        "playback_sessions":   { "type": "integer", "minimum": 0 },
+        "mem_budget_mb":       { "type": "integer", "minimum": 16, "description": "业务进程 RSS 上限，超出触发降级策略" },
+        "cpu_budget_pct":      { "type": "integer", "minimum": 10, "maximum": 100, "default": 70 }
+      }
+    },
+
+    "security": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "hw_secure":              { "type": "boolean", "default": false },
+        "force_password_change":  { "type": "boolean", "default": true },
+        "telnet":                 { "type": "boolean", "default": false },
+        "ssh":                    { "type": "boolean", "default": false }
+      }
+    },
+
+    "ota": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "ab":           { "type": "boolean", "default": true },
+        "slot_size_mb": { "type": "integer", "minimum": 8 },
+        "confirm_timeout_s": { "type": "integer", "minimum": 30, "default": 60 }
+      }
+    }
+  },
+
+  "$defs": {
+    "size": {
+      "type": "object", "required": ["w", "h"], "additionalProperties": false,
+      "properties": { "w": { "type": "integer", "minimum": 64 }, "h": { "type": "integer", "minimum": 64 } }
+    },
+    "videoMode": {
+      "type": "object", "required": ["w", "h", "fps"],
+      "properties": {
+        "w":   { "type": "integer", "minimum": 64 },
+        "h":   { "type": "integer", "minimum": 64 },
+        "fps": { "type": "integer", "minimum": 1, "maximum": 120 }
+      }
+    },
+    "gpio":    { "type": "object", "required": ["pin"], "additionalProperties": false, "properties": { "pin": { "type": "integer", "minimum": 0 }, "active_low": { "type": "boolean", "default": false } } },
+    "gpioPwm": { "type": "object", "required": ["pin"], "additionalProperties": false, "properties": { "pin": { "type": "integer", "minimum": 0 }, "active_low": { "type": "boolean", "default": false }, "pwm": { "type": "boolean", "default": false }, "pwm_hz": { "type": "integer", "minimum": 100 } } },
+    "gpioIn":  { "type": "object", "required": ["pin"], "additionalProperties": false, "properties": { "pin": { "type": "integer", "minimum": 0 }, "active_low": { "type": "boolean", "default": true }, "debounce_ms": { "type": "integer", "minimum": 0, "default": 50 } } }
+  }
+}

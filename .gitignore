@@ -1,0 +1,32 @@
+# Dependencies
+node_modules/
+
+# Nuxt / Nitro build outputs
+.nuxt/
+.output/
+dist/
+
+# Logs
+*.log
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Firmware build artifacts
+firmware/build/
+firmware/build-gate/
+firmware/build-msvc/
+
+# Go
+*.exe
+*.test
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
