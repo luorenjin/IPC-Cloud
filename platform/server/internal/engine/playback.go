@@ -157,7 +157,7 @@ func (e *Engine) StartPlayback(userID, channelID string, start, end int64, speed
 	case "gb28181":
 		app = "rtp"
 		gbCh, _ := ch.Meta["gbStream"].(string)
-		stream = gbCh + "_pb_" + sessionID
+		stream = gbCh + "_pb_" + strings.TrimPrefix(sessionID, "pb_")
 	default:
 		return nil, errs.EGBRecordUnsup
 	}

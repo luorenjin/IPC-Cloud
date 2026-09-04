@@ -159,6 +159,30 @@ func FindChannelByStreamKey(app, stream string) (models.Channel, string, bool) {
 			stream, stream).Error == nil {
 			return ch, prof, true
 		}
+		// 设备端回放流：<gbStream>_pb_<sid>
+		if cut := strings.Index(stream, "_pb_"); cut > 0 {
+			base := stream[:cut]
+			if store.DB.First(&ch, "meta->>'gbStream' = ? OR meta->>'gbStreamSub' = ?",
+				base, base).Error == nil {
+				return ch, "main", true
+			}
+		}
+	case "record": // IDP 设备端回放：<DeviceID>_<ch>_pb_<sid>
+		if cut := strings.Index(stream, "_pb_"); cut > 0 {
+			base2 := stream[:cut] // <DeviceID>_<ch>
+			cut2 := strings.LastIndex(base2, "_")
+			if cut2 > 0 {
+				devID := base2[:cut2]
+				if idx, errI := strconv.Atoi(base2[cut2+1:]); errI == nil {
+					if store.DB.First(&ch, "device_id = ? AND idx = ?", devID, idx).Error == nil {
+						return ch, "main", true
+					}
+				}
+			}
+			if store.DB.First(&ch, "device_id = ?", base2).Error == nil {
+				return ch, "main", true
+			}
+		}
 	}
 	return ch, "", false
 }

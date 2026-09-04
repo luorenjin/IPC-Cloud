@@ -10,7 +10,8 @@ import (
 // NewUser 创建用户（Argon2id 哈希）。
 func NewUser(tenantID, username, password, name string) (*User, error) {
 	return &User{
-		TenantID: tenantID, Username: username,
+		ID:        "u_" + NewID(),
+		TenantID:  tenantID, Username: username,
 		PwdHash: crypto.HashPassword(password), Name: name, Status: "active",
 		CreatedAt: NowMilli(), UpdatedAt: NowMilli(),
 	}, nil
