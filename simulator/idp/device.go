@@ -379,6 +379,36 @@ func (d *Device) startPush(key, url, token string) error {
 			d.logf("push %s broken: %v", key, err)
 			return
 		}
+		// AAC 静音音频轨：真机推流通常带 AAC。纯视频 RTMP 流经 ZLM 转协议后
+		// metadata 声明 audiocodecid 却无 audio tag，播放器转封装管线会死等
+		// 音频初始化导致整流不出帧。
+		aacPkt := func(seq bool, raw []byte) []byte {
+			p := []byte{0xaf, 0x00} // AAC, seq header
+			if !seq {
+				p[1] = 0x01 // raw frame
+			}
+			return append(p, raw...)
+		}
+		if err := c.sendAudio(0, aacPkt(true, mediagen.AACSilenceASC)); err != nil {
+			d.logf("push %s broken: %v", key, err)
+			return
+		}
+		go func() {
+			var ts uint32
+			ticker := time.NewTicker(mediagen.AACSilenceFrameDurMs * time.Millisecond)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-stop:
+					return
+				case <-ticker.C:
+					if err := c.sendAudio(ts, aacPkt(false, mediagen.AACSilenceFrame)); err != nil {
+						return
+					}
+					ts += mediagen.AACSilenceFrameDurMs
+				}
+			}
+		}()
 		for {
 			select {
 			case <-stop:

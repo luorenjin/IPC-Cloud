@@ -6,6 +6,7 @@ export interface ApiError {
 }
 
 let refreshing: Promise<boolean> | null = null
+let redirecting = false
 
 export function useApi() {
   const token = () => useCookie('ipc_token', { maxAge: 60 * 60 * 2 })
@@ -42,10 +43,12 @@ export function useApi() {
     try {
       return await $fetch<T>('/api/v1' + url, { ...opts, headers, retry: 0 })
     } catch (e: any) {
-      if (e?.status === 401 || e?.response?.status === 401) {
+      if ((e?.status === 401 || e?.response?.status === 401) && !redirecting) {
         if (await doRefresh()) return request<T>(url, opts)
         if (import.meta.client) {
+          redirecting = true
           navigateTo('/login?redirect=' + encodeURIComponent(useRoute().fullPath))
+          setTimeout(() => { redirecting = false }, 3000)
         }
       }
       const body = e?.data || {}

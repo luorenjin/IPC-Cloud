@@ -29,6 +29,7 @@ export default defineNuxtConfig({
         }
       },
       '/api/v1/**': { proxy: `${apiOrigin}/api/v1/**` },
+      '/ws/v1/**': { proxy: `${apiOrigin}/ws/v1/**`, ws: true },
       '/hooks/zlm/**': { proxy: `${apiOrigin}/hooks/zlm/**` }
     },
     devProxy: {

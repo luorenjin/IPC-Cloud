@@ -194,7 +194,10 @@ function ptzZoom(step: number) {
             v-for="(cell, i) in cells" :key="i"
             class="cell" :class="{ active: i === selected }" @click="selected = i"
           >
-            <H265Player :ref="(el: any) => (players[i] = el)" :url="cell.url" muted />
+            <H265Player
+              :ref="(el: any) => (players[i] = el)" :url="cell.url" muted
+              @retry="cell.channel && playInto(cell, cell.channel)"
+            />
             <!-- 标题条：通道名 + 主/子码流切换 -->
             <div v-if="cell.channel" class="cell-bar">
               <span class="cell-name">

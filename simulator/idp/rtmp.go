@@ -109,6 +109,11 @@ func (c *rtmpClient) sendVideo(tsMs uint32, payload []byte) error {
 	return c.sendChunk(6, 9, tsMs, 0, payload)
 }
 
+// sendAudio 发一条音频消息（AAC raw，type 8，独立 csid 保持时间戳状态）。
+func (c *rtmpClient) sendAudio(tsMs uint32, payload []byte) error {
+	return c.sendChunk(4, 8, tsMs, 0, payload)
+}
+
 // sendChunk 发送一条消息（fmt0 首块 + fmt3 后续块）。
 func (c *rtmpClient) sendChunk(csid, mtype uint8, ts uint32, msid uint32, body []byte) error {
 	c.wmu.Lock()

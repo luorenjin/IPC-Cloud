@@ -105,10 +105,10 @@ func main() {
 	needRTSP := *mode == "all" || *mode == "onvif" || *mode == "rtsp"
 	if needRTSP {
 		srv := rtsp.New(fmt.Sprintf(":%d", *rtspPort),
-			&rtsp.Track{Path: "/onvif1", Source: src, Width: 640, Height: 360},
-			&rtsp.Track{Path: "/onvif2", Source: src, Width: 320, Height: 180},
-			&rtsp.Track{Path: "/live1", Source: src, Width: 640, Height: 360},
-			&rtsp.Track{Path: "/live2", Source: src, Width: 320, Height: 180},
+			&rtsp.Track{Path: "/onvif1", Source: src, Width: 1280, Height: 720},
+			&rtsp.Track{Path: "/onvif2", Source: src, Width: 1280, Height: 720},
+			&rtsp.Track{Path: "/live1", Source: src, Width: 1280, Height: 720},
+			&rtsp.Track{Path: "/live2", Source: src, Width: 1280, Height: 720},
 		)
 		srv.Advertise = advert // SDP Content-Base 需要可达 host，否则客户端 DESCRIBE 后即断开
 		go func() {
