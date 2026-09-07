@@ -862,7 +862,35 @@ void http_ws_tick(void)
             /* #8：http_ws_close 此前只是直接 conn_close，客户端侧表现为 TCP
              * 突断，浏览器报 1006 异常关闭而非 1000 正常关闭。复用收到 close
              * 帧时同一套写法——入队 close 帧 -> 尽力 http_ws_flush -> 若未被
-             * flush 顺带关闭则 conn_close，让对端能收到规范的关闭帧。 */
+             * flush 顺带关闭则 conn_close，让对端能收到规范的关闭帧。
+             *
+             * 但这条写法有一个接收侧 close 分支才成立、这里不成立的前提：
+             * 接收侧只可能在客户端已收全 101 之后才收得到帧（TCP 保序），
+             * 隐含 c->slen==c->soff；而 http_ws_tick 在事件循环每轮最前面
+             * 执行，早于本轮可写分支的 flush，如果调用方在 http_ws_upgrade
+             * 返回后、101 尚未发送完毕前就调用 http_ws_close（例如"升级后
+             * 立刻做一次业务校验，不通过就关"），会在 c->sbuf 还整条压着
+             * 未发的 101 时命中这里：把 2 字节 close 帧发出去后
+             * conn_close 又把 sbuf 连同那条 101 一起释放，101 彻底丢失，
+             * 客户端只收到孤立的 close 帧字节加 TCP 断开（fix round 3，
+             * 修复本身引入的问题，根因是上一轮指令未点出这条不可迁移的
+             * 前提）。已升级连接的 c->sbuf 按构造只可能装着这条尚未发完的
+             * 101——升级后 conn_handle_readable 把所有读取都导向
+             * http_ws_on_readable，再不会经过 HTTP 解析/分发，没有任何
+             * 其他路径会往 sbuf 写——所以 c->slen > c->soff 在这里就是
+             * "握手响应还没发完"的精确判据：此时对端根本不认为 WS 已建立，
+             * 发 close 帧既会和未发完的 101 交错、语义上也没有意义，直接
+             * 断开才是诚实的表达（服务端决定不建立这条连接）。
+             *
+             * 这里不能改成"等 c->slen==c->soff 的某次 tick 再关"：
+             * close_requested 是 if/else-if 链的第一分支，一旦置位，
+             * 心跳超时分支就再也走不到；若对端彻底停止接收导致 sbuf
+             * 永不排空，那条连接会永远关不掉。直接在本次 tick 内以
+             * "不发 close 帧"的方式了结，按构造不可能挂死。 */
+            if (c->slen > c->soff) {
+                conn_close(c);
+                continue;
+            }
             ws_send_control_frame(c, 0x8, NULL, 0);
             http_ws_flush(c);
             if (c->used) conn_close(c);

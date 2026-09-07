@@ -114,7 +114,10 @@ hal_err_t http_ws_send_text(http_conn_t *c, const char *text);
 /** 注册上行文本消息回调 */
 hal_err_t http_ws_on_text(http_conn_t *c, http_ws_text_fn fn, void *user);
 
-/** 主动关闭 WS 连接 */
+/** 主动关闭 WS 连接。调用后连接会在下一次事件循环 tick 内关闭（不保证
+ *  立即发生）；若此时握手的 101 响应尚未发送完毕，连接将直接断开而不
+ *  发送 close 帧（对端还未收到升级成功确认，不会把这条连接当作已建立
+ *  的 WS 连接，发 close 帧没有意义）。 */
 hal_err_t http_ws_close(http_conn_t *c);
 
 /** 当前队列已用字节（测试与背压统计用） */
