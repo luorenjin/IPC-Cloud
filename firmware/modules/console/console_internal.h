@@ -128,9 +128,15 @@ hal_err_t console_auth_test_dispatch(const http_req_t *req, const char *client_i
 #endif
 
 /* ---- REST ---- */
-/** 登记 video.* 通道相关配置校验规则，上下界与编解码枚举由 profile 的
- *  channels[].max 与 codecs_mask 动态生成；image./record./net. 等通用键
- *  已由 core/config.c 的 cfg_init 统一登记，本函数不重复。 */
+/**
+ * 供 console_api_init 调用、也供测试直接调用。当前不注册任何规则：
+ * video.* 通道规则（上下界/枚举取自 profile 的 channels[].max 与
+ * codecs_mask）与 image./record./net. 等通用键均已由 core/config.c 的
+ * cfg_init（其内部 seed_channel + register_common_rules）统一登记，
+ * 早于本函数被调用；重复登记只会成为永远不被 rule_for 命中的死代码，
+ * 详见 console_api.c 里本函数的实现注释。仅为未来出现 console 独有、
+ * core 未覆盖的键预留入口。
+ */
 hal_err_t console_api_register_rules(void);
 /** 生成能力清单 JSON，供前端按能力渲染菜单 */
 hal_err_t console_caps_json(char *buf, size_t cap);

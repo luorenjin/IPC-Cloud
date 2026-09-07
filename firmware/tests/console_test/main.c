@@ -709,6 +709,37 @@ static void test_config_rules(void)
     n = cfg_apply_json("{\"video.1.sub.codec\":\"h265\"}", rejects, 4);
     CHECK(n == 1, "子码流拒绝 h265");
 
+    /*
+     * 上面几条断言在"规则完全缺失/被遮蔽"时也会得出相同结论（例如
+     * kbps=99999 无论是被 core 的 32~16384 还是 console 曾经想登记的
+     * 128~4096 拒绝，结果都一样是 rejected=1），对"上下界真的来自 profile"
+     * 零证明力。这里换一种能真正证伪的写法：直接取 profile 当前的
+     * channels[].max_w，边界值本身应被接受、边界值+1 应被拒绝。换一款
+     * max_w 不同的型号，这条断言依然成立；反过来，如果对应的规则完全
+     * 没被注册（unknown_key）或上界被写死成与 profile 无关的数，这里会
+     * 真的变红——而不是像上面几条那样巧合地保持绿色。
+     */
+    {
+        const profile_channel_t *main_ch = profile_channel_by_name("main");
+        CHECK(main_ch != NULL, "profile 含 main 通道");
+        if (main_ch) {
+            char key[CFG_KEY_MAX], body_ok[96], body_bad[96];
+            int64_t max_w = (int64_t)main_ch->max_w;
+
+            snprintf(key, sizeof(key), "video.%d.%s.w", main_ch->ch, main_ch->name);
+
+            snprintf(body_ok, sizeof(body_ok), "{\"%s\":%lld}", key, (long long)max_w);
+            n = cfg_apply_json(body_ok, rejects, 4);
+            CHECK(n == 0, "上界值（profile.max_w=%lld）应被接受，rejected=%d", (long long)max_w, n);
+
+            snprintf(body_bad, sizeof(body_bad), "{\"%s\":%lld}", key, (long long)(max_w + 1));
+            n = cfg_apply_json(body_bad, rejects, 4);
+            CHECK(n == 1, "上界值+1（%lld）应被拒绝——证明上界确实跟随 profile 而非巧合通过，rejected=%d",
+                  (long long)(max_w + 1), n);
+            CHECK(strcmp(rejects[0].key, key) == 0, "拒绝的键名正确：%s", rejects[0].key);
+        }
+    }
+
     cfg_deinit();
     remove("console_test_cfg_rules.json");
 }

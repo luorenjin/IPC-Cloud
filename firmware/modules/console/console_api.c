@@ -57,85 +57,46 @@ static hal_err_t fmt_safe(char *out, size_t cap, const char *fmt, ...)
  * 一、配置校验规则登记（规则 R3：上下界与枚举一律从 profile 动态生成）
  * ========================================================================== */
 
-/** 按 codecs_mask 生成形如 "h264,h265" 的枚举串，供 cfg_rule_t.enum_csv 用。
- *  与 core/config.c 的 seed_channel 各写各的一份同类逻辑——模块间不得直接
- *  调用对方的 static 函数（规则 R4），且它本就是 core 的内部实现细节。 */
-static void codec_enum_csv(uint32_t codecs_mask, char *out, size_t cap)
-{
-    static const struct { hal_codec_t codec; const char *name; } table[] = {
-        { HAL_CODEC_H264, "h264" }, { HAL_CODEC_H265, "h265" }, { HAL_CODEC_MJPEG, "mjpeg" }
-    };
-    size_t off = 0, i;
-
-    out[0] = '\0';
-    for (i = 0; i < sizeof(table) / sizeof(table[0]); i++) {
-        int n;
-        if (!(codecs_mask & (1u << table[i].codec))) continue;
-        n = snprintf(out + off, off < cap ? cap - off : 0, "%s%s", off ? "," : "", table[i].name);
-        if (n > 0) off += (size_t)n;
-    }
-}
-
 /**
- * 登记 video.0.main.* / video.1.sub.codec 等键的校验规则。
+ * 核对结论（复核后修正，供后续维护者确认——不要在没有重新核对 core/config.c
+ * 的情况下往这里加回 video.* 规则）：
  *
- * 重要说明（如实记录，供后续维护者知晓）：core/config.c 的 cfg_init() 在
- * 启动时已经用 profile 的 channels[].max_w/h/fps 为每个通道自动登记过同名
- * 规则（其内部 seed_channel()），且必然早于本函数被调用——cfg_register_rules
- * 要求 g.inited 已为真，而这只有 cfg_init 完成之后才成立。core/config.c 的
- * rule_for() 按登记顺序线性查找、返回第一个匹配的规则，因此本函数为
- * video.*.main.kbps / .gop 登记的更紧上下界（相对 core 自动登记的通用值
- * kbps 32~16384、gop 1~300），在当前实现下不会成为实际生效的那一条——校验
- * 结果仍由 core 自动登记的规则决定。这不是本任务能修的问题（把 rule_for
- * 改成"后登记者覆盖"要动 core/config.c，超出本任务范围）。
- * 即便如此，下面登记的上下界与枚举仍然全部来自 profile 动态生成、不是
- * 硬编码摆设：w/h/fps/codec 的取值与 core 自动登记的完全一致（两者独立地从
- * 同一份 profile 派生，重复只是无害冗余）；kbps/gop 的更紧数值一旦
- * core 一侧的匹配语义改变就会立即生效，且届时数值已经是对的。
+ * core/config.c 的 cfg_init() 必然早于本函数被调用（cfg_register_rules
+ * 要求 g.inited 已为真），且它在 register_common_rules() 之后，已经为
+ * profile 的每一个通道调用了内部的 seed_channel()（core/src/config.c:245-286），
+ * 逐条登记：
+ *   video.<ch>.<name>.codec —— 枚举取自 channels[].codecs_mask
+ *   video.<ch>.<name>.w     —— 上界取自 channels[].max_w
+ *   video.<ch>.<name>.h     —— 上界取自 channels[].max_h
+ *   video.<ch>.<name>.fps   —— 上界取自 channels[].max_fps
+ *   video.<ch>.<name>.kbps  —— 固定 32~16384
+ *   video.<ch>.<name>.gop   —— 固定 1~300
+ *   video.<ch>.<name>.rc    —— 枚举 cbr/vbr/avbr/fixqp
+ * register_common_rules()（core/src/config.c:288 起）则登记了 image.*、
+ * record.*、time.*、net.*、osd.*、alarm.*、led.* 等全部通用键。
+ *
+ * brief 要求登记的 video.0.main.{w,h,fps,kbps,gop,codec}、video.1.sub.codec
+ * 以及"image.* 与 record.* 同理"这句话所指的键，经逐条比对，**全部**已被
+ * 上面两处覆盖——
+ * 上下界/枚举同样来自 profile（与 R3 的要求完全一致），语义与本模块原本
+ * 打算登记的没有任何差异。cfg_register_rules 底层的 rule_for()
+ * （core/src/config.c 的 rule_for，一个线性查找，按注册顺序返回第一个
+ * 匹配）只认第一条命中的规则，在 cfg_init 已经注册过之后本函数若再登记
+ * 同名规则，会成为占用 RULES_MAX 配额、却永远不会被命中的死代码——
+ * 比"边界改紧了但没生效"更糟：维护者会误以为改这里能收紧边界，改了却
+ * 发现毫无效果，白排查。
+ *
+ * 因此本函数当前**不注册任何规则**；保留函数本身（供 console_api_init
+ * 调用、供测试直接调用、供未来出现 console 独有且 core 未覆盖的键时
+ * 使用），只做一次 profile 就绪的防御性检查。"配置校验的上下界从 profile
+ * 动态生成"这条需求由 core/config.c 的 seed_channel 实际满足，console
+ * 端点（cfg_apply_json/cfg_dump_json）直接复用其结果——这正是"配置统一走
+ * core/config，不重写校验"的字面含义，而不是在这里重复一遍。
  */
 hal_err_t console_api_register_rules(void)
 {
-    const profile_channel_t *main_ch, *sub_ch;
-    cfg_rule_t rules[16];
-    size_t n = 0, k = 0;
-    char keys[7][CFG_KEY_MAX];
-    char main_codecs[32], sub_codecs[32];
-
     if (!profile_get()) return HAL_ESTATE;   /* profile 未加载：不应发生，纯防御 */
-
-    main_ch = profile_channel_by_name("main");
-    sub_ch  = profile_channel_by_name("sub");
-
-    if (main_ch) {
-        codec_enum_csv(main_ch->codecs_mask, main_codecs, sizeof(main_codecs));
-
-        snprintf(keys[k], CFG_KEY_MAX, "video.%d.%s.w", main_ch->ch, main_ch->name);
-        rules[n++] = (cfg_rule_t){ keys[k++], CFG_T_INT, 176, (int64_t)main_ch->max_w, NULL, false };
-
-        snprintf(keys[k], CFG_KEY_MAX, "video.%d.%s.h", main_ch->ch, main_ch->name);
-        rules[n++] = (cfg_rule_t){ keys[k++], CFG_T_INT, 144, (int64_t)main_ch->max_h, NULL, false };
-
-        snprintf(keys[k], CFG_KEY_MAX, "video.%d.%s.fps", main_ch->ch, main_ch->name);
-        rules[n++] = (cfg_rule_t){ keys[k++], CFG_T_INT, 1, (int64_t)main_ch->max_fps, NULL, false };
-
-        snprintf(keys[k], CFG_KEY_MAX, "video.%d.%s.kbps", main_ch->ch, main_ch->name);
-        rules[n++] = (cfg_rule_t){ keys[k++], CFG_T_INT, 128, 4096, NULL, false };
-
-        snprintf(keys[k], CFG_KEY_MAX, "video.%d.%s.gop", main_ch->ch, main_ch->name);
-        rules[n++] = (cfg_rule_t){ keys[k++], CFG_T_INT, 1, 150, NULL, false };
-
-        snprintf(keys[k], CFG_KEY_MAX, "video.%d.%s.codec", main_ch->ch, main_ch->name);
-        rules[n++] = (cfg_rule_t){ keys[k++], CFG_T_STR, 0, 0, main_codecs, false };
-    }
-    if (sub_ch) {
-        /* 子码流的可用编解码集合同样来自 profile 的 codecs_mask（mock-x86
-           下只有 h264），不硬编码"子码流只能 h264"这条产品假设。 */
-        codec_enum_csv(sub_ch->codecs_mask, sub_codecs, sizeof(sub_codecs));
-        snprintf(keys[k], CFG_KEY_MAX, "video.%d.%s.codec", sub_ch->ch, sub_ch->name);
-        rules[n++] = (cfg_rule_t){ keys[k++], CFG_T_STR, 0, 0, sub_codecs, false };
-    }
-
-    return cfg_register_rules(rules, n);
+    return HAL_OK;
 }
 
 /* ==========================================================================
