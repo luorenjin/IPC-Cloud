@@ -198,6 +198,45 @@ hal_err_t console_ap_ssid(const char *serial, char *buf, size_t cap);
  * 均返回 HAL_EINVAL；失败时 out 会被清零，不留半截结果。
  */
 hal_err_t console_ap_psk_derive(const char *code, char *out, size_t cap);
+
+/** console_net_ap_decide 的返回值：工作线程应该对 AP 采取的动作。 */
+typedef enum {
+    CONSOLE_NET_AP_ACTION_NONE = 0,   /**< 保持现状，什么都不做 */
+    CONSOLE_NET_AP_ACTION_START = 1,  /**< 应该开 AP（当前不是 AP 模式） */
+    CONSOLE_NET_AP_ACTION_STOP = 2    /**< 应该关 AP（当前是 AP 模式） */
+} console_net_ap_action_t;
+
+/**
+ * AP 决策纯函数（评审 fix round 2）：把"现在该不该重新判定、宽限期是否
+ * 已过、判定结果是什么"三件事里的后两件抽出来，不碰 HAL、不碰全局状态，
+ * 方便用构造时间戳做 KAT——原来这部分逻辑整段焊在 net_apply_ap_decision
+ * 里，只有工作线程真正运行起来才会被执行到，而测试套件从不启动工作线程。
+ *
+ * 内部先调 console_should_start_ap(eth_up, wifi_cfgd, wifi_up) 得到"要不要
+ * 有 AP"的原始判断，再叠加宽限期覆盖：原始判断为真、且原因具体是"eth down
+ * 且 wifi 未连上且 wifi 已配置"时，才会在 *grace_started_us 记录的宽限期
+ * （NET_WIFI_ASSOC_GRACE_MS，工作线程侧的时间常量）内把判断压成假——给
+ * supplicant 关联的时间，对应 brief"已配但未连上（超时后）"的措辞。
+ * 最终把"要不要有 AP"与 cur_is_ap（调用前的实际模式是否为 AP）比较，
+ * 得到应该采取的动作。
+ *
+ * `*grace_started_us`（IN/OUT）：0 表示当前不在宽限期内；本函数在"从其他
+ * 状态进入宽限期条件"时把它设为 now_us（只设一次，同一状态里的后续调用
+ * 不会重置计时起点），在"宽限期条件不再成立"（已经 up，或从未配置过）时
+ * 把它清零。调用方（工作线程）只需要持有这个状态、原样传引用，不需要
+ * 理解其含义。
+ */
+console_net_ap_action_t console_net_ap_decide(bool eth_up, bool wifi_cfgd, bool wifi_up,
+                                              bool cur_is_ap, uint64_t now_us,
+                                              uint64_t *grace_started_us);
+/**
+ * 周期复查纯函数：距离上次判定（last_check_us）是否已经过了
+ * recheck_interval_ms 毫秒，到了才需要重新调用 console_net_ap_decide。
+ * 只是把 net_worker_thread 里原本内联的时间戳算术单独拿出来，方便对
+ * 边界值（恰好等于/差一点点）做 KAT。
+ */
+bool console_net_ap_recheck_due(uint64_t last_check_us, uint64_t now_us, uint32_t recheck_interval_ms);
+
 /** 是否为手机系统的 Captive Portal 探测路径 */
 bool console_is_captive_probe(const char *path);
 /** 当前网络模式："ap" / "sta" / "eth" */

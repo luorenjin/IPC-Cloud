@@ -1046,6 +1046,105 @@ static void test_ap_psk_derive(void)
     CHECK(console_ap_psk_derive("ABC123", psk, 0) == HAL_EINVAL, "零容量输出缓冲被拒");
 }
 
+/**
+ * 评审 fix round 2：Important 1 的周期复查/宽限期逻辑原来整段焊在
+ * net_apply_ap_decision 里，只有工作线程真正跑起来才会被执行到，而测试
+ * 套件从不启动工作线程，等于零覆盖。把"宽限期是否已过、判定结果是什么"
+ * 抽成不碰 HAL/全局状态的纯函数 console_net_ap_decide 后，用构造时间戳
+ * 直接做 KAT。
+ */
+static void test_net_ap_decide_grace_period(void)
+{
+    uint64_t grace;
+    console_net_ap_action_t action;
+
+    SECTION("AP 决策纯函数：宽限期状态机（console_net_ap_decide）");
+
+    /* 以太网 up：不管其余条件、也不管宽限期是否正在计时，直接给出"不该有
+       AP"的结论，且宽限期计时被清零（伪造一个"正在计时"的状态验证会被
+       清零，而不是巧合本来就是 0）。 */
+    grace = 12345;
+    action = console_net_ap_decide(true, true, false, false, 1000000, &grace);
+    CHECK(action == CONSOLE_NET_AP_ACTION_NONE, "eth up 且当前不是 AP：无动作，实际=%d", (int)action);
+    CHECK(grace == 0, "eth up 时宽限期计时被清零");
+
+    grace = 12345;
+    action = console_net_ap_decide(true, true, false, true, 1000000, &grace);
+    CHECK(action == CONSOLE_NET_AP_ACTION_STOP, "eth up 且当前是 AP：应该关闭，实际=%d", (int)action);
+    CHECK(grace == 0, "eth up 时宽限期计时被清零");
+
+    /* WiFi 已连上：同理不该有 AP */
+    grace = 999;
+    action = console_net_ap_decide(false, true, true, true, 1000000, &grace);
+    CHECK(action == CONSOLE_NET_AP_ACTION_STOP, "wifi 已连上且当前是 AP：应该关闭");
+    CHECK(grace == 0, "wifi 已连上时宽限期计时被清零");
+
+    /* 从未配置过 WiFi：没有什么好等的，没有宽限期，立即开 */
+    grace = 0;
+    action = console_net_ap_decide(false, false, false, false, 1000000, &grace);
+    CHECK(action == CONSOLE_NET_AP_ACTION_START, "从未配置 WiFi：立即开 AP，没有宽限期");
+    CHECK(grace == 0, "从未配置过时不应该进入宽限期状态");
+
+    /* 已配置但未连上：宽限期生效，首次进入时记录计时起点 */
+    grace = 0;
+    action = console_net_ap_decide(false, true, false, false, 1000000, &grace);
+    CHECK(action == CONSOLE_NET_AP_ACTION_NONE, "已配置但未连上：宽限期内不开 AP");
+    CHECK(grace == 1000000, "宽限期计时起点精确等于首次进入该状态的时刻，实际=%llu",
+          (unsigned long long)grace);
+
+    /* 宽限期内再次调用（差 1 微秒到 15 秒）：计时起点不变，仍不开——
+       若实现没有正确记住起点、每次调用都重新起算，这条会一直是 NONE 测不出
+       区别；真正的证伪点在下面"恰好到期"那一条。 */
+    action = console_net_ap_decide(false, true, false, false, 1000000 + 14999999, &grace);
+    CHECK(action == CONSOLE_NET_AP_ACTION_NONE, "宽限期即将结束但还没到：仍不开 AP");
+    CHECK(grace == 1000000, "宽限期计时起点不会被后续调用重置，实际=%llu", (unsigned long long)grace);
+
+    /* 宽限期恰好结束（15 秒整）：开 AP——如果边界判断写成 <= 而不是 <
+       （或反过来该开的时候没开），这条会直接证伪 */
+    action = console_net_ap_decide(false, true, false, false, 1000000 + 15000000, &grace);
+    CHECK(action == CONSOLE_NET_AP_ACTION_START, "宽限期恰好结束（15 秒整）：开 AP");
+
+    /* 宽限期结束后，如果已经是 AP 模式，不应该重复"开"（返回 NONE） */
+    action = console_net_ap_decide(false, true, false, true, 1000000 + 20000000, &grace);
+    CHECK(action == CONSOLE_NET_AP_ACTION_NONE, "已经是 AP 模式时不重复开启");
+
+    /* 宽限期重新计时：先进入宽限期 → wifi 连上重置 → 断开后重新进入，
+       计时起点必须是新的时刻，不是旧的——证明"离开状态即重置"真的生效，
+       而不是巧合还没到期。 */
+    {
+        uint64_t g2 = 0;
+        action = console_net_ap_decide(false, true, false, false, 5000000, &g2);
+        CHECK(action == CONSOLE_NET_AP_ACTION_NONE, "第一次进入宽限期");
+        CHECK(g2 == 5000000, "计时起点为 5000000");
+
+        action = console_net_ap_decide(false, true, true, false, 6000000, &g2);
+        CHECK(action == CONSOLE_NET_AP_ACTION_NONE, "wifi 连上，不该开 AP（本来就没在 AP 模式）");
+        CHECK(g2 == 0, "wifi 连上后宽限期计时被重置为 0");
+
+        action = console_net_ap_decide(false, true, false, false, 7000000, &g2);
+        CHECK(action == CONSOLE_NET_AP_ACTION_NONE, "重新进入宽限期");
+        CHECK(g2 == 7000000,
+              "重新进入宽限期后计时起点是新的时刻(7000000)而不是旧的(5000000)——"
+              "证明 wifi 连上那次真的重置了计时，而不是巧合还没到期，实际=%llu",
+              (unsigned long long)g2);
+    }
+
+    /* 非法输入：grace_started_us 为 NULL 时安全返回 NONE，不崩溃 */
+    CHECK(console_net_ap_decide(false, true, false, false, 1000000, NULL) == CONSOLE_NET_AP_ACTION_NONE,
+          "grace_started_us 为 NULL 时安全返回 NONE");
+}
+
+static void test_net_ap_recheck_due(void)
+{
+    SECTION("AP 周期复查纯函数：边界值（console_net_ap_recheck_due）");
+    CHECK(console_net_ap_recheck_due(1000000, 1000000 + 4999999, 5000) == false,
+          "差一点点没到 5 秒：还不到复查时间");
+    CHECK(console_net_ap_recheck_due(1000000, 1000000 + 5000000, 5000) == true,
+          "恰好 5 秒：到复查时间");
+    CHECK(console_net_ap_recheck_due(1000000, 1000000 + 5000001, 5000) == true,
+          "超过 5 秒：到复查时间");
+}
+
 static void test_captive_portal(void)
 {
     SECTION("Captive Portal 探测");
@@ -1776,6 +1875,8 @@ int main(void)
     test_net_ap_decision();
     test_net_ap_ssid();
     test_ap_psk_derive();
+    test_net_ap_decide_grace_period();
+    test_net_ap_recheck_due();
     test_captive_portal();
     test_dhcp_parse_discover();
     test_dhcp_parse_request_with_options();

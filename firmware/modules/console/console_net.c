@@ -499,21 +499,55 @@ hal_err_t console_ap_psk_derive(const char *code, char *out, size_t cap)
 }
 
 /**
- * 按当前链路状态决定要不要开/关 AP。调用点：工作线程启动时、周期复查时
- * （评审 Important 1，见 net_worker_thread 的 NET_AP_RECHECK_MS）、配网
- * 失败回落时。
+ * 评审 fix round 2：AP 决策/宽限期的判定逻辑抽成纯函数（声明与完整规则
+ * 说明见 console_internal.h），不碰 HAL、不碰全局状态，可以用构造时间戳
+ * 直接做 KAT——这部分原来整段焊在 net_apply_ap_decision 里，只有工作线程
+ * 真正跑起来才会被执行到，而测试套件从不启动工作线程，等于零覆盖。
+ */
+console_net_ap_action_t console_net_ap_decide(bool eth_up, bool wifi_cfgd, bool wifi_up,
+                                              bool cur_is_ap, uint64_t now_us,
+                                              uint64_t *grace_started_us)
+{
+    bool want_ap;
+
+    if (!grace_started_us) return CONSOLE_NET_AP_ACTION_NONE;
+    want_ap = console_should_start_ap(eth_up, wifi_cfgd, wifi_up);
+
+    if (want_ap && !eth_up && !wifi_up && wifi_cfgd) {
+        if (*grace_started_us == 0) *grace_started_us = now_us;
+        if (now_us - *grace_started_us < (uint64_t)NET_WIFI_ASSOC_GRACE_MS * 1000ull)
+            want_ap = false;   /* 宽限期内先不开 AP，等下一次周期复查 */
+    } else {
+        *grace_started_us = 0;   /* 条件不再成立（已经 up，或从未配置过），重置计时 */
+    }
+
+    if (want_ap && !cur_is_ap) return CONSOLE_NET_AP_ACTION_START;
+    if (!want_ap && cur_is_ap) return CONSOLE_NET_AP_ACTION_STOP;
+    return CONSOLE_NET_AP_ACTION_NONE;
+}
+
+bool console_net_ap_recheck_due(uint64_t last_check_us, uint64_t now_us, uint32_t recheck_interval_ms)
+{
+    return now_us - last_check_us >= (uint64_t)recheck_interval_ms * 1000ull;
+}
+
+/**
+ * 按当前链路状态执行 AP 决策（取事实 → 调纯函数 console_net_ap_decide →
+ * 执行动作）。调用点：工作线程启动时、周期复查时（评审 Important 1，见
+ * net_worker_thread 的 NET_AP_RECHECK_MS）、配网失败回落时。
  *
- * 只会被工作线程调用（启动一次 + 循环内周期调用 + net_do_connect 失败路径
- * 调用，三处都在同一个线程上），`s_wifi_grace_started_us` 因此不需要加锁。
+ * 只会被工作线程调用（三处调用点都在同一个线程上），`s_wifi_grace_
+ * started_us` 因此不需要加锁——它是 console_net_ap_decide 的 IN/OUT
+ * 状态，调用方（这里）只负责持有并原样传引用。
  */
 static uint64_t s_wifi_grace_started_us;   /* 0 表示当前不在"已配置但未连上"的宽限期内 */
 
 static void net_apply_ap_decision(void)
 {
     hal_netif_status_t st;
-    bool eth_up = false, wifi_up = false, wifi_cfgd, want_ap;
+    bool eth_up = false, wifi_up = false, wifi_cfgd;
     net_mode_t cur;
-    uint64_t now;
+    console_net_ap_action_t action;
 
     if (hal_has(HAL_MOD_NET) && hal()->net->get_status &&
         hal()->net->get_status(HAL_NETIF_ETH, &st) == HAL_OK)
@@ -527,30 +561,10 @@ static void net_apply_ap_decision(void)
     cur = s_netst.mode;
     os_mutex_unlock(s_netst_mu);
 
-    want_ap = console_should_start_ap(eth_up, wifi_cfgd, wifi_up);
+    action = console_net_ap_decide(eth_up, wifi_cfgd, wifi_up, cur == NET_MODE_AP,
+                                   os_monotonic_us(), &s_wifi_grace_started_us);
 
-    /* 宽限期（评审 Important 1）：已配置 WiFi 但尚未连上时，给 supplicant
-       一段时间完成关联，避免开机瞬间（还没来得及连）就误判成"连不上"而
-       开 AP——brief 原文的限定词就是"已配但未连上（超时后）"。只有
-       "eth down 且 wifi 未连上且 wifi 已配置"这一具体原因导致 want_ap 为
-       真时才启用宽限期；eth up 或 wifi 已连上时 console_should_start_ap
-       已经返回 false，走不到这里；wifi 从未配置过时没有什么好等的，
-       直接开 AP。
-       计时起点只在"从其他状态进入这个状态"时设一次（下面 else 分支里
-       条件不成立就清零），并不会在这个状态里被后续调用重置——这意味着
-       net_do_connect 失败路径里"等 60 秒后重开 AP"调用本函数时，如果设备
-       从等待关联开始就一直处于这个状态（没有中途 up 过），宽限期早就在
-       更早的周期复查里过期了，不会在 60 秒之外再叠加一段宽限期延迟。 */
-    now = os_monotonic_us();
-    if (want_ap && !eth_up && !wifi_up && wifi_cfgd) {
-        if (s_wifi_grace_started_us == 0) s_wifi_grace_started_us = now;
-        if (now - s_wifi_grace_started_us < (uint64_t)NET_WIFI_ASSOC_GRACE_MS * 1000ull)
-            want_ap = false;   /* 宽限期内先不开 AP，等下一次周期复查 */
-    } else {
-        s_wifi_grace_started_us = 0;   /* 条件不再成立（已经 up，或从未配置过），重置计时 */
-    }
-
-    if (want_ap && cur != NET_MODE_AP) {
+    if (action == CONSOLE_NET_AP_ACTION_START) {
         char serial[HAL_NAME_MAX] = "";
         char ssid[HAL_SSID_MAX];
         char code_buf[HAL_PSK_MAX];
@@ -612,7 +626,7 @@ static void net_apply_ap_decision(void)
             os_mutex_unlock(s_netst_mu);
         }
         secure_wipe_local(psk, sizeof(psk));
-    } else if (!want_ap && cur == NET_MODE_AP) {
+    } else if (action == CONSOLE_NET_AP_ACTION_STOP) {
         if (hal_has(HAL_MOD_NET) && hal()->net->wifi_ap_stop) hal()->net->wifi_ap_stop();
         os_mutex_lock(s_netst_mu);
         s_netst.mode = NET_MODE_ETH;
@@ -762,11 +776,13 @@ static void net_worker_thread(void *arg)
         /* 评审 Important 1：AP 决策不能只在启动时算一次——开机时 WiFi 还没
            关联就误开 AP 之后，如果没有周期复查，mode 会永远停在 "ap"，即使
            supplicant 随后真的把 WiFi 连上了；反过来运行中插/拔网线也需要
-           能被感知到。每隔 NET_AP_RECHECK_MS 重新跑一次判定；do_connect 走
-           完之后也顺带重新计时——net_do_connect 自己已经在失败路径里调过
-           一次 net_apply_ap_decision，这里再核一次不会重复开/关，是幂等的。 */
+           能被感知到。每隔 NET_AP_RECHECK_MS 重新跑一次判定（是否到点交给
+           纯函数 console_net_ap_recheck_due 判断，评审 fix round 2）；
+           do_connect 走完之后也顺带重新计时——net_do_connect 自己已经在
+           失败路径里调过一次 net_apply_ap_decision，这里再核一次不会重复
+           开/关，是幂等的。 */
         now = os_monotonic_us();
-        if (now - last_ap_check_us >= (uint64_t)NET_AP_RECHECK_MS * 1000ull) {
+        if (console_net_ap_recheck_due(last_ap_check_us, now, NET_AP_RECHECK_MS)) {
             net_apply_ap_decision();
             last_ap_check_us = now;
         }
@@ -827,8 +843,8 @@ typedef int net_sock_t;
 
 #define DHCP_SERVER_PORT 67
 #define DHCP_CLIENT_PORT 68
-#define NET_AP_GATEWAY_U32          0xC0A8A901u   /* 192.168.169.1，与 NET_AP_GATEWAY_IP 保持一致 */
-#define NET_AP_SUBNET_BROADCAST_U32 (NET_AP_GATEWAY_U32 | 0x000000FFu)   /* 192.168.169.255 */
+#define NET_AP_GATEWAY_U32      0xC0A8A901u   /* 192.168.169.1，与 NET_AP_GATEWAY_IP 保持一致 */
+#define NET_DHCP_BROADCAST_FLAG 0x8000u        /* RFC 2131 §2：flags 字段最高位是广播标志 */
 
 static net_sock_t s_dhcp_sock = NET_SOCK_INVALID;
 static console_dhcp_lease_table_t s_dhcp_leases;
@@ -837,33 +853,65 @@ static bool s_wsa_started;
 #endif
 
 /**
- * 评审 Important 4：socket 原来 bind 到 INADDR_ANY:67、应答又广播到
- * 255.255.255.255——不区分接口，会接收/应答来自任意网卡（包括有线上联口）
- * 的 DHCP 流量，在客户 LAN 上变成流氓 DHCP 服务器。改为：
- *   1) bind 到 AP 网段自身地址（NET_AP_GATEWAY_U32），而非 INADDR_ANY；
- *   2) 应答目的地址改为 AP 网段的定向广播（NET_AP_SUBNET_BROADCAST_U32=
- *      192.168.169.255），不用全局受限广播 255.255.255.255——后者会经
- *      内核路由表在所有具备广播能力的接口上外泄，前者只会经拥有该网段
- *      路由的接口（AP 自身）送出。
+ * 把 DHCP socket 收敛到 AP 接口——评审 fix round 2，纠正 fix round 1 的
+ * 错误做法。
  *
- * **已知的可移植性注意事项（本机无法验证，未来在真实硬件上必须确认）**：
- * 多数 BSD 派生的 socket 实现里，UDP socket 若 bind 到一个具体的单播地址
- * 而非 INADDR_ANY，只会收到目的地址精确匹配该地址的报文——而 DHCPDISCOVER
- * 按 RFC 2131 通常以目的地址 255.255.255.255（受限广播）发出，客户端此时
- * 还不知道网关地址。如果这一行为在目标平台上成立，bind 到具体地址会导致
- * 收不到 DISCOVER，DHCP 服务名存实亡。真正正确、可移植的做法是绑定到
- * INADDR_ANY 但把套接字绑定到具体网络接口（Linux 上是 SO_BINDTODEVICE，
- * 需要 AP 接口名——目前 hal_net.h 的 wifi_ap_start 不回传接口名，取不到），
- * 或用 recvmsg + IP_PKTINFO 按到达接口过滤。这两种做法都比现在复杂得多，
- * 且都无法在 x86 + mock 上验证效果。当前先按评审的要求实现"bind 到具体
- * 地址"这一步；**在真实硬件上联调这一层时，第一件事就是确认 DISCOVER
- * 是否还能被收到**，收不到就需要换成上述按接口过滤的方案。无论 bind 方式
- * 如何，"应答不经全局广播外泄到其他接口"这条改动都是纯收益、不用回退。
+ * **fix round 1 错在哪、为什么改回来（后来者不要再把 bind 改回具体地址）**：
+ * fix round 1 把 bind 地址从 INADDR_ANY 改成了 AP 网段自身地址
+ * （192.168.169.1），意图是不让 socket 收到/应答来自有线上联口的流量。
+ * 意图没错，**实现手段错了**：DHCP 客户端发 DISCOVER 时源地址是 0.0.0.0、
+ * 目的地址是 255.255.255.255——它此刻还不知道网关是谁。Linux/BSD 的 UDP
+ * socket 一旦 bind 到具体单播地址，只会收到目的地址精确匹配该地址的
+ * 报文；DISCOVER 的目的地址是广播地址，根本不匹配，socket 一个 DISCOVER
+ * 都收不到。等于说 fix round 1 的修法会让 DHCP 彻底不可用——比要修的
+ * "流氓 DHCP" 风险更糟，因为它直接让配网失效。
+ *
+ * **正确的做法：安全目标不变，手段从"按地址限制"换成"按接口限制"**：
+ *   - **收得到靠 bind 到 INADDR_ANY**——这是能收到广播 DISCOVER 的前提，
+ *     绝不能再改回具体地址；
+ *   - **管得住靠 SO_BINDTODEVICE 把 socket 限制到 AP 接口**（Linux；接口名
+ *     取自 `hal_netif_status_t.ifname`，见下面 net_dhcp_socket_ensure_open
+ *     里的 get_status 调用），不支持 SO_BINDTODEVICE 的平台（含本机的
+ *     Windows）退化为只剩下面这一道防线；
+ *   - **"仅 AP 模式才轮询"这道闸门作为始终存在的第二道防线**
+ *     （net_dhcp_poll_if_ap）——配合 Important 1 的周期复查，AP 在网线
+ *     插上时会真正关闭，暴露窗口已经很小。
+ * 这三者职责不同、不能互相替代：第一条决定"能不能工作"，后两条决定
+ * "工作范围有多大"；fix round 1 把本该属于后两类的手段用在了第一类的
+ * 位置上，导致收不到包。
  */
+#ifdef SO_BINDTODEVICE
+static void net_dhcp_bind_to_ap_interface(const char *ifname)
+{
+    if (!ifname || !ifname[0]) {
+        LOGW(MOD, "DHCP：拿不到 AP 接口名，SO_BINDTODEVICE 跳过（仅靠 AP 模式闸门收敛范围）");
+        return;
+    }
+    if (setsockopt(s_dhcp_sock, SOL_SOCKET, SO_BINDTODEVICE, ifname,
+                   (socklen_t)strlen(ifname)) != 0)
+        LOGW(MOD, "DHCP：SO_BINDTODEVICE 绑定接口 %s 失败（仅靠 AP 模式闸门收敛范围）", ifname);
+}
+#else
+/* 非 Linux 平台（含本机的 Windows）没有与 SO_BINDTODEVICE 直接对应的
+   "按接口限制 UDP socket" 手段（Windows 需要 IP_UNICAST_IF 等完全不同的
+   API，属另一次改动范围，这里不代为实现）。刻意留一个带日志的空实现，
+   而不是用 #ifdef 让整段调用静默消失——这样任何在这类平台上接入真实
+   AP 硬件的人都能在日志里一眼看到"这里本该做接口限制但当前平台没做"，
+   而不是无声无息地缺一层防护。这些平台上，"仅 AP 模式才轮询"是唯一的
+   收敛手段。 */
+static void net_dhcp_bind_to_ap_interface(const char *ifname)
+{
+    (void)ifname;
+    LOGW(MOD, "DHCP：当前平台没有等价于 SO_BINDTODEVICE 的接口限制手段，"
+              "仅靠 AP 模式闸门收敛范围（见 net_dhcp_poll_if_ap）");
+}
+#endif
+
 static void net_dhcp_socket_ensure_open(void)
 {
     struct sockaddr_in addr;
     int on = 1;
+    char ifname[HAL_IFNAME_MAX] = "";
 
     if (s_dhcp_sock != NET_SOCK_INVALID) return;
 #ifdef _WIN32
@@ -884,9 +932,19 @@ static void net_dhcp_socket_ensure_open(void)
     setsockopt(s_dhcp_sock, SOL_SOCKET, SO_REUSEADDR, (const char *)&on, sizeof(on));
     setsockopt(s_dhcp_sock, SOL_SOCKET, SO_BROADCAST, (const char *)&on, sizeof(on));
 
+    /* 接口限制（管得住）：取 AP 所在的 WiFi 接口名。mock 平台
+       get_status(WIFI) 恒 ENOTSUP，ifname 会保持空串，net_dhcp_bind_to_ap_
+       interface 对此有专门的兜底日志，不会崩。 */
+    if (hal_has(HAL_MOD_NET) && hal()->net->get_status) {
+        hal_netif_status_t st;
+        if (hal()->net->get_status(HAL_NETIF_WIFI, &st) == HAL_OK && st.ifname[0])
+            snprintf(ifname, sizeof(ifname), "%s", st.ifname);
+    }
+    net_dhcp_bind_to_ap_interface(ifname[0] ? ifname : NULL);
+
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(NET_AP_GATEWAY_U32);   /* 绑定到 AP 网段自身，而非 INADDR_ANY */
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);   /* 必须是 INADDR_ANY（收得到），见函数组头部注释 */
     addr.sin_port = htons(DHCP_SERVER_PORT);
     if (bind(s_dhcp_sock, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
         LOGE(MOD, "DHCP：绑定 UDP 67 端口失败（需要管理员/root 权限，或端口已被占用）");
@@ -926,6 +984,7 @@ static void net_dhcp_poll_once(uint32_t timeout_ms)
     size_t out_len = 0;
     uint8_t reply_type = 0;
     struct sockaddr_in to;
+    uint32_t dest_ip;
 
     if (s_dhcp_sock == NET_SOCK_INVALID) return;
 
@@ -953,13 +1012,23 @@ static void net_dhcp_poll_once(uint32_t timeout_ms)
                                  reply, sizeof(reply), &out_len) != HAL_OK)
         return;
 
-    /* 客户端此刻多半还没有 IP：广播到 68 端口而不是精确单播（比按 flags
-       广播位区分单播/广播更简单可靠）；用 AP 网段定向广播而不是全局受限
-       广播，见 net_dhcp_socket_ensure_open 顶部注释——避免应答外泄到其他
-       接口。 */
+    /* RFC 2131 §4.1：本实现场景下 giaddr（无中继）与 ciaddr（客户端还没有
+       地址）恒为 0，此时按请求方的广播标志决定去向——置位就广播到
+       255.255.255.255（客户端此刻唯一确定能收到的地址；不用 AP 网段定向
+       广播，客户端尚未配置该网段地址时内核可能直接丢弃）；未置位则单播到
+       刚分配的地址。收敛"别外泄到其他接口"不靠改这个目的地址，靠上面
+       net_dhcp_socket_ensure_open 的接口绑定 + AP 模式闸门。
+       **已知的实践限制**：客户端此时尚未在网卡上配置 your_ip，单播路径要
+       指望本机内核正常 ARP 解析出对方 MAC——而对方通常也还没准备好应答
+       这个地址的 ARP，真实场景下大概率超时、包直接丢失；真正可靠的单播
+       需要绕过 ARP、直接向 chaddr 发送链路层帧（原始 socket），超出本极简
+       实现的范围。实际影响很小：主流 DHCP 客户端实现（Windows/Linux/
+       Android/iOS）的 DISCOVER 基本都会置位广播标志，走的正是明确可靠的
+       广播路径。 */
+    dest_ip = (msg.flags & NET_DHCP_BROADCAST_FLAG) ? INADDR_BROADCAST : your_ip;
     memset(&to, 0, sizeof(to));
     to.sin_family = AF_INET;
-    to.sin_addr.s_addr = htonl(NET_AP_SUBNET_BROADCAST_U32);
+    to.sin_addr.s_addr = htonl(dest_ip);
     to.sin_port = htons(DHCP_CLIENT_PORT);
     sendto(s_dhcp_sock, (const char *)reply, (int)out_len, 0, (struct sockaddr *)&to, sizeof(to));
 }
