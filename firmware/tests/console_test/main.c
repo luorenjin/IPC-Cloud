@@ -8,8 +8,10 @@
 #include "modules/console/console_internal.h"
 #include "core/config.h"
 #include "core/profile.h"
+#include "core/json.h"
 #include "hal/hal.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static int g_pass, g_fail;
@@ -33,9 +35,355 @@ static void test_err_mapping(void)
     CHECK(console_http_status(HAL_ETIMEOUT) == 500, "ETIMEOUT→500");
 }
 
+/* PBKDF2-SHA256 已知答案测试（RFC 6070 风格，用 SHA-256 变体） */
+static void test_pbkdf2_kat(void)
+{
+    uint8_t out[32];
+    /* P="password", S="salt", c=1 的 PBKDF2-HMAC-SHA256 前 8 字节 */
+    static const uint8_t expect[8] = { 0x12,0x0f,0xb6,0xcf,0xfc,0xf8,0xb3,0x2c };
+
+    SECTION("PBKDF2 已知答案");
+    CHECK(console_pbkdf2_sha256("password", 8, (const uint8_t*)"salt", 4, 1, out, 32) == HAL_OK,
+          "pbkdf2 返回 OK");
+    CHECK(memcmp(out, expect, 8) == 0, "PBKDF2(password,salt,1) 前 8 字节匹配 RFC 向量");
+}
+
+static void test_auth_flow(void)
+{
+    char salt_hex[64], nonce[64], proof[128];
+    hal_err_t e;
+
+    SECTION("鉴权流程");
+    /* 首次：以出厂验证码派生凭据 */
+    CHECK(console_auth_seed("ABCD1234") == HAL_OK, "以出厂验证码播种");
+
+    /* challenge 返回稳定的 salt 与一次性 nonce */
+    CHECK(console_auth_challenge("admin", salt_hex, sizeof(salt_hex), nonce, sizeof(nonce)) == HAL_OK,
+          "取 challenge");
+    CHECK(strlen(nonce) >= 16, "nonce 长度足够");
+
+    /* 正确口令应通过 */
+    CHECK(console_auth_make_proof("ABCD1234", salt_hex, nonce, proof, sizeof(proof)) == HAL_OK,
+          "客户端侧计算 proof");
+    CHECK(console_auth_verify("admin", nonce, proof) == HAL_OK, "正确 proof 验证通过");
+
+    /* 同一 nonce 不可重放 */
+    e = console_auth_verify("admin", nonce, proof);
+    CHECK(e != HAL_OK, "nonce 重放必须被拒绝（返回 %d）", (int)e);
+
+    /* 错误口令 */
+    CHECK(console_auth_challenge("admin", salt_hex, sizeof(salt_hex), nonce, sizeof(nonce)) == HAL_OK,
+          "重新取 challenge");
+    CHECK(console_auth_make_proof("WRONGPWD", salt_hex, nonce, proof, sizeof(proof)) == HAL_OK,
+          "以错误口令算 proof");
+    CHECK(console_auth_verify("admin", nonce, proof) == HAL_EPERM_, "错误口令被拒");
+}
+
+static void test_auth_lockout(void)
+{
+    char salt_hex[64], nonce[64], proof[128];
+    int i;
+    hal_err_t last = HAL_OK;
+
+    SECTION("暴力破解锁定");
+    console_auth_reset_lockout();   /* 测试桩：清空计数 */
+
+    /* 连续 5 次失败后应锁定 */
+    for (i = 0; i < 6; i++) {
+        console_auth_challenge("admin", salt_hex, sizeof(salt_hex), nonce, sizeof(nonce));
+        console_auth_make_proof("BADPASSWORD", salt_hex, nonce, proof, sizeof(proof));
+        last = console_auth_verify_from("admin", nonce, proof, "192.168.1.50");
+    }
+    CHECK(last == HAL_EBUSY, "连续失败后锁定该 IP（返回 %d）", (int)last);
+
+    /* 另一 IP 不受影响 */
+    console_auth_challenge("admin", salt_hex, sizeof(salt_hex), nonce, sizeof(nonce));
+    console_auth_make_proof("ABCD1234", salt_hex, nonce, proof, sizeof(proof));
+    CHECK(console_auth_verify_from("admin", nonce, proof, "192.168.1.51") == HAL_OK,
+          "锁定按 IP 隔离，其他 IP 正常");
+}
+
+static void test_auth_user_enum(void)
+{
+    char s1[64], n1[64], s2[64], n2[64], s3[64], n3[64];
+
+    SECTION("防用户名枚举");
+    CHECK(console_auth_challenge("nosuchuser", s1, sizeof(s1), n1, sizeof(n1)) == HAL_OK,
+          "不存在的用户也返回 challenge");
+    CHECK(console_auth_challenge("nosuchuser", s2, sizeof(s2), n2, sizeof(n2)) == HAL_OK, "再取一次");
+    CHECK(strcmp(s1, s2) == 0, "同一不存在用户的 salt 必须稳定（否则可据此枚举）");
+    CHECK(console_auth_challenge("otheruser", s3, sizeof(s3), n3, sizeof(n3)) == HAL_OK, "另一用户");
+    CHECK(strcmp(s1, s3) != 0, "不同用户名派生不同 salt");
+}
+
+static void test_must_change_password(void)
+{
+    SECTION("首次强制改密");
+    console_auth_seed("ABCD1234");
+    CHECK(console_auth_must_change() == true, "出厂状态需强制改密");
+    CHECK(console_auth_set_password("ABCD1234", "NewPass@123") == HAL_OK, "改密成功");
+    CHECK(console_auth_must_change() == false, "改密后解除");
+    /* 旧口令失效 */
+    {
+        char salt_hex[64], nonce[64], proof[128];
+        console_auth_challenge("admin", salt_hex, sizeof(salt_hex), nonce, sizeof(nonce));
+        console_auth_make_proof("ABCD1234", salt_hex, nonce, proof, sizeof(proof));
+        CHECK(console_auth_verify("admin", nonce, proof) == HAL_EPERM_, "旧口令改密后失效");
+    }
+}
+
+/* ========================================================================== */
+/* 以下为端点层与会话门禁用例（brief 的五个用例只覆盖鉴权原语，不覆盖 HTTP 面）    */
+/* ========================================================================== */
+
+/** 组装一个不含真实连接的请求（conn 为 NULL，来源 IP 因此按“未知”计入锁定桶） */
+static void req_make(http_req_t *req, const char *method, const char *path,
+                     const char *body, const char *cookie)
+{
+    memset(req, 0, sizeof(*req));
+    snprintf(req->method, sizeof(req->method), "%s", method);
+    snprintf(req->path, sizeof(req->path), "%s", path);
+    req->body = body;
+    req->body_len = body ? strlen(body) : 0;
+    if (cookie) {
+        req->headers[0].name = "Cookie";
+        req->headers[0].value = cookie;
+        req->header_count = 1;
+    }
+}
+
+/** 从响应体里取一个字符串字段；不存在或超长返回 false */
+static bool body_field(const char *body, const char *key, char *out, size_t cap)
+{
+    json_t *j = json_parse(body, 0, NULL, 0);
+    const char *v;
+    bool ok = false;
+    if (!j) return false;
+    v = json_string(json_get(j, key), NULL);
+    if (v && strlen(v) < cap) { memcpy(out, v, strlen(v) + 1); ok = true; }
+    json_free(j);
+    return ok;
+}
+
+static bool body_flag(const char *body, const char *key, bool def)
+{
+    json_t *j = json_parse(body, 0, NULL, 0);
+    bool v;
+    if (!j) return def;
+    v = json_bool(json_get(j, key), def);
+    json_free(j);
+    return v;
+}
+
+/** 把 Set-Cookie 值（"token=xxx; HttpOnly; ..."）截成可回传的 Cookie 头 */
+static void cookie_from_set_cookie(const char *set_cookie, char *out, size_t cap)
+{
+    const char *semi = strchr(set_cookie, ';');
+    size_t n = semi ? (size_t)(semi - set_cookie) : strlen(set_cookie);
+    if (n >= cap) n = cap - 1;
+    memcpy(out, set_cookie, n);
+    out[n] = 0;
+}
+
+/** 走一遍 challenge→login，成功时把可回传的 Cookie 写入 cookie_out */
+static hal_err_t do_login(const char *user, const char *pwd, char *cookie_out, size_t cap,
+                          bool *must_change_out)
+{
+    char body[512], set_cookie[256], req_body[512];
+    char salt_hex[80], nonce[80], proof[160];
+    http_req_t req;
+    hal_err_t rc;
+
+    snprintf(req_body, sizeof(req_body), "{\"user\":\"%s\"}", user);
+    req_make(&req, "POST", "/api/v1/auth/challenge", req_body, NULL);
+    rc = console_auth_test_dispatch(&req, body, sizeof(body), set_cookie, sizeof(set_cookie));
+    if (rc != HAL_OK) return rc;
+    if (!body_field(body, "salt", salt_hex, sizeof(salt_hex))) return HAL_ECORRUPT;
+    if (!body_field(body, "nonce", nonce, sizeof(nonce))) return HAL_ECORRUPT;
+
+    rc = console_auth_make_proof(pwd, salt_hex, nonce, proof, sizeof(proof));
+    if (rc != HAL_OK) return rc;
+
+    snprintf(req_body, sizeof(req_body), "{\"user\":\"%s\",\"nonce\":\"%s\",\"proof\":\"%s\"}",
+             user, nonce, proof);
+    req_make(&req, "POST", "/api/v1/auth/login", req_body, NULL);
+    rc = console_auth_test_dispatch(&req, body, sizeof(body), set_cookie, sizeof(set_cookie));
+    if (rc != HAL_OK) return rc;
+    if (must_change_out) *must_change_out = body_flag(body, "must_change_password", true);
+    if (strstr(set_cookie, "HttpOnly") == NULL || strstr(set_cookie, "SameSite=Strict") == NULL)
+        return HAL_ECORRUPT;
+    cookie_from_set_cookie(set_cookie, cookie_out, cap);
+    return HAL_OK;
+}
+
+static void test_auth_endpoints(void)
+{
+    char body[512], set_cookie[256], cookie[128], req_body[512];
+    char salt_hex[80], nonce[80], proof[160];
+    http_req_t req;
+    bool must_change = false;
+
+    SECTION("鉴权端点");
+    console_auth_reset_lockout();
+    CHECK(console_auth_init() == HAL_OK, "console_auth_init 注册 /api/v1/auth/ 路由");
+    CHECK(http_route_match("/api/v1/auth/login") != NULL, "登录路径可命中路由");
+    CHECK(http_route_match("/api/v1/auth/challenge") != NULL, "挑战路径可命中路由");
+
+    CHECK(console_auth_seed("ABCD1234") == HAL_OK, "重新播种（回到出厂强制改密态）");
+
+    /* 未知子路径 → 404 语义；非 POST → 400 语义 */
+    req_make(&req, "POST", "/api/v1/auth/bogus", "{}", NULL);
+    CHECK(console_auth_test_dispatch(&req, body, sizeof(body), set_cookie, sizeof(set_cookie))
+          == HAL_ENODEV, "未知子路径返回 ENODEV(404)");
+    req_make(&req, "GET", "/api/v1/auth/login", NULL, NULL);
+    CHECK(console_auth_test_dispatch(&req, body, sizeof(body), set_cookie, sizeof(set_cookie))
+          == HAL_EINVAL, "非 POST 方法被拒");
+
+    /* 畸形请求体 */
+    req_make(&req, "POST", "/api/v1/auth/challenge", "not-json", NULL);
+    CHECK(console_auth_test_dispatch(&req, body, sizeof(body), set_cookie, sizeof(set_cookie))
+          == HAL_EINVAL, "畸形 JSON 被拒");
+    req_make(&req, "POST", "/api/v1/auth/challenge", "{}", NULL);
+    CHECK(console_auth_test_dispatch(&req, body, sizeof(body), set_cookie, sizeof(set_cookie))
+          == HAL_EINVAL, "缺 user 字段被拒");
+
+    /* 完整登录 */
+    CHECK(do_login("admin", "ABCD1234", cookie, sizeof(cookie), &must_change) == HAL_OK, "登录成功");
+    CHECK(must_change == true, "登录响应带 must_change_password=true");
+    CHECK(strstr(cookie, "token=") == cookie, "Cookie 形如 token=...");
+
+    /* 会话门禁：must_change 为真时业务端点 403、豁免路径放行 */
+    req_make(&req, "GET", "/api/v1/config", NULL, NULL);
+    CHECK(console_auth_check(&req) == HAL_EUNAUTH_, "无 Cookie → 未登录");
+    req_make(&req, "GET", "/api/v1/config", NULL, "token=deadbeefdeadbeef");
+    CHECK(console_auth_check(&req) == HAL_EUNAUTH_, "伪造 token → 未登录");
+    req_make(&req, "GET", "/api/v1/config", NULL, cookie);
+    CHECK(console_auth_check(&req) == HAL_EPERM_, "未改密时业务端点 403");
+    req_make(&req, "GET", "/api/v1/system/info", NULL, cookie);
+    CHECK(console_auth_check(&req) == HAL_OK, "system/info 豁免强制改密");
+    req_make(&req, "POST", "/api/v1/auth/password", NULL, cookie);
+    CHECK(console_auth_check(&req) == HAL_OK, "auth/* 豁免强制改密");
+
+    /* 改密端点：清 must_change、踢掉全部会话、下发失效 Cookie */
+    snprintf(req_body, sizeof(req_body), "{\"old\":\"ABCD1234\",\"new\":\"short\"}");
+    req_make(&req, "POST", "/api/v1/auth/password", req_body, cookie);
+    CHECK(console_auth_test_dispatch(&req, body, sizeof(body), set_cookie, sizeof(set_cookie))
+          == HAL_EINVAL, "新口令过短被拒");
+    snprintf(req_body, sizeof(req_body), "{\"old\":\"WRONGPWD\",\"new\":\"NewPass@123\"}");
+    req_make(&req, "POST", "/api/v1/auth/password", req_body, cookie);
+    CHECK(console_auth_test_dispatch(&req, body, sizeof(body), set_cookie, sizeof(set_cookie))
+          == HAL_EPERM_, "旧口令不符被拒");
+    snprintf(req_body, sizeof(req_body), "{\"old\":\"ABCD1234\",\"new\":\"NewPass@123\"}");
+    req_make(&req, "POST", "/api/v1/auth/password", req_body, cookie);
+    CHECK(console_auth_test_dispatch(&req, body, sizeof(body), set_cookie, sizeof(set_cookie))
+          == HAL_OK, "改密成功");
+    CHECK(strstr(set_cookie, "Max-Age=0") != NULL, "改密后下发失效 Cookie");
+    CHECK(console_auth_must_change() == false, "改密后解除强制改密");
+    req_make(&req, "GET", "/api/v1/config", NULL, cookie);
+    CHECK(console_auth_check(&req) == HAL_EUNAUTH_, "改密后旧会话失效");
+
+    /* 改密后用新口令重新登录，业务端点放行 */
+    CHECK(do_login("admin", "NewPass@123", cookie, sizeof(cookie), &must_change) == HAL_OK,
+          "以新口令登录");
+    CHECK(must_change == false, "登录响应 must_change_password=false");
+    req_make(&req, "GET", "/api/v1/config", NULL, cookie);
+    CHECK(console_auth_check(&req) == HAL_OK, "改密后业务端点放行");
+
+    /* 重放：同一 nonce 第二次登录必须失败 */
+    snprintf(req_body, sizeof(req_body), "{\"user\":\"admin\"}");
+    req_make(&req, "POST", "/api/v1/auth/challenge", req_body, NULL);
+    console_auth_test_dispatch(&req, body, sizeof(body), set_cookie, sizeof(set_cookie));
+    CHECK(body_field(body, "salt", salt_hex, sizeof(salt_hex)), "challenge 响应带 salt");
+    CHECK(body_field(body, "nonce", nonce, sizeof(nonce)), "challenge 响应带 nonce");
+    console_auth_make_proof("NewPass@123", salt_hex, nonce, proof, sizeof(proof));
+    snprintf(req_body, sizeof(req_body), "{\"user\":\"admin\",\"nonce\":\"%s\",\"proof\":\"%s\"}",
+             nonce, proof);
+    req_make(&req, "POST", "/api/v1/auth/login", req_body, NULL);
+    CHECK(console_auth_test_dispatch(&req, body, sizeof(body), set_cookie, sizeof(set_cookie))
+          == HAL_OK, "首次使用该 nonce 登录成功");
+    req_make(&req, "POST", "/api/v1/auth/login", req_body, NULL);
+    CHECK(console_auth_test_dispatch(&req, body, sizeof(body), set_cookie, sizeof(set_cookie))
+          == HAL_EPERM_, "同一 nonce 重放被拒");
+
+    /* 注销：需登录，且注销后会话立即失效 */
+    req_make(&req, "POST", "/api/v1/auth/logout", NULL, NULL);
+    CHECK(console_auth_test_dispatch(&req, body, sizeof(body), set_cookie, sizeof(set_cookie))
+          == HAL_EUNAUTH_, "未登录不能注销");
+    req_make(&req, "POST", "/api/v1/auth/logout", NULL, cookie);
+    CHECK(console_auth_test_dispatch(&req, body, sizeof(body), set_cookie, sizeof(set_cookie))
+          == HAL_OK, "注销成功");
+    CHECK(strstr(set_cookie, "Max-Age=0") != NULL, "注销下发失效 Cookie");
+    req_make(&req, "GET", "/api/v1/config", NULL, cookie);
+    CHECK(console_auth_check(&req) == HAL_EUNAUTH_, "注销后会话失效");
+}
+
+static void test_cred_not_in_config(void)
+{
+    char salt_hex[80], nonce[80];
+    char *dump;
+    const size_t cap = 64 * 1024;
+
+    SECTION("凭据不得进入配置导出");
+    CHECK(cfg_init(NULL, "console_test_cfg.json") == HAL_OK, "配置中心就绪");
+    CHECK(console_auth_seed("ABCD1234") == HAL_OK, "播种凭据");
+    CHECK(console_auth_challenge("admin", salt_hex, sizeof(salt_hex), nonce, sizeof(nonce)) == HAL_OK,
+          "取到公开的 salt");
+    dump = (char *)malloc(cap);
+    CHECK(dump != NULL, "分配导出缓冲");
+    if (dump) {
+        CHECK(cfg_dump_json(dump, cap) == HAL_OK, "导出全部配置");
+        CHECK(strstr(dump, "localUser.key") == NULL, "导出不含 localUser.key");
+        CHECK(strstr(dump, "localUser.salt") == NULL, "导出不含 localUser.salt");
+        CHECK(strstr(dump, "localUser.iter") == NULL, "导出不含 localUser.iter");
+        CHECK(strstr(dump, salt_hex) == NULL, "导出不含盐值本身");
+        free(dump);
+    }
+    cfg_deinit();
+    remove("console_test_cfg.json");
+}
+
+static void test_cred_fallback_store(void)
+{
+    char salt_hex[80], nonce[80], proof[160];
+
+    SECTION("无 hal_crypto 平台的软存储兜底");
+    console_auth_reset_lockout();
+    CHECK(hal_deinit() == HAL_OK, "卸载 HAL，模拟平台不提供 crypto 模块");
+    CHECK(hal_has(HAL_MOD_CRYPTO) == false, "crypto 能力不可用");
+
+    CHECK(console_auth_seed("FALLBK99") == HAL_OK, "凭据落到软存储文件");
+    console_auth_test_reload();  /* 丢弃内存缓存，强制从存储读回 */
+    CHECK(console_auth_challenge("admin", salt_hex, sizeof(salt_hex), nonce, sizeof(nonce)) == HAL_OK,
+          "从软存储读回后可取 challenge");
+    CHECK(console_auth_make_proof("FALLBK99", salt_hex, nonce, proof, sizeof(proof)) == HAL_OK,
+          "算 proof");
+    CHECK(console_auth_verify("admin", nonce, proof) == HAL_OK, "软存储凭据校验通过");
+
+    remove(CONSOLE_CRED_FILE);
+    CHECK(hal_init(profile_raw_json()) == HAL_OK, "恢复 HAL");
+}
+
 int main(void)
 {
+    if (profile_load("profiles/mock-x86.json") != HAL_OK) {
+        printf("  FAIL 无法加载 profiles/mock-x86.json（工作目录应为 firmware/）\n");
+        return 1;
+    }
+    if (hal_init(profile_raw_json()) != HAL_OK) {
+        printf("  FAIL hal_init 失败\n");
+        return 1;
+    }
+
     test_err_mapping();
+    test_pbkdf2_kat();
+    test_auth_flow();
+    test_auth_lockout();
+    test_auth_user_enum();
+    test_must_change_password();
+    test_auth_endpoints();
+    test_cred_not_in_config();
+    test_cred_fallback_store();
+
     printf("RESULT: console pass=%d fail=%d\n", g_pass, g_fail);
     return g_fail;
 }

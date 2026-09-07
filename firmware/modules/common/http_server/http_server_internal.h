@@ -36,9 +36,13 @@ extern "C" {
 
 struct http_ws_state; /* 完整定义与全部字段留在 http_ws.c 内部，本头不关心其布局 */
 
+/** 对端地址字符串缓冲：足够容纳 IPv6 文本形式（INET6_ADDRSTRLEN=46，含 NUL） */
+#define CONN_PEER_IP_MAX 46
+
 struct http_conn {
     sock_t fd;
     int    used;       /**< 是否被占用（1=占用） */
+    char   peer_ip[CONN_PEER_IP_MAX]; /**< accept 时记录的对端地址，只读；取不到时为空串 */
     char  *rbuf;        /**< 接收缓冲，容量 CONN_BUF_MAX，accept 时分配、关闭时释放 */
     size_t rlen;        /**< rbuf 内已接收但尚未解析完的字节数 */
     char  *sbuf;        /**< 发送队列缓冲，realloc 增长，全部发送完毕后回收 */

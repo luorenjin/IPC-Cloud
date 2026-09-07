@@ -71,6 +71,14 @@ hal_err_t http_route(const char *prefix, http_handler_fn fn, void *user);
 /** 查询某路径命中的前缀（测试用）；无匹配返回 NULL */
 const char *http_route_match(const char *path);
 
+/**
+ * 取该连接的对端地址（accept 时记录的点分十进制 / IPv6 文本形式）。
+ * 只读、不拥有，生存期同连接。c 为 NULL 或地址不可得时返回 NULL。
+ * 供 handler 做按来源 IP 的限流/锁定；刻意不解析 X-Forwarded-For——
+ * 设备直连局域网，采信该头等于让攻击者自选计数桶。
+ */
+const char *http_conn_peer_ip(const http_conn_t *c);
+
 hal_err_t http_server_start(uint16_t port);
 hal_err_t http_server_stop(void);
 

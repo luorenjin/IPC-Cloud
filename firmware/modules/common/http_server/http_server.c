@@ -27,7 +27,11 @@
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
+#include <ws2tcpip.h>   /* inet_ntop / sockaddr_storage */
 #define CLOSESOCK(f) closesocket(f)
+/* accept 第三参：Windows 是 int*，POSIX 是 socklen_t*。用自有别名而非直接
+   typedef socklen_t，避免与各 Windows 工具链自带的定义撞名。 */
+typedef int ipc_socklen_t;
 #else
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -37,6 +41,7 @@
 #include <errno.h>
 #include <sys/epoll.h>
 #define CLOSESOCK(f) close(f)
+typedef socklen_t ipc_socklen_t;
 #endif
 
 #define MOD "http_server"
@@ -253,12 +258,37 @@ void conn_update_poll_interest(http_conn_t *c)
 }
 #endif
 
+/** 把 accept 拿到的对端地址格式化进 out（失败则置空串，不视为错误） */
+static void format_peer_ip(const struct sockaddr_storage *ss, char *out, size_t cap)
+{
+    out[0] = '\0';
+    if (ss->ss_family == AF_INET) {
+        const struct sockaddr_in *v4 = (const struct sockaddr_in *)(const void *)ss;
+        if (!inet_ntop(AF_INET, (const void *)&v4->sin_addr, out, cap)) out[0] = '\0';
+    } else if (ss->ss_family == AF_INET6) {
+        const struct sockaddr_in6 *v6 = (const struct sockaddr_in6 *)(const void *)ss;
+        if (!inet_ntop(AF_INET6, (const void *)&v6->sin6_addr, out, cap)) out[0] = '\0';
+    }
+}
+
+const char *http_conn_peer_ip(const http_conn_t *c)
+{
+    if (!c || !c->peer_ip[0]) return NULL;
+    return c->peer_ip;
+}
+
 static void accept_new_conn(void)
 {
     for (;;) {
-        sock_t fd = accept(s_srv.listen_fd, NULL, NULL);
+        struct sockaddr_storage peer;
+        ipc_socklen_t peer_len = (ipc_socklen_t)sizeof(peer);
+        char peer_ip[CONN_PEER_IP_MAX];
+        sock_t fd;
         http_conn_t *slot = NULL;
         size_t i;
+
+        memset(&peer, 0, sizeof(peer));
+        fd = accept(s_srv.listen_fd, (struct sockaddr *)&peer, &peer_len);
 
         if (fd == SOCK_INVALID) {
 #ifndef _WIN32
@@ -266,6 +296,7 @@ static void accept_new_conn(void)
 #endif
             return; /* accept 队列已排空（EWOULDBLOCK）或偶发错误：本轮结束 */
         }
+        format_peer_ip(&peer, peer_ip, sizeof(peer_ip));
 
         for (i = 0; i < CONN_MAX; i++) {
             if (!s_srv.conns[i].used) { slot = &s_srv.conns[i]; break; }
@@ -284,6 +315,7 @@ static void accept_new_conn(void)
         memset(slot, 0, sizeof(*slot));
         slot->fd = fd;
         slot->used = 1;
+        memcpy(slot->peer_ip, peer_ip, sizeof(slot->peer_ip)); /* memset 之后再填，避免被清掉 */
         slot->rbuf = (char *)malloc(CONN_BUF_MAX);
         if (!slot->rbuf) {
             LOGE(MOD, "连接接收缓冲区分配失败");

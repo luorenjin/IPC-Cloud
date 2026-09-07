@@ -235,8 +235,13 @@ static int t_recv_response(t_sock_t fd, char *buf, size_t cap)
 
 static int echo_handler(http_req_t *req, void *user)
 {
+    /* 顺带回显 http_conn_peer_ip：这是 handler 拿到来源 IP 的唯一途径（console
+       的按 IP 登录锁定依赖它），只有走真实 accept 才能验证地址确实被记下来了。 */
+    const char *peer = http_conn_peer_ip(req->conn);
+    char body[128];
     (void)user;
-    return http_respond_json(req->conn, 200, "{\"ok\":true,\"from\":\"e2e\"}") == HAL_OK ? 0 : HAL_EIO;
+    snprintf(body, sizeof(body), "{\"ok\":true,\"from\":\"e2e\",\"peer\":\"%s\"}", peer ? peer : "");
+    return http_respond_json(req->conn, 200, body) == HAL_OK ? 0 : HAL_EIO;
 }
 
 static void test_e2e_request_response(void)
@@ -267,6 +272,8 @@ static void test_e2e_request_response(void)
             CHECK(strncmp(resp, "HTTP/1.1 200", strlen("HTTP/1.1 200")) == 0,
                   "状态行应为 200，实际响应: %s", resp);
             CHECK(strstr(resp, "\"ok\":true") != NULL, "body 内容正确: %s", resp);
+            CHECK(strstr(resp, "\"peer\":\"127.0.0.1\"") != NULL,
+                  "handler 经 http_conn_peer_ip 取到真实对端地址: %s", resp);
         }
 
         /* 同一 keep-alive 连接上再发一次请求，验证连接循环里"解析->分发->
