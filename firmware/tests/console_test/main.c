@@ -362,10 +362,9 @@ static void test_auth_endpoints(void)
 
     SECTION("鉴权端点");
     console_auth_reset_lockout();
-    CHECK(console_auth_init() == HAL_OK, "console_auth_init 注册 /api/v1/auth/ 路由");
-    CHECK(http_route_match("/api/v1/auth/login") != NULL, "登录路径可命中路由");
-    CHECK(http_route_match("/api/v1/auth/challenge") != NULL, "挑战路径可命中路由");
-
+    /* 路由注册由 test_factory_bootstrap 那一次 console_auth_init() 完成：
+       http_route 不去重且 ROUTE_MAX 只有 8，整个测试二进制只应调它一次，
+       否则会把槽位烧给同一个前缀，坑到后续任务注册自己的路由。 */
     CHECK(console_auth_seed("ABCD1234") == HAL_OK, "重新播种（回到出厂强制改密态）");
 
     /* 未知子路径 → 404 语义；非 POST → 400 语义 */
@@ -555,7 +554,12 @@ static void test_factory_bootstrap(void)
     hal()->crypto->secure_delete(HAL_SEC_KEY_LOCAL_USER);
     console_auth_test_reload();
 
+    /* 整个测试二进制里**唯一**一次 console_auth_init()：既验证路由注册，
+       也验证真实入口确实会做出厂自举。其余用例一律走 console_auth_test_bootstrap()，
+       否则 http_route（不去重，ROUTE_MAX=8）会被同一前缀反复占槽。 */
     CHECK(console_auth_init() == HAL_OK, "console_auth_init 成功");
+    CHECK(http_route_match("/api/v1/auth/login") != NULL, "登录路径可命中路由");
+    CHECK(http_route_match("/api/v1/auth/challenge") != NULL, "挑战路径可命中路由");
     CHECK(console_auth_must_change() == true, "自举后处于强制改密态");
     CHECK(console_auth_challenge_from("admin", salt_hex, sizeof(salt_hex),
                                       nonce, sizeof(nonce), "172.16.0.5") == HAL_OK, "取 challenge");
@@ -564,11 +568,11 @@ static void test_factory_bootstrap(void)
     CHECK(console_auth_verify_from("admin", nonce, proof, "172.16.0.5") == HAL_OK,
           "出厂设备开箱即可用出厂验证码登录");
 
-    /* 反面：安全存储里既无凭据也无验证码时，不得静默放行，且不得让 init 失败 */
+    /* 反面：安全存储里既无凭据也无验证码时，不得静默放行 */
     hal()->crypto->secure_delete(HAL_SEC_KEY_LOCAL_USER);
     hal()->crypto->secure_delete(HAL_SEC_KEY_VERIFY_CODE);
     console_auth_test_reload();
-    CHECK(console_auth_init() == HAL_OK, "取不到验证码也不能让 console_init 失败");
+    console_auth_test_bootstrap();
     CHECK(console_auth_challenge_from("admin", salt_hex, sizeof(salt_hex),
                                       nonce, sizeof(nonce), "172.16.0.6") == HAL_OK,
           "无凭据时 challenge 仍返回（伪 salt，防枚举）");
@@ -576,6 +580,48 @@ static void test_factory_bootstrap(void)
           "算 proof");
     CHECK(console_auth_verify_from("admin", nonce, proof, "172.16.0.6") == HAL_EPERM_,
           "无凭据时任何登录都必须失败，不得静默放行");
+}
+
+/**
+ * 凭据损坏 / 版本不匹配**绝不能**被当成"从未配置"而触发出厂自举——那会把一台
+ * 已设过口令的设备静默重置回标签上印的验证码。最难受的触发路径是将来 bump
+ * CRED_VERSION 却没带迁移逻辑就 OTA 出去，会一次性重置整批设备。
+ */
+static void test_corrupt_cred_not_reset(void)
+{
+    /* 一条魔数正确、版本号是"未来版本"的记录：正是 OTA 版本跃迁的样子 */
+    uint8_t future[96];
+    uint8_t back[96];
+    size_t len = 0;
+    char salt_hex[80], nonce[80], proof[160];
+
+    SECTION("凭据损坏不得静默重置回出厂口令");
+    console_auth_reset_lockout();
+
+    memset(future, 0xA7, sizeof(future));
+    future[0] = 'I'; future[1] = 'C'; future[2] = 'L'; future[3] = 'U';
+    future[4] = 0; future[5] = 0; future[6] = 0; future[7] = 2;   /* version = 2 */
+
+    CHECK(hal()->crypto->secure_write(HAL_SEC_KEY_VERIFY_CODE,
+                                      (const uint8_t *)"FCT98765", 8) == HAL_OK, "烧录出厂验证码");
+    CHECK(hal()->crypto->secure_write(HAL_SEC_KEY_LOCAL_USER, future, sizeof(future)) == HAL_OK,
+          "写入一条未来版本的凭据记录");
+    console_auth_test_reload();
+    console_auth_test_bootstrap();
+
+    /* 1) 不得用出厂验证码把设备"救活" —— 那等于远程可用标签码接管 */
+    CHECK(console_auth_challenge_from("admin", salt_hex, sizeof(salt_hex),
+                                      nonce, sizeof(nonce), "172.16.0.7") == HAL_OK, "取 challenge");
+    CHECK(console_auth_make_proof("FCT98765", salt_hex, nonce, proof, sizeof(proof)) == HAL_OK,
+          "算 proof");
+    CHECK(console_auth_verify_from("admin", nonce, proof, "172.16.0.7") == HAL_EPERM_,
+          "损坏记录下出厂验证码不得能登录（否则等于静默重置）");
+
+    /* 2) 存储里的原记录必须原样保留，不得被覆盖 */
+    CHECK(hal()->crypto->secure_read(HAL_SEC_KEY_LOCAL_USER, back, sizeof(back), &len) == HAL_OK,
+          "读回存储记录");
+    CHECK(len == sizeof(future) && memcmp(back, future, sizeof(future)) == 0,
+          "损坏记录未被出厂自举覆盖");
 }
 
 static void test_cred_not_in_config(void)
@@ -644,8 +690,9 @@ int main(void)
     test_auth_lockout();
     test_auth_user_enum();
     test_must_change_password();
+    test_factory_bootstrap();       /* 唯一一次 console_auth_init()，顺带注册路由 */
+    test_corrupt_cred_not_reset();
     test_auth_endpoints();
-    test_factory_bootstrap();
     test_cred_not_in_config();
     test_cred_fallback_store();
 

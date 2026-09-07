@@ -480,6 +480,10 @@ _Static_assert(CRED_ITER_MAX >= CONSOLE_ITER, "迭代上限必须容纳本模块
 
 static cred_t s_cred;
 static bool   s_cred_loaded;
+/** 上次装载的结果。**必须区分 HAL_ENODEV（从未配置）与 HAL_ECORRUPT/HAL_EIO
+ *  （记录存在但读不出来）**：只有前者才允许出厂自举去覆盖存储，见
+ *  `cred_bootstrap_from_factory_code`。 */
+static hal_err_t s_cred_load_rc = HAL_ENODEV;
 /** 未播种时伪 salt 的派生密钥（仅本次运行有效，见 decoy_salt 注释） */
 static uint8_t s_decoy_key[CONSOLE_KEY_LEN];
 static bool    s_decoy_ready;
@@ -523,13 +527,15 @@ const char *console_auth_cred_path(void)
     return path;
 }
 
-/** 建好私有目录并收紧权限（POSIX 0700）；失败不致命，写文件时会再报错 */
-static void cred_dir_prepare(void)
+/** 建好 `path` 所在的私有目录并收紧权限（POSIX 0700）；失败不致命，写文件时会再报错。
+ *  刻意收 path 形参而不是自己调 `console_auth_cred_path()`：那是静态缓冲，
+ *  嵌套调用会把调用方手里的指针重写掉。 */
+static void cred_dir_prepare(const char *path)
 {
     char dir[HAL_PATH_MAX];
     char *slash;
 
-    snprintf(dir, sizeof(dir), "%s", console_auth_cred_path());
+    snprintf(dir, sizeof(dir), "%s", path);
     slash = strrchr(dir, '/');
     if (!slash) return;
     *slash = '\0';
@@ -560,8 +566,11 @@ static hal_err_t cred_persist(const cred_t *c)
         /* 退化软存储：私有目录 0700 + 文件 0600。文件内含 stored_key，
            读到它即可算出 proof 完成鉴权，权限收紧不是可选项。
            关键点同样是它不经 core/config。 */
-        const char *path = console_auth_cred_path();
-        cred_dir_prepare();
+        /* 拷进局部变量：console_auth_cred_path() 返回静态缓冲，
+           下面还要经 cred_dir_prepare 再走一遍路径逻辑 */
+        char path[HAL_PATH_MAX];
+        snprintf(path, sizeof(path), "%s", console_auth_cred_path());
+        cred_dir_prepare(path);
         rc = os_file_write_atomic(path, blob, sizeof(blob)) == 0 ? HAL_OK : HAL_EIO;
 #ifndef _WIN32
         if (rc == HAL_OK && chmod(path, S_IRUSR | S_IWUSR) != 0)   /* 0600 */
@@ -614,9 +623,22 @@ static void cred_ensure_loaded(void)
 {
     if (s_cred_loaded) return;
     s_cred_loaded = true;               /* 无论成败都只尝试一次 */
-    if (cred_fetch(&s_cred) != HAL_OK) {
-        memset(&s_cred, 0, sizeof(s_cred));
+    s_cred_load_rc = cred_fetch(&s_cred);
+    if (s_cred_load_rc == HAL_OK) return;
+
+    memset(&s_cred, 0, sizeof(s_cred));
+    if (s_cred_load_rc == HAL_ENODEV) {
         LOGI(MOD, "尚无本地账号凭据，等待以出厂验证码播种");
+    } else {
+        /* 记录存在但读不出来（魔数错、**版本不匹配**、短读、I/O 失败）。
+           这与"从未配置"必须区分：若混为一谈，出厂自举会拿验证码重新播种并
+           覆盖原记录，把一台已设过口令的设备静默重置回标签上印的那个码。
+           最难受的触发路径是将来 bump CRED_VERSION 却没带迁移逻辑就 OTA 出去
+           ——那会一次性重置整批设备。此处保持 valid=false（登录一律失败），
+           不覆盖存储，把处置权交给人。 */
+        LOGE(MOD, "本地账号凭据读取失败（rc=%d）：为避免把已配置设备静默重置回出厂口令，"
+                  "**不会**以出厂验证码覆盖。控制台将无法登录，请检查安全存储或执行恢复出厂",
+             (int)s_cred_load_rc);
     }
 }
 
@@ -913,6 +935,7 @@ hal_err_t console_auth_seed(const char *factory_code)
 
     s_cred = c;
     s_cred_loaded = true;
+    s_cred_load_rc = HAL_OK;
     sessions_clear();
     nonces_clear();
     secure_wipe(&c, sizeof(c));
@@ -1441,6 +1464,10 @@ static void cred_bootstrap_from_factory_code(void)
 
     if (s_cred.valid) return;
 
+    /* 只有"从未配置"才允许自举。记录存在但损坏/读失败时绝不覆盖，
+       原因与日志见 cred_ensure_loaded。 */
+    if (s_cred_load_rc != HAL_ENODEV) return;
+
     if (!crypto_store_available()) {
         LOGE(MOD, "无安全存储可读出厂验证码：本地控制台将无法登录，"
                   "该平台需实现 hal_crypto 或预置凭据");
@@ -1478,6 +1505,14 @@ hal_err_t console_auth_init(void)
 }
 
 #ifdef IPC_TESTING
+void console_auth_test_bootstrap(void)
+{
+    cred_ensure_loaded();
+    cred_bootstrap_from_factory_code();
+}
+#endif
+
+#ifdef IPC_TESTING
 
 void console_auth_reset_lockout(void)
 {
@@ -1488,6 +1523,7 @@ void console_auth_test_reload(void)
 {
     secure_wipe(&s_cred, sizeof(s_cred));
     s_cred_loaded = false;
+    s_cred_load_rc = HAL_ENODEV;
 }
 
 hal_err_t console_auth_test_dispatch(const http_req_t *req, const char *client_ip,

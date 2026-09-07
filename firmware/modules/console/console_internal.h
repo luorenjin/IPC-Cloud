@@ -56,7 +56,8 @@ hal_err_t console_api_init(void);
 /** 私有数据目录的配置键（R3：路径不硬编码，从配置取） */
 #define CONSOLE_DATA_DIR_KEY "system.data_dir"
 
-/** 兜底软存储的完整路径（内部静态缓冲，供日志与测试使用） */
+/** 兜底软存储的完整路径。返回**内部静态缓冲**，下一次调用即被重写；
+ *  需要跨调用持有请自行拷贝。供日志与测试使用。 */
 const char *console_auth_cred_path(void);
 
 hal_err_t console_pbkdf2_sha256(const char *pwd, size_t pwd_len,
@@ -111,6 +112,11 @@ hal_err_t console_auth_check(const http_req_t *req);
 void console_auth_reset_lockout(void);
 /** 测试桩：丢弃凭据内存缓存，强制下次访问重新从存储读回 */
 void console_auth_test_reload(void);
+/** 测试桩：只跑"装载凭据 + 出厂自举"这两步，不注册路由。
+ *  `http_route` 无脑追加、不去重，而 `ROUTE_MAX` 只有 8——测试里反复调
+ *  `console_auth_init()` 会把槽位烧给同一个前缀，后续任务在同一测试二进制里
+ *  注册自己的路由时会莫名其妙拿到 HAL_ENOMEM。 */
+void console_auth_test_bootstrap(void);
 /**
  * 测试桩：不经 http_respond 直接跑一次 `/api/v1/auth/*` 分发。
  * 返回 HAL_OK 时 body 为 200 响应体、set_cookie 为 Set-Cookie 值（无则为空串）；
