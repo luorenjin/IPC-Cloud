@@ -28,6 +28,12 @@ typedef int sock_t;
 extern "C" {
 #endif
 
+/** 服务端连接槽位总数上限，http_server.c 与 http_ws.c 共享同一份定义——此前
+ *  两个文件各自独立声明同值的 16，评审指出这是一处跨翻译单元的复制隐患
+ *  （改一处忘改另一处会静默产生不一致），移到这里从源头消除。已升级 WS 的
+ *  连接数不可能超过总连接数，http_ws.c 的心跳登记表直接复用本宏。 */
+#define CONN_MAX 16
+
 struct http_ws_state; /* 完整定义与全部字段留在 http_ws.c 内部，本头不关心其布局 */
 
 struct http_conn {

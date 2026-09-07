@@ -42,7 +42,7 @@
 #define MOD "http_server"
 
 #define ROUTE_MAX       8
-#define CONN_MAX        16
+/* CONN_MAX 定义在 http_server_internal.h（与 http_ws.c 共享，避免跨文件复制） */
 #define CONN_BUF_MAX    (HTTP_BODY_MAX + 8192)     /**< 每连接接收缓冲，accept 时惰性 malloc */
 #define SEND_QUEUE_MAX  (HTTP_BODY_MAX + 8192)     /**< 发送队列上限，防止慢客户端无限占内存 */
 #define POLL_TIMEOUT_MS 100                        /**< 事件循环轮询步长：兼顾停止响应速度与 CPU 占用 */
@@ -219,6 +219,9 @@ static void conn_register_for_poll(http_conn_t *c)
 void conn_update_poll_interest(http_conn_t *c)
 {
     struct epoll_event ev;
+    if (s_srv.epfd < 0) return; /* 服务未运行（如 IPC_TESTING 测试桩场景）：epfd
+                                    无效，与 conn_close 的守卫保持一致，避免对
+                                    垃圾 fd 值调用 epoll_ctl */
     memset(&ev, 0, sizeof(ev));
     ev.events = EPOLLIN | EPOLLET |
                 (((c->slen > c->soff) || (c->is_ws && http_ws_queue_used(c) > 0)) ? EPOLLOUT : 0);
@@ -548,7 +551,12 @@ static void event_loop(void)
             if (FD_ISSET(c->fd, &wfds)) {
                 conn_flush_send(c);
                 if (!c->used) continue;
-                if (c->is_ws) { http_ws_flush(c); if (!c->used) continue; }
+                /* 必须等 c->sbuf 彻底发空（slen==soff）才能开始发 WS 帧字节：
+                 * 101 升级响应正是先入队到 sbuf、is_ws 才置真，若 sbuf 还剩
+                 * 半截未发就在这里插入 WS 帧，会把两路字节交错进同一个
+                 * socket，产生对端无法解析的畸形流（Important 2，评审指出
+                 * 是 integration-notes 本身的设计缺陷，这里按裁定原地修复）。 */
+                if (c->is_ws && c->slen == c->soff) { http_ws_flush(c); if (!c->used) continue; }
             }
             if (FD_ISSET(c->fd, &rfds)) conn_handle_readable(c);
         }
@@ -583,7 +591,12 @@ static void event_loop(void)
             if (events[i].events & EPOLLOUT) {
                 conn_flush_send(c);
                 if (!c->used) continue;
-                if (c->is_ws) { http_ws_flush(c); if (!c->used) continue; }
+                /* 必须等 c->sbuf 彻底发空（slen==soff）才能开始发 WS 帧字节：
+                 * 101 升级响应正是先入队到 sbuf、is_ws 才置真，若 sbuf 还剩
+                 * 半截未发就在这里插入 WS 帧，会把两路字节交错进同一个
+                 * socket，产生对端无法解析的畸形流（Important 2，评审指出
+                 * 是 integration-notes 本身的设计缺陷，这里按裁定原地修复）。 */
+                if (c->is_ws && c->slen == c->soff) { http_ws_flush(c); if (!c->used) continue; }
             }
             if (events[i].events & EPOLLIN) conn_handle_readable(c);
         }

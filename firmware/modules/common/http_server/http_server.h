@@ -79,17 +79,24 @@ hal_err_t http_respond(http_conn_t *c, int status, const char *content_type,
                        const void *body, size_t len);
 /** 发送 JSON 响应（content_type 固定 application/json; charset=utf-8） */
 hal_err_t http_respond_json(http_conn_t *c, int status, const char *json);
-/** 发送带额外响应头的响应；extra_headers 形如 "X-A: 1\r\nX-B: 2\r\n"，可为 NULL */
+/** 发送带额外响应头的响应；extra_headers 形如 "X-A: 1\r\nX-B: 2\r\n"，可为 NULL。
+ *  1xx 状态码走精简模板（状态行 + extra_headers + 空行，不带 Content-Type/
+ *  Content-Length/Connection——RFC 7230 §3.3.2 禁止 1xx 带 Content-Length），
+ *  此时 body/len 会被静默忽略：1xx 没有 body 语义，也没有 Content-Length/
+ *  chunked 编码供对端界定 body 边界。 */
 hal_err_t http_respond_ex(http_conn_t *c, int status, const char *content_type,
                           const char *extra_headers, const void *body, size_t len);
 
-/** WS 上行文本消息回调（控制指令用），在 epoll 线程内调用，不可阻塞 */
+/** WS 上行文本消息回调（控制指令用），在 epoll 线程内调用，不可阻塞。
+ *  text 指向内部静态复用缓冲，生存期仅到本次回调返回为止——需要跨调用
+ *  保留内容必须自行复制，不可保存指针供之后使用。 */
 typedef void (*http_ws_text_fn)(http_conn_t *c, const char *text, size_t len, void *user);
 
 /**
  * 把 HTTP 连接升级为 WebSocket。
  * queue_cap 为该连接的发送队列字节上限（预览子码流建议 128*1024，主码流 512*1024）。
- * 失败返回 HAL_EINVAL（非法握手）或 HAL_ENOMEM。
+ * 失败返回 HAL_EINVAL（非法握手）、HAL_ENOMEM，或该连接已完成过一次升级时的
+ * HAL_ESTATE。
  */
 hal_err_t http_ws_upgrade(http_req_t *req, size_t queue_cap);
 
@@ -122,6 +129,14 @@ http_conn_t *http_ws_test_conn_new(size_t queue_cap);
 void         http_ws_test_conn_free(http_conn_t *c);
 /** 测试桩：清空发送队列，模拟数据已发出 */
 void         http_ws_test_drain(http_conn_t *c);
+/** 测试桩：从发送队列头部读出并移除最多 n 字节到 out，返回实际读出字节数；
+ *  与 http_ws_test_drain（整体清零、绕回逻辑不会被跑到）不同，保留 head 的
+ *  真实推进量，用于构造真正跨越环形缓冲 cap 边界的写入/读出，断言绕回后
+ *  字节内容正确（而不只是长度）。 */
+size_t       http_ws_test_read_drain(http_conn_t *c, void *out, size_t n);
+/** 测试桩：暴露握手 Accept 值计算，供 RFC 6455 §1.3 已知答案测试直接校验
+ *  SHA-1 + Base64 + GUID 拼接，不需要构造真实 socket 握手。 */
+hal_err_t    http_ws_test_compute_accept(const char *client_key, char *out, size_t out_cap);
 #endif
 
 #ifdef __cplusplus

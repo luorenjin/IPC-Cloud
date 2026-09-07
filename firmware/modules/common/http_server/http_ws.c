@@ -54,9 +54,12 @@
 /** 心跳周期：每 15 秒发一次 ping；连续 2 次（即 30 秒内两次）未收到 pong 判定断开。 */
 #define WS_PING_INTERVAL_US (15ULL * 1000 * 1000)
 
-/** 与 http_server.c 内部私有的 CONN_MAX 同值——该宏本文件不可见，独立声明一份。
- *  已升级 WS 的连接数不可能超过服务器总连接数上限，取相同值即可覆盖全部场景。 */
-#define WS_REGISTRY_MAX 16
+/** 直接派生自 http_server_internal.h 共享的 CONN_MAX——此前这里独立声明一份
+ *  同值的 16，是评审指出的一处跨翻译单元复制隐患（CONN_MAX 改了这里忘跟着
+ *  改，会静默产生不一致），现在两个文件共用同一处定义源头。已升级 WS 的
+ *  连接数不可能超过服务器总连接数上限，取相同值即可覆盖全部场景，且保证
+ *  ws_registry_add 里的登记表永远不会真正"满"（见 ws_registry_add 注释）。 */
+#define WS_REGISTRY_MAX CONN_MAX
 
 /** WS 帧 payload 上限：直接复用已有的 HTTP_BODY_MAX（http_server.h 公开常量）
  *  作为经过验证的安全上限。本文件看不到 http_server.c 私有的
@@ -115,6 +118,12 @@ static void ws_registry_add(http_conn_t *c)
             return;
         }
     }
+    /* 按抽屉原理这里其实不可达：WS_REGISTRY_MAX 现在直接等于 CONN_MAX，而
+     * 系统同时存在的连接数不可能超过 CONN_MAX，所以已升级的连接数也不可能
+     * 超过 WS_REGISTRY_MAX。保留这条日志纯属防御性兜底——一旦真的走到这里，
+     * 说明前面的不变量被破坏了，该连接会在没有心跳、http_ws_close() 也
+     * 永久失效（返回 HAL_OK 但无任何效果）的状态下继续运行，日志能第一时间
+     * 暴露这个隐蔽故障而不是让升级"看起来成功"却悄悄失灵。 */
     LOGW(MOD, "WS 心跳注册表已满（上限 %d），该连接将不参与心跳检测", WS_REGISTRY_MAX);
 }
 
@@ -423,8 +432,11 @@ static void ws_state_destroy(struct http_ws_state *ws)
 /** ping/pong/close 回复等控制帧：尽力而为直接入队，不经过 dropping 状态机
  *  （那是给视频等业务帧用的背压逻辑）。控制帧 payload 很小（<=125 字节），
  *  正常情况下不会实质性挤占业务数据的队列空间；真放不下就放弃，连接是否
- *  健康自有心跳超时/send 硬错误兜底判断。 */
-static void ws_send_control_frame(http_conn_t *c, int opcode, const uint8_t *payload, size_t len)
+ *  健康自有心跳超时/send 硬错误兜底判断。返回值表示是否真的入队成功——
+ *  调用方（如心跳 ping 的 awaiting_pong 计数）如果只关心"尽力而为"、
+ *  不需要知道结果，忽略返回值即可（#7：区分"发出了但未获应答"与"队列满根本
+ *  没发出去"，避免后者也被计入失联计数）。 */
+static bool ws_send_control_frame(http_conn_t *c, int opcode, const uint8_t *payload, size_t len)
 {
     struct http_ws_state *ws = c->ws;
     uint8_t hdr[10];
@@ -440,6 +452,7 @@ static void ws_send_control_frame(http_conn_t *c, int opcode, const uint8_t *pay
     os_mutex_unlock(ws->mu);
 
     if (ok) conn_update_poll_interest(c);
+    return ok;
 }
 
 /** 业务帧（文本/二进制）入队：先判断当前空间是否足够放下这一帧——不够就
@@ -455,6 +468,16 @@ static hal_err_t ws_enqueue_frame(http_conn_t *c, int opcode, const void *payloa
     bool do_enqueue = false;
 
     os_mutex_lock(ws->mu);
+
+    if (needed > ws->cap) {
+        /* 单帧本身就超过整条队列容量：无论队列多空都塞不下，dropping 状态机
+         * 永远等不到能被关键帧唤醒复位的那一刻——这是 queue_cap 配置过小
+         * （如给 128KB 队列灌 200KB 关键帧）而非瞬时背压，但两者在"持续丢帧"
+         * 的日志现象上完全一样，单独报一次帮助定位配置问题（#6，不改变
+         * 下面的丢弃行为本身）。 */
+        LOGE(MOD, "fd=%d WS 单帧 %zu 字节超过队列总容量 %zu，queue_cap 配置过小",
+             (int)c->fd, needed, ws->cap);
+    }
 
     if (needed > ws->cap - ws->used) {
         ws->dropping = true;
@@ -504,6 +527,16 @@ static size_t ws_try_consume_frame(http_conn_t *c, const uint8_t *buf, size_t le
     masked = (buf[1] & 0x80) != 0;
     raw_len = buf[1] & 0x7Fu;
     hdr_len = 2;
+
+    /* RFC 6455 §5.1："a server MUST close the connection upon receiving a
+     * frame that is not masked"——掩码要求是为了防止经中间缓存/代理设备的
+     * 缓存投毒攻击，属于安全语义而非可选校验，brief 里"客户端帧必带掩码，
+     * 需解掩码"这句话的前半句在此补上（#5）。 */
+    if (!masked) {
+        LOGW(MOD, "fd=%d 客户端帧未按协议要求掩码，关闭连接（RFC 6455 §5.1）", (int)c->fd);
+        conn_close(c);
+        return 0;
+    }
 
     if (raw_len == 126) {
         if (len < 4) return 0;
@@ -559,13 +592,20 @@ static size_t ws_try_consume_frame(http_conn_t *c, const uint8_t *buf, size_t le
         os_mutex_unlock(c->ws->mu);
         if (fn) {
             static char text_buf[4096];
-            size_t n = payload_len < sizeof(text_buf) - 1 ? payload_len : sizeof(text_buf) - 1;
-            size_t i;
-            for (i = 0; i < n; i++) {
-                text_buf[i] = (char)(masked ? (payload[i] ^ mask_key[i & 3]) : payload[i]);
+            if (payload_len > sizeof(text_buf) - 1) {
+                /* 超过静态缓冲上限：整帧丢弃而非截断——截断后的半截 JSON/
+                 * 控制命令可能被回调误解析成另一条合法但语义错误的命令，
+                 * 比"丢一帧、客户端超时重发"危险得多（#4）。 */
+                LOGW(MOD, "fd=%d WS 文本帧 %zu 字节超过上限 %zu，整帧丢弃",
+                     (int)c->fd, payload_len, sizeof(text_buf) - 1);
+            } else {
+                size_t i;
+                for (i = 0; i < payload_len; i++) {
+                    text_buf[i] = (char)(masked ? (payload[i] ^ mask_key[i & 3]) : payload[i]);
+                }
+                text_buf[payload_len] = '\0';
+                fn(c, text_buf, payload_len, user);
             }
-            text_buf[n] = '\0';
-            fn(c, text_buf, n, user);
         }
         break;
     }
@@ -743,6 +783,7 @@ void http_ws_flush(http_conn_t *c)
     for (;;) {
         size_t contig;
         int n;
+        bool wb;
 
         os_mutex_lock(ws->mu);
         if (ws->used == 0) {
@@ -752,6 +793,13 @@ void http_ws_flush(http_conn_t *c)
         contig = ws->cap - ws->head;
         if (contig > ws->used) contig = ws->used;
         n = (int)send(c->fd, (const char *)(ws->buf + ws->head), (int)contig, 0);
+        /* 必须在解锁前读取 WOULD_BLOCK()：它展开成 errno/WSAGetLastError()，
+         * 都是"最近一次调用"的线程局部状态——POSIX 只保证失败时设置 errno，
+         * 不保证成功的调用不会改写它，os_mutex_unlock 内部是否会调用任何
+         * 可能改写它的函数也没有跨平台保证。隔着 unlock 再读，会把慢客户端
+         * 背压的常态路径（正常的 EWOULDBLOCK）误判成硬错误进而 conn_close，
+         * 恰好摧毁本任务防御慢客户端的目的（Important 1）。 */
+        wb = (n < 0) && WOULD_BLOCK();
         if (n > 0) {
             ws->head = (ws->head + (size_t)n) % ws->cap;
             ws->used -= (size_t)n;
@@ -759,7 +807,7 @@ void http_ws_flush(http_conn_t *c)
             continue;
         }
         os_mutex_unlock(ws->mu);
-        if (n < 0 && WOULD_BLOCK()) return; /* 保留现有 poll 兴趣，等下次可写事件 */
+        if (wb) return; /* 保留现有 poll 兴趣，等下次可写事件 */
         LOGW(MOD, "fd=%d WS send 失败，关闭连接", (int)c->fd);
         conn_close(c);
         return;
@@ -769,8 +817,13 @@ void http_ws_flush(http_conn_t *c)
 
 void http_ws_conn_cleanup(http_conn_t *c)
 {
-    if (!c->ws) return;
+    /* #11：remove 提到判空之前——之前 "if (!c->ws) return;" 一旦命中会连带
+     * 跳过 ws_registry_remove，把该连接指针错误地留在登记表里。当前不变量下
+     * c->is_ws 为真时 c->ws 必非空，此调用点也只在 c->is_ws 为真时触发，故
+     * 这纯属防御性加固，不代表已发现真实的空指针场景；ws_registry_remove
+     * 对不在表里的指针是安全的空操作，无条件调用没有副作用。 */
     ws_registry_remove(c);
+    if (!c->ws) return;
     ws_state_destroy(c->ws);
     c->ws = NULL;
 }
@@ -783,32 +836,53 @@ void http_ws_tick(void)
     for (i = 0; i < WS_REGISTRY_MAX; i++) {
         http_conn_t *c = s_ws_registry[i];
         struct http_ws_state *ws;
-        bool need_close = false;
+        bool need_graceful = false; /* http_ws_close 主动请求：先发 close 帧再断开 */
+        bool need_timeout = false;  /* 心跳超时：对端疑似已死，直接断开 */
         bool need_ping = false;
 
         if (!c) continue;
         ws = c->ws;
+        if (!ws) continue; /* 防御性判空（#11）：当前不变量下 is_ws 连接必有 ws，
+                               纯属加固，不代表已发现真实的空指针场景 */
 
         os_mutex_lock(ws->mu);
         if (ws->close_requested) {
-            need_close = true;
+            need_graceful = true;
         } else if (now - ws->last_ping_us >= WS_PING_INTERVAL_US) {
             if (ws->awaiting_pong >= 2) {
-                need_close = true;
+                need_timeout = true;
             } else {
                 need_ping = true;
-                ws->awaiting_pong++;
-                ws->last_ping_us = now;
+                ws->last_ping_us = now; /* awaiting_pong 是否 ++ 待 ping 真正发出后再定，见下 */
             }
         }
         os_mutex_unlock(ws->mu);
 
-        if (need_close) {
-            LOGI(MOD, "fd=%d WS 连接关闭（主动请求或心跳超时）", (int)c->fd);
-            conn_close(c); /* 内部会触发 http_ws_conn_cleanup -> ws_registry_remove(c) */
+        if (need_graceful) {
+            /* #8：http_ws_close 此前只是直接 conn_close，客户端侧表现为 TCP
+             * 突断，浏览器报 1006 异常关闭而非 1000 正常关闭。复用收到 close
+             * 帧时同一套写法——入队 close 帧 -> 尽力 http_ws_flush -> 若未被
+             * flush 顺带关闭则 conn_close，让对端能收到规范的关闭帧。 */
+            ws_send_control_frame(c, 0x8, NULL, 0);
+            http_ws_flush(c);
+            if (c->used) conn_close(c);
             continue;
         }
-        if (need_ping) ws_send_control_frame(c, 0x9, NULL, 0);
+        if (need_timeout) {
+            LOGI(MOD, "fd=%d WS 连接因心跳超时关闭", (int)c->fd);
+            conn_close(c); /* 对端疑似已死，直接断开，不再尝试发 close 帧 */
+            continue;
+        }
+        if (need_ping) {
+            /* #7：只有真正入队成功才计入失联计数——队列满导致 ping 根本没
+             * 发出去时，不应该让失联计数照涨，否则会在约 45 秒后把一个只是
+             * 暂时慢、并未死亡的连接误判为超时断开。 */
+            if (ws_send_control_frame(c, 0x9, NULL, 0)) {
+                os_mutex_lock(ws->mu);
+                ws->awaiting_pong++;
+                os_mutex_unlock(ws->mu);
+            }
+        }
     }
 }
 
@@ -848,6 +922,35 @@ void http_ws_test_drain(http_conn_t *c)
     c->ws->head = 0;
     c->ws->used = 0; /* 模拟数据已全部发出：只清记账，不改 dropping/dropped */
     os_mutex_unlock(c->ws->mu);
+}
+
+/** 测试桩（Important 3）：从环形缓冲头部读出并移除最多 n 字节到 out，
+ *  返回实际读出的字节数（不超过当前 used）。与 http_ws_test_drain（整体
+ *  清零、head 直接归 0，绕回逻辑永远不会被跑到）不同，这里保留 head 的
+ *  真实推进量，可以配合 http_ws_send 构造出真正跨越 cap 边界的写入，并把
+ *  写入前的数据读回来逐字节比对，验证绕回不只是长度对、内容也对。 */
+size_t http_ws_test_read_drain(http_conn_t *c, void *out, size_t n)
+{
+    size_t first;
+    if (!c || !c->ws || !out) return 0;
+    os_mutex_lock(c->ws->mu);
+    if (n > c->ws->used) n = c->ws->used;
+    first = c->ws->cap - c->ws->head;
+    if (first > n) first = n;
+    memcpy(out, c->ws->buf + c->ws->head, first);
+    if (n > first) memcpy((uint8_t *)out + first, c->ws->buf, n - first);
+    c->ws->head = (c->ws->head + n) % c->ws->cap;
+    c->ws->used -= n;
+    os_mutex_unlock(c->ws->mu);
+    return n;
+}
+
+/** 测试桩（Important 3）：暴露握手 Accept 值计算，供 RFC 6455 §1.3 已知答案
+ *  测试直接调用——一条断言同时钉死 SHA-1、Base64、GUID 拼接三件事，不需要
+ *  构造真实 socket 握手。 */
+hal_err_t http_ws_test_compute_accept(const char *client_key, char *out, size_t out_cap)
+{
+    return ws_compute_accept(client_key, out, out_cap);
 }
 
 #endif /* IPC_TESTING */

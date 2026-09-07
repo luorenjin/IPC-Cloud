@@ -517,6 +517,83 @@ static void test_e2e_101_lean_template(void)
 }
 
 /* ------------------------------------------------------------------------ */
+/* 握手 accept 值已知答案测试（Task 4 评审 Important 3-1）                        */
+/*                                                                            */
+/* 853 行手写密码学（SHA-1+Base64+GUID 拼接）此前没有任何直接测试，唯一兜底是   */
+/* "Task 10 有人开浏览器联调时会发现"。RFC 6455 §1.3 自带标准向量：一条断言    */
+/* 同时钉死 SHA-1、Base64、GUID 拼接三件事。                                   */
+/* ------------------------------------------------------------------------ */
+
+static void test_ws_handshake_known_answer(void)
+{
+    char accept[64];
+
+    SECTION("ws 握手 accept 值已知答案测试（RFC 6455 §1.3 标准向量）");
+
+    CHECK(http_ws_test_compute_accept("dGhlIHNhbXBsZSBub25jZQ==", accept, sizeof(accept)) == HAL_OK,
+          "计算 accept 值应成功");
+    CHECK(strcmp(accept, "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=") == 0,
+          "accept 值必须精确匹配 RFC 6455 §1.3 标准向量，实际: %s", accept);
+}
+
+/* ------------------------------------------------------------------------ */
+/* 环形缓冲绕回：断言绕回后字节内容正确，而非只验证长度（Task 4 评审 Important 3-2） */
+/*                                                                            */
+/* http_ws_test_drain 每次把 head 清零，测试里因此永远不会触发真正的绕回写入/  */
+/* 读出路径，而绕回逻辑在预览推流场景下会持续运行。这里用 http_ws_test_read_  */
+/* drain（只推进 head、不清零）刻意构造一次跨越 cap 边界的写入，逐字节比对    */
+/* 读回内容，而不只是核对长度。                                               */
+/* ------------------------------------------------------------------------ */
+
+static void test_ws_ring_wraparound(void)
+{
+    http_conn_t *c;
+    uint8_t payload_a[60], payload_b[50];
+    uint8_t readback[100];
+    uint8_t expect_b[52];
+    size_t i, n;
+
+    SECTION("ws 环形缓冲绕回：断言绕回后字节内容正确（而不只是长度）");
+
+    for (i = 0; i < sizeof(payload_a); i++) payload_a[i] = (uint8_t)(0x10 + (i & 0x3F));
+    for (i = 0; i < sizeof(payload_b); i++) payload_b[i] = (uint8_t)(0x80 + (i & 0x3F));
+
+    c = http_ws_test_conn_new(100); /* 刻意选小容量，方便手工推算绕回边界 */
+    CHECK(c != NULL, "创建测试连接（queue_cap=100）");
+    if (!c) return;
+
+    /* 首帧 60 字节 payload（opcode=0x2，len<126 头部占 2 字节，共 62 字节），
+       整帧读出丢弃后 head=62、used=0、cap 不变——为下一帧制造"从 62 开始写
+       52 字节会跨越 cap=100 边界"的条件。 */
+    CHECK(http_ws_send(c, payload_a, sizeof(payload_a), true) == HAL_OK, "首帧（占位用）入队成功");
+    CHECK(http_ws_queue_used(c) == 62, "首帧入队后 used 应为 62，实际 %zu", http_ws_queue_used(c));
+    n = http_ws_test_read_drain(c, readback, 62);
+    CHECK(n == 62, "首帧应整帧读出 62 字节，实际 %zu", n);
+    CHECK(http_ws_queue_used(c) == 0, "首帧读出后队列应清空");
+
+    /* 第二帧 50 字节 payload（头部 2 字节，共 52 字节）：写入起点
+       tail=(head+used)%cap=(62+0)%100=62，cap-tail=38<52，ws_ring_write 必须
+       分两段写（buf[62..99] 38 字节 + buf[0..13] 14 字节）——这是真正跨越
+       cap 边界的绕回，不是理论上可能发生而已。 */
+    CHECK(http_ws_send(c, payload_b, sizeof(payload_b), true) == HAL_OK,
+          "第二帧入队成功（应触发绕回写入）");
+    CHECK(http_ws_queue_used(c) == 52, "第二帧入队后 used 应为 52，实际 %zu", http_ws_queue_used(c));
+
+    n = http_ws_test_read_drain(c, readback, 52);
+    CHECK(n == 52, "第二帧应整帧读出 52 字节（应触发绕回读取），实际 %zu", n);
+
+    /* 期望字节 = ws_encode_header(0x2, 50) 的 2 字节头部 {0x82, 0x32}
+       （0x80|0x2=0x82，50<126 单字节长度域 0x32=50）+ payload_b 原文。 */
+    expect_b[0] = 0x82;
+    expect_b[1] = 0x32;
+    memcpy(expect_b + 2, payload_b, sizeof(payload_b));
+    CHECK(memcmp(readback, expect_b, sizeof(expect_b)) == 0,
+          "绕回读出的字节内容必须与写入时逐字节一致，而不只是长度一致");
+
+    http_ws_test_conn_free(c);
+}
+
+/* ------------------------------------------------------------------------ */
 /* WS 背压：队列满后丢弃非关键帧，恢复时必须从关键帧续传                            */
 /* ------------------------------------------------------------------------ */
 
@@ -567,6 +644,8 @@ int main(void)
     test_e2e_enotsup_501();
     test_e2e_respond_ex_atomic_on_overflow();
     test_e2e_101_lean_template();
+    test_ws_handshake_known_answer();
+    test_ws_ring_wraparound();
     test_ws_backpressure();
     printf("RESULT: http_server pass=%d fail=%d\n", g_pass, g_fail);
     return g_fail;
