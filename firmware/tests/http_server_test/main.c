@@ -440,6 +440,45 @@ static void test_e2e_respond_ex_atomic_on_overflow(void)
     t_net_cleanup();
 }
 
+/* ------------------------------------------------------------------------ */
+/* WS 背压：队列满后丢弃非关键帧，恢复时必须从关键帧续传                            */
+/* ------------------------------------------------------------------------ */
+
+static void test_ws_backpressure(void)
+{
+    http_conn_t *c;
+    uint8_t payload[4096];
+    int i, sent_ok = 0, dropped = 0;
+
+    SECTION("ws backpressure");
+    memset(payload, 0xAB, sizeof(payload));
+
+    c = http_ws_test_conn_new(16 * 1024);   /* 测试桩：不含真实 socket 的 WS 连接 */
+    CHECK(c != NULL, "创建测试连接");
+    if (!c) return;
+
+    /* 灌入远超队列容量的数据，且全部为非关键帧 */
+    for (i = 0; i < 32; i++) {
+        hal_err_t e = http_ws_send(c, payload, sizeof(payload), false);
+        if (e == HAL_OK) sent_ok++;
+        else if (e == HAL_EAGAIN) dropped++;
+    }
+    CHECK(dropped > 0, "队列满后应有丢弃，dropped=%d", dropped);
+    CHECK(http_ws_queue_used(c) <= 16 * 1024, "队列不得超出容量 used=%zu", http_ws_queue_used(c));
+
+    /* 丢弃状态下：非关键帧继续丢，关键帧应被接纳（先腾空队列） */
+    http_ws_test_drain(c);
+    CHECK(http_ws_send(c, payload, sizeof(payload), false) == HAL_EAGAIN,
+          "丢弃态下非关键帧仍被丢弃");
+    CHECK(http_ws_send(c, payload, sizeof(payload), true) == HAL_OK,
+          "丢弃态遇关键帧应恢复发送");
+    CHECK(http_ws_send(c, payload, sizeof(payload), false) == HAL_OK,
+          "恢复后非关键帧正常入队");
+    CHECK(http_ws_dropped(c) == (uint64_t)(dropped + 1), "丢帧计数准确");
+
+    http_ws_test_conn_free(c);
+}
+
 int main(void)
 {
     test_parse_basic();
@@ -451,6 +490,7 @@ int main(void)
     test_e2e_request_response();
     test_e2e_enotsup_501();
     test_e2e_respond_ex_atomic_on_overflow();
+    test_ws_backpressure();
     printf("RESULT: http_server pass=%d fail=%d\n", g_pass, g_fail);
     return g_fail;
 }

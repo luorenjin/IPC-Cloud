@@ -83,6 +83,47 @@ hal_err_t http_respond_json(http_conn_t *c, int status, const char *json);
 hal_err_t http_respond_ex(http_conn_t *c, int status, const char *content_type,
                           const char *extra_headers, const void *body, size_t len);
 
+/** WS 上行文本消息回调（控制指令用），在 epoll 线程内调用，不可阻塞 */
+typedef void (*http_ws_text_fn)(http_conn_t *c, const char *text, size_t len, void *user);
+
+/**
+ * 把 HTTP 连接升级为 WebSocket。
+ * queue_cap 为该连接的发送队列字节上限（预览子码流建议 128*1024，主码流 512*1024）。
+ * 失败返回 HAL_EINVAL（非法握手）或 HAL_ENOMEM。
+ */
+hal_err_t http_ws_upgrade(http_req_t *req, size_t queue_cap);
+
+/**
+ * 向 WS 连接发送二进制帧（仅入队，实际发送在 epoll 线程）。
+ * is_key 标记该数据是否为关键帧：队列满时丢弃非关键帧直到下一个关键帧到来，
+ * 避免解码器花屏。队列满且本帧被丢弃时返回 HAL_EAGAIN。
+ * 可从任意线程调用（内部加锁）。
+ */
+hal_err_t http_ws_send(http_conn_t *c, const void *data, size_t len, bool is_key);
+
+/** 发送文本帧（状态推送用） */
+hal_err_t http_ws_send_text(http_conn_t *c, const char *text);
+
+/** 注册上行文本消息回调 */
+hal_err_t http_ws_on_text(http_conn_t *c, http_ws_text_fn fn, void *user);
+
+/** 主动关闭 WS 连接 */
+hal_err_t http_ws_close(http_conn_t *c);
+
+/** 当前队列已用字节（测试与背压统计用） */
+size_t http_ws_queue_used(http_conn_t *c);
+
+/** 该连接累计丢帧数 */
+uint64_t http_ws_dropped(http_conn_t *c);
+
+#ifdef IPC_TESTING
+/** 测试桩：创建不含真实 socket 的 WS 连接 */
+http_conn_t *http_ws_test_conn_new(size_t queue_cap);
+void         http_ws_test_conn_free(http_conn_t *c);
+/** 测试桩：清空发送队列，模拟数据已发出 */
+void         http_ws_test_drain(http_conn_t *c);
+#endif
+
 #ifdef __cplusplus
 }
 #endif

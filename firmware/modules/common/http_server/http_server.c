@@ -17,6 +17,7 @@
  * 非阻塞设置、事件循环本体与 epoll 专属的兴趣位管理上。
  */
 #include "http_server.h"
+#include "http_server_internal.h"
 #include "core/os.h"
 #include "core/log.h"
 #include <string.h>
@@ -26,10 +27,7 @@
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
-typedef SOCKET sock_t;
-#define SOCK_INVALID INVALID_SOCKET
 #define CLOSESOCK(f) closesocket(f)
-#define WOULD_BLOCK() (WSAGetLastError() == WSAEWOULDBLOCK)
 #else
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -38,10 +36,7 @@ typedef SOCKET sock_t;
 #include <fcntl.h>
 #include <errno.h>
 #include <sys/epoll.h>
-typedef int sock_t;
-#define SOCK_INVALID (-1)
 #define CLOSESOCK(f) close(f)
-#define WOULD_BLOCK() (errno == EWOULDBLOCK || errno == EAGAIN)
 #endif
 
 #define MOD "http_server"
@@ -53,19 +48,8 @@ typedef int sock_t;
 #define POLL_TIMEOUT_MS 100                        /**< 事件循环轮询步长：兼顾停止响应速度与 CPU 占用 */
 
 /* ------------------------------------------------------------------------ */
-/* 连接结构：对外通过 http_conn_t 不透明指针使用，布局仅本文件可见                  */
+/* 连接结构：完整布局见 http_server_internal.h（http_server.c 与 http_ws.c 共享）  */
 /* ------------------------------------------------------------------------ */
-
-struct http_conn {
-    sock_t fd;
-    int    used;      /**< 是否被占用（1=占用） */
-    char  *rbuf;       /**< 接收缓冲，容量 CONN_BUF_MAX，accept 时分配、关闭时释放 */
-    size_t rlen;       /**< rbuf 内已接收但尚未解析完的字节数 */
-    char  *sbuf;       /**< 发送队列缓冲，realloc 增长，全部发送完毕后回收 */
-    size_t scap;       /**< sbuf 容量 */
-    size_t slen;       /**< 已入队字节数 */
-    size_t soff;       /**< 已发送字节数（soff <= slen） */
-};
 
 static struct {
     sock_t       listen_fd;
@@ -208,9 +192,10 @@ static hal_err_t set_nonblocking(sock_t fd)
 /* 连接生命周期                                                               */
 /* ------------------------------------------------------------------------ */
 
-static void conn_close(http_conn_t *c)
+void conn_close(http_conn_t *c)
 {
     if (!c->used) return;
+    if (c->is_ws) http_ws_conn_cleanup(c);
 #ifndef _WIN32
     if (s_srv.epfd >= 0) epoll_ctl(s_srv.epfd, EPOLL_CTL_DEL, c->fd, NULL);
 #endif
@@ -230,11 +215,12 @@ static void conn_register_for_poll(http_conn_t *c)
     epoll_ctl(s_srv.epfd, EPOLL_CTL_ADD, c->fd, &ev);
 }
 
-static void conn_update_poll_interest(http_conn_t *c)
+void conn_update_poll_interest(http_conn_t *c)
 {
     struct epoll_event ev;
     memset(&ev, 0, sizeof(ev));
-    ev.events = EPOLLIN | EPOLLET | ((c->slen > c->soff) ? EPOLLOUT : 0);
+    ev.events = EPOLLIN | EPOLLET |
+                (((c->slen > c->soff) || (c->is_ws && http_ws_queue_used(c) > 0)) ? EPOLLOUT : 0);
     ev.data.ptr = c;
     epoll_ctl(s_srv.epfd, EPOLL_CTL_MOD, c->fd, &ev);
 }
@@ -244,7 +230,7 @@ static void conn_register_for_poll(http_conn_t *c)
     (void)c; /* select 每轮从 s_srv.conns[] 重建 fd_set，无需显式注册 */
 }
 
-static void conn_update_poll_interest(http_conn_t *c)
+void conn_update_poll_interest(http_conn_t *c)
 {
     (void)c; /* 同上：可写兴趣由 event_loop 每轮按 slen>soff 现算 */
 }
@@ -452,6 +438,12 @@ static void conn_handle_readable(http_conn_t *c)
             memcpy(c->rbuf + c->rlen, tmp, (size_t)n);
             c->rlen += (size_t)n;
 
+            if (c->is_ws) {
+                http_ws_on_readable(c);
+                if (!c->used) return;
+                continue; /* 边缘触发下继续 recv 直至 EWOULDBLOCK，排空内核缓冲 */
+            }
+
             /* 单请求串行处理：每次 dispatch 都同步跑完（含 handler 内部调用的
                http_respond*）之后才 memmove 缓冲、解析下一个请求。这保证了
                http_parse_request 内部 header 暂存区（static hbuf）不会被跨
@@ -513,12 +505,13 @@ static void event_loop(void)
             http_conn_t *c = &s_srv.conns[i];
             if (!c->used) continue;
             FD_SET(c->fd, &rfds);
-            if (c->slen > c->soff) FD_SET(c->fd, &wfds);
+            if ((c->slen > c->soff) || (c->is_ws && http_ws_queue_used(c) > 0)) FD_SET(c->fd, &wfds);
         }
 
         tv.tv_sec = 0;
         tv.tv_usec = POLL_TIMEOUT_MS * 1000;
         n = select(0, &rfds, &wfds, NULL, &tv); /* Windows 忽略首参 nfds */
+        http_ws_tick(); /* 必须在下面的超时 continue 之前，否则空闲连接永远等不到心跳检查 */
         if (n <= 0) continue; /* 超时或偶发错误：回到循环头重新检查停止标志 */
 
         if (FD_ISSET(s_srv.listen_fd, &rfds)) accept_new_conn();
@@ -529,6 +522,7 @@ static void event_loop(void)
             if (FD_ISSET(c->fd, &wfds)) {
                 conn_flush_send(c);
                 if (!c->used) continue;
+                if (c->is_ws) { http_ws_flush(c); if (!c->used) continue; }
             }
             if (FD_ISSET(c->fd, &rfds)) conn_handle_readable(c);
         }
@@ -543,6 +537,7 @@ static void event_loop(void)
         int n = epoll_wait(s_srv.epfd, events, CONN_MAX + 1, POLL_TIMEOUT_MS);
         int i;
 
+        http_ws_tick(); /* 必须在下面的 continue 之前，否则空闲连接永远等不到心跳检查 */
         if (n < 0) continue; /* EINTR 等偶发错误：回到循环头重新检查停止标志 */
 
         for (i = 0; i < n; i++) {
@@ -562,6 +557,7 @@ static void event_loop(void)
             if (events[i].events & EPOLLOUT) {
                 conn_flush_send(c);
                 if (!c->used) continue;
+                if (c->is_ws) { http_ws_flush(c); if (!c->used) continue; }
             }
             if (events[i].events & EPOLLIN) conn_handle_readable(c);
         }
