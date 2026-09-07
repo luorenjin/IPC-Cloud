@@ -59,6 +59,30 @@ const char *http_query(const http_req_t *req, const char *key, char *buf, size_t
  */
 hal_err_t http_parse_request(const char *buf, size_t len, http_req_t *req, size_t *consumed);
 
+/** handler 返回值：0 表示已响应；负值为 hal_err_t，由框架转成错误响应 */
+typedef int (*http_handler_fn)(http_req_t *req, void *user);
+
+/**
+ * 注册路由前缀。按**最长前缀**匹配，"/" 可作兜底。
+ * 必须在 http_server_start 之前调用。前缀数上限 8。
+ */
+hal_err_t http_route(const char *prefix, http_handler_fn fn, void *user);
+
+/** 查询某路径命中的前缀（测试用）；无匹配返回 NULL */
+const char *http_route_match(const char *path);
+
+hal_err_t http_server_start(uint16_t port);
+hal_err_t http_server_stop(void);
+
+/** 发送响应。content_type 为 NULL 时用 application/octet-stream */
+hal_err_t http_respond(http_conn_t *c, int status, const char *content_type,
+                       const void *body, size_t len);
+/** 发送 JSON 响应（content_type 固定 application/json; charset=utf-8） */
+hal_err_t http_respond_json(http_conn_t *c, int status, const char *json);
+/** 发送带额外响应头的响应；extra_headers 形如 "X-A: 1\r\nX-B: 2\r\n"，可为 NULL */
+hal_err_t http_respond_ex(http_conn_t *c, int status, const char *content_type,
+                          const char *extra_headers, const void *body, size_t len);
+
 #ifdef __cplusplus
 }
 #endif
