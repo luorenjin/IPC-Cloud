@@ -134,6 +134,30 @@ hal_err_t http_respond_ex(http_conn_t *c, int status, const char *content_type,
  * 响应可送达，执行动作也不再有意义，调用方不应假设它一定会执行。
  * 同一连接重复调用以最后一次登记为准（覆盖此前尚未触发的登记，不叠加）。
  * c 或 fn 为 NULL 返回 HAL_EINVAL。
+ *
+ * **arg 的所有权语义（务必读完再传堆内存）**：本函数**不接管** arg 的所有权，
+ * 只是原样保存指针、在回调触发时原样传回。它不提供、也不会提供 cleanup
+ * 回调参数——`conn_close` 在回调触发前断连的分支只清空 `after_flush`/
+ * `after_flush_arg` 两个字段，既不调用 fn、也不会替调用方 free(arg)，因为
+ * 它根本不知道 arg 是不是堆指针、该怎么释放。如果 arg 指向 malloc 出来的
+ * 内存，"连接在回调触发前断开"这条完全合法、且对这个原语的典型使用场景
+ * （提交后必然断连，如 WiFi 配网/OTA 换分区重启）来说是**常态而非例外**
+ * 的路径，就会在每次触发时泄漏一块内存——如果那块内存里还有敏感数据
+ * （口令、密钥），泄漏的还不只是内存本身。
+ *
+ * 因此：**需要清理就别用堆**。两种已验证过的写法：
+ *   1) arg 传一个不需要释放的常量/token（含 NULL）——回调要用的数据提前
+ *      写进调用方自己管理的静态/全局状态（模块自己的锁保护），回调只做
+ *      "把数据从暂存状态转正、唤醒消费它的线程"这类不携带所有权的动作
+ *      （console_net.c 的 net_connect_handoff 就是这么做的：job 在响应
+ *      发出前已经写进模块自己的状态槽位，回调只把一个 pending 标志位
+ *      翻成 true）；
+ *   2) arg 本身就是一个按值传递、不需要释放的标量，通过指针的整数值传递
+ *      （如 `(void *)(intptr_t)some_bool`，console_api.c 的
+ *      `do_reset`/`ep_system_reset` 即此写法）。
+ * 不要指望未来会给这个函数加一个 cleanup/free 回调参数来弥补——上面两种
+ * 写法已经足以覆盖目前所有调用点，加一个参数只会让"连接断开时到底谁负责
+ * 释放"这件事更难推理。
  */
 hal_err_t http_conn_defer_after_flush(http_conn_t *c, void (*fn)(void *arg), void *arg);
 

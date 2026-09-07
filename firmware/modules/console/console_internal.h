@@ -180,6 +180,24 @@ unsigned console_api_test_defer_fail_count(void);
 bool console_should_start_ap(bool eth_up, bool wifi_cfgd, bool wifi_up);
 /** 生成 AP SSID：IPC-{序列号后6位} */
 hal_err_t console_ap_ssid(const char *serial, char *buf, size_t cap);
+/**
+ * 从出厂验证码派生一个合规的 WPA2 PSK（评审 Important 3）。
+ *
+ * `hal_crypto.h` 把 `HAL_SEC_KEY_VERIFY_CODE` 文档化为"6 位验证码"，短于
+ * `hal_net.h` 自己对 `wifi_ap_start` 要求的 8~63 位下限——不能原样传入。
+ * 产品决策：不改验证码规范本身（会牵动机身标签、产线流程与 Task 6 的播种
+ * 逻辑），改为从验证码派生一个定长前缀 + 验证码本身拼接的 PSK。刻意不用
+ * 任何哈希/摘要：用户需要照着设备标签把 PSK 手动敲进手机，派生结果必须是
+ * 确定的、可打印的、可抄写的——同一验证码任何时候算出的 PSK 必须完全相同，
+ * 且字符集与验证码一致（可读可打的 ASCII）。标签上最终印什么由产品侧另行
+ * 确认（不在本次改动范围），这里只保证派生函数本身的规则清楚、稳定。
+ *
+ * 规则：`"IPC" + 验证码`；若拼接结果仍不足 8 位（验证码短于文档口径的
+ * 异常情况），追加固定的 '0' 字符补满 8 位，不引入随机性。code 为空、
+ * out/cap 非法，或派生结果仍不满足 8~63 位（防御性兜底，正常不会触发）
+ * 均返回 HAL_EINVAL；失败时 out 会被清零，不留半截结果。
+ */
+hal_err_t console_ap_psk_derive(const char *code, char *out, size_t cap);
 /** 是否为手机系统的 Captive Portal 探测路径 */
 bool console_is_captive_probe(const char *path);
 /** 当前网络模式："ap" / "sta" / "eth" */
@@ -255,15 +273,42 @@ typedef struct {
 
 void console_dhcp_lease_table_init(console_dhcp_lease_table_t *t);
 /**
- * 取/续租：该 MAC 已持有租约则原样续期返回，否则从空闲地址中分配一个
- * （过期租约会先被回收）。host_out 是完整的最后一个字节。地址池耗尽返回
- * HAL_ENOMEM——刻意不驱逐活跃租约（这与鉴权表的 LRU 淘汰语义不同：驱逐会让
- * 仍在线的设备突然失联）。
+ * 取/续租正式租约（REQUEST/ACK 确认后调用）：该 MAC 已持有记录（无论是此前
+ * 的正式租约还是 console_dhcp_lease_offer 留下的短时预留）则把到期时间续成
+ * 完整的 CONSOLE_DHCP_LEASE_S，否则从空闲地址中分配一个（过期记录会先被
+ * 回收）。host_out 是完整的最后一个字节。地址池耗尽返回 HAL_ENOMEM——刻意
+ * 不驱逐活跃租约（这与鉴权表的 LRU 淘汰语义不同：驱逐会让仍在线的设备
+ * 突然失联）。
  */
 hal_err_t console_dhcp_lease_acquire(console_dhcp_lease_table_t *t, const uint8_t mac[6],
                                      uint32_t now_s, uint32_t *host_out);
+/**
+ * DISCOVER 阶段的短时预留：语义与 console_dhcp_lease_acquire 完全一致
+ * （同一 MAC 复用同一地址、池满不驱逐），唯一区别是到期时间用调用方给定的
+ * offer_ttl_s 而不是固定的完整租期——DISCOVER 之后若没有对应的 REQUEST
+ * （即没有人再调 console_dhcp_lease_acquire 把同一 MAC 的到期时间续成完整
+ * 租期），这个预留会在 offer_ttl_s 后被下一次 sweep 回收，避免只发
+ * DISCOVER 不发 REQUEST 的客户端（或伪造 MAC 的攻击者）长期占满整个地址池。
+ */
+hal_err_t console_dhcp_lease_offer(console_dhcp_lease_table_t *t, const uint8_t mac[6],
+                                   uint32_t now_s, uint32_t offer_ttl_s, uint32_t *host_out);
 /** 主动释放（收到 DHCPRELEASE 时调用）；该 MAC 未持有租约返回 HAL_ENODEV */
 hal_err_t console_dhcp_lease_release(console_dhcp_lease_table_t *t, const uint8_t mac[6]);
+
+/**
+ * DHCP 协议决策（纯函数，不碰 socket）：给定已解析的请求与当前租约表状态，
+ * 决定要不要回复、回复的消息类型（OFFER/ACK/NAK）与分配到的 IP（主机字节序，
+ * server_ip 所在 /24 网段内）。DISCOVER 走 console_dhcp_lease_offer（短时
+ * 预留）；REQUEST 走 console_dhcp_lease_acquire（正式确认，requested_ip
+ * 存在且与实际分配不一致时答 NAK）；RELEASE 释放记录且不回复；其余消息
+ * 类型（DECLINE/INFORM 等本极简实现不处理）也不回复。
+ * 返回 true 表示应该发送一个应答（*msg_type_out/*your_ip_out 均已填好，
+ * NAK 时 *your_ip_out 恒为 0）；返回 false 表示什么都不用做（地址池耗尽、
+ * RELEASE、或不认识的消息类型），调用方不应发送任何报文。
+ */
+bool console_dhcp_decide(console_dhcp_lease_table_t *t, const console_dhcp_msg_t *req,
+                         uint32_t now_s, uint32_t offer_ttl_s, uint32_t lease_s,
+                         uint32_t server_ip, uint8_t *msg_type_out, uint32_t *your_ip_out);
 
 #ifdef IPC_TESTING
 /** 测试桩：清空 console_net 内部运行态（扫描缓存/连接请求/last_error/
@@ -297,6 +342,25 @@ void console_net_test_seed_scan_result(const char *ssid, int rssi_dbm, uint32_t 
 /** 测试桩：直接把内部状态置为"AP 模式下已开启热点 ssid"，绕开需要真实 WiFi
  *  硬件的工作线程路径，用于测试 /net/status 在 AP 模式下的字段拼装。 */
 void console_net_test_seed_ap(const char *ssid);
+/**
+ * 测试桩：读一次当前 connect_req 槽位（handler 在响应发出前写入、
+ * net_connect_handoff 在响应发出后转正的那个静态槽位）。ssid_out 为该
+ * 槽位当前记的 SSID（未提交过则是空串），pending_out 为其 pending 标志
+ * （true 表示已被 handoff 转正、等待工作线程消费）。用于证明 handler 确实
+ * 把提交的连接请求写进了这个槽位——如果 console_net_handler 内部登记
+ * defer 的整段逻辑被删掉，这里读到的 ssid 会是空串。
+ */
+void console_net_test_peek_connect(char *ssid_out, size_t cap, bool *pending_out);
+/**
+ * 测试桩：直接调用 net_connect_handoff（不经 http_conn_defer_after_flush）。
+ * 测试用连接（http_ws_test_conn_new）没有真实事件循环去 flush 它，defer
+ * 回调因此不会自动触发；这个函数让测试能够验证该回调本身确实会把
+ * console_net_test_peek_connect 读到的 pending 标志翻转为 true。
+ */
+void console_net_test_run_handoff(void);
+/** 见 console_net_test_run_handoff：net_connect_handoff 被调用的次数，
+ *  用于证明测试真的驱动到了这个回调，而不是只测了它的登记动作。 */
+unsigned console_net_test_handoff_count(void);
 #endif
 
 #endif /* IPC_CONSOLE_INTERNAL_H */

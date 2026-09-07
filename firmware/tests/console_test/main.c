@@ -1007,6 +1007,45 @@ static void test_net_ap_ssid(void)
     CHECK(strncmp(ssid, "IPC-", 4) == 0, "短序列号仍有前缀：%s", ssid);
 }
 
+/**
+ * 评审 Important 3：出厂验证码只有 6 位，短于 wifi_ap_start 自己要求的
+ * WPA2 下限 8 位，console_ap_psk_derive 派生一个合规的 PSK。补的这条
+ * 单元测试是评审 fix round 完成之后自己发现的遗漏——该函数一开始是
+ * static、只在从不启动的工作线程里被调用，等于没有测试能覆盖到它；
+ * 现在导出为纯函数，直接测。
+ */
+static void test_ap_psk_derive(void)
+{
+    char psk[80];
+
+    SECTION("AP PSK 派生（出厂验证码 → 合规 WPA2 口令）");
+
+    /* 文档口径的 6 位验证码：加前缀 "IPC" 后是 9 位，已经 >= 8，不需要再补 */
+    CHECK(console_ap_psk_derive("ABC123", psk, sizeof(psk)) == HAL_OK, "6 位验证码派生成功");
+    CHECK(strcmp(psk, "IPCABC123") == 0, "派生结果精确等于 前缀+验证码，实际：%s", psk);
+    CHECK(strlen(psk) >= 8 && strlen(psk) <= 63, "派生结果满足 WPA2 长度约束");
+
+    /* 确定性：同一验证码任何时候算出的 PSK 必须完全相同（不能引入随机性，
+       用户要照着标签把它敲进手机，设备重启后必须还是同一个值） */
+    {
+        char psk2[80];
+        CHECK(console_ap_psk_derive("ABC123", psk2, sizeof(psk2)) == HAL_OK, "再算一次");
+        CHECK(strcmp(psk, psk2) == 0, "同一验证码两次派生结果完全相同（确定性）");
+    }
+
+    /* 边界：验证码短到加前缀仍不足 8 位（超出文档口径的异常输入）——
+       "IPC" + "12" = "IPC12" = 5 位，需要补 3 个 '0' 凑到 8 位 */
+    CHECK(console_ap_psk_derive("12", psk, sizeof(psk)) == HAL_OK, "极短验证码也不能崩");
+    CHECK(strcmp(psk, "IPC12000") == 0, "补齐到 8 位，精确等于 IPC12000，实际：%s", psk);
+    CHECK(strlen(psk) == 8, "补齐后精确等于 8 位下限");
+
+    /* 非法输入 */
+    CHECK(console_ap_psk_derive(NULL, psk, sizeof(psk)) == HAL_EINVAL, "空指针验证码被拒");
+    CHECK(console_ap_psk_derive("", psk, sizeof(psk)) == HAL_EINVAL, "空串验证码被拒");
+    CHECK(console_ap_psk_derive("ABC123", NULL, sizeof(psk)) == HAL_EINVAL, "空输出缓冲被拒");
+    CHECK(console_ap_psk_derive("ABC123", psk, 0) == HAL_EINVAL, "零容量输出缓冲被拒");
+}
+
 static void test_captive_portal(void)
 {
     SECTION("Captive Portal 探测");
@@ -1240,24 +1279,187 @@ static void test_dhcp_lease_table(void)
     }
 }
 
+/**
+ * 评审 Minor #4：DISCOVER 不应立即提交完整的 2 小时租约——只发 DISCOVER
+ * 不发 REQUEST 的客户端（或伪造 MAC 的攻击者）会长期占满整个地址池。
+ * console_dhcp_lease_offer 用短得多的 offer_ttl 做临时预留，这里证明它
+ * 真的比 console_dhcp_lease_acquire 的完整租期短得多、且到期后会被回收。
+ */
+static void test_dhcp_lease_offer_short_ttl(void)
+{
+    console_dhcp_lease_table_t full;
+    uint8_t mac[6] = { 7,7,7,7,7,7 };
+    uint32_t host = 0, i;
+
+    SECTION("DHCP 租约表：DISCOVER 短时预留（offer）到期比正式租约快得多");
+    console_dhcp_lease_table_init(&full);
+
+    /* 用正式 acquire（完整 2 小时租期）填满除一个槽位外的整个池 */
+    for (i = 0; i < CONSOLE_DHCP_POOL_SIZE - 1; i++) {
+        uint8_t m[6] = { 0,0,0,0,2,0 };
+        uint32_t h = 0;
+        m[5] = (uint8_t)i;
+        CHECK(console_dhcp_lease_acquire(&full, m, 1000, &h) == HAL_OK, "预先填满第 %u 个槽位", (unsigned)i);
+    }
+    /* 最后一个槽位用短时预留（offer，ttl=30s）而不是正式 acquire */
+    CHECK(console_dhcp_lease_offer(&full, mac, 1000, 30, &host) == HAL_OK, "DISCOVER 短时预留最后一个槽位");
+
+    {
+        uint8_t newcomer[6] = { 8,8,8,8,8,8 };
+        uint32_t h2 = 0;
+        CHECK(console_dhcp_lease_offer(&full, newcomer, 1010, 30, &h2) == HAL_ENOMEM,
+              "预留未过期(1010<1000+30)时池已满（100 正式 + 1 预留），新 MAC 预留失败");
+
+        /* 预留在 1000+30=1030 到期；正式租约在 1000+7200=8200 到期，远晚于
+           前者。1031 时只有"预留"那一个槽位过期，新 MAC 应该能拿到它——
+           如果 offer 的 offer_ttl_s 参数没有生效（比如被误实现成固定 2
+           小时），这里会仍然 ENOMEM，直接证伪。 */
+        CHECK(console_dhcp_lease_offer(&full, newcomer, 1031, 30, &h2) == HAL_OK,
+              "预留过期(1031>1030)后，其余 100 个正式租约仍未到期(8200)，"
+              "但被回收的这一个槽位足够新 MAC 使用——证明 offer 的短 ttl 真的生效");
+        CHECK(h2 == host, "新 MAC 精确复用了刚过期的那个预留地址");
+    }
+}
+
+/**
+ * 评审 Minor #4：DISCOVER 之后及时收到 REQUEST（调用 console_dhcp_lease_
+ * acquire）应该把短时预留转正为完整租期，而不是任由它按 offer 的短 ttl
+ * 过期——否则一个正常完成握手的客户端也会在几十秒后"莫名其妙"丢失地址。
+ */
+static void test_dhcp_lease_offer_then_request_upgrades_to_full_lease(void)
+{
+    console_dhcp_lease_table_t t;
+    uint8_t mac[6] = { 9,9,9,9,9,9 };
+    uint32_t host_offer = 0, host_request = 0, host_recheck = 0;
+
+    SECTION("DHCP 租约表：DISCOVER 预留 + 及时 REQUEST 转为正式租约");
+    console_dhcp_lease_table_init(&t);
+
+    CHECK(console_dhcp_lease_offer(&t, mac, 1000, 30, &host_offer) == HAL_OK, "DISCOVER 预留");
+    CHECK(console_dhcp_lease_acquire(&t, mac, 1010, &host_request) == HAL_OK,
+          "1010 时收到 REQUEST，调用 acquire 确认租约");
+    CHECK(host_request == host_offer, "REQUEST 确认的地址与 DISCOVER 预留的地址精确相同");
+
+    /* 若 acquire 没有正确续成完整租期（比如仍然沿用 offer 留下的 30 秒
+       到期时间），1035（>1000+30，但远早于 1010+7200）时这个地址应该已经
+       "过期"、新查询会分配到一个新槽位而不是命中原槽位。用 offer 而不是
+       acquire 去做这次复查，专门验证"即使不是走 acquire 路径，记录也还在"
+       （即真的续成了长租期，而不是恰好又被同一路径的续租逻辑掩盖）。 */
+    CHECK(console_dhcp_lease_offer(&t, mac, 1035, 30, &host_recheck) == HAL_OK,
+          "REQUEST 之后很久（超过原 offer 的 30 秒窗口）仍能查询到该 MAC 的记录");
+    CHECK(host_recheck == host_offer,
+          "记录仍然存在且地址不变——证明 acquire 把 30 秒的临时预留正确续成了完整租期，"
+          "而不是任由它按原定的 30 秒过期");
+}
+
+/**
+ * 评审 Minor #6：ACK/NAK 判定、want_ip 拼装、DISCOVER 是否立即提交租约是
+ * 协议策略，不是收发字节的胶水，抽成纯函数 console_dhcp_decide 并做 KAT，
+ * 把 socket 胶水层（六节）的未验证面缩到最小。
+ */
+static void test_dhcp_decide_discover_and_request(void)
+{
+    console_dhcp_lease_table_t t;
+    console_dhcp_msg_t req;
+    uint8_t type = 0;
+    uint32_t ip = 0;
+    bool replied;
+
+    SECTION("DHCP 协议决策：console_dhcp_decide 的 DISCOVER/REQUEST/RELEASE 分支");
+    console_dhcp_lease_table_init(&t);
+
+    memset(&req, 0, sizeof(req));
+    memcpy(req.chaddr, "\xAA\xBB\xCC\xDD\xEE\xFF", 6);
+    req.msg_type = CONSOLE_DHCP_MSG_DISCOVER;
+    replied = console_dhcp_decide(&t, &req, 1000, 30, CONSOLE_DHCP_LEASE_S, 0xC0A8A901u, &type, &ip);
+    CHECK(replied == true, "DISCOVER 应该有应答");
+    CHECK(type == CONSOLE_DHCP_MSG_OFFER, "应答类型是 OFFER，实际=%u", type);
+    CHECK(ip == 0xC0A8A964u, "分配地址精确等于 192.168.169.100，实际=0x%08X", (unsigned)ip);
+
+    /* 紧接着的 REQUEST：requested_ip 与刚分配的地址一致 → ACK */
+    req.msg_type = CONSOLE_DHCP_MSG_REQUEST;
+    req.requested_ip = ip;
+    replied = console_dhcp_decide(&t, &req, 1005, 30, CONSOLE_DHCP_LEASE_S, 0xC0A8A901u, &type, &ip);
+    CHECK(replied == true, "REQUEST 应该有应答");
+    CHECK(type == CONSOLE_DHCP_MSG_ACK, "应答类型是 ACK，实际=%u", type);
+    CHECK(ip == 0xC0A8A964u, "ACK 分配的地址与 OFFER 一致");
+
+    /* REQUEST 里带一个跟服务端记录不一致的 requested_ip → NAK */
+    {
+        console_dhcp_msg_t req2;
+        memset(&req2, 0, sizeof(req2));
+        memcpy(req2.chaddr, "\x01\x02\x03\x04\x05\x06", 6);
+        req2.msg_type = CONSOLE_DHCP_MSG_REQUEST;
+        req2.requested_ip = 0xC0A8A9C8u;   /* 192.168.169.200，与实际会分配的不一致 */
+        replied = console_dhcp_decide(&t, &req2, 1010, 30, CONSOLE_DHCP_LEASE_S, 0xC0A8A901u, &type, &ip);
+        CHECK(replied == true, "requested_ip 不匹配时仍应回复（NAK）");
+        CHECK(type == CONSOLE_DHCP_MSG_NAK, "应答类型是 NAK，实际=%u", type);
+        CHECK(ip == 0, "NAK 的 your_ip 必须是 0，不得暗示一个地址");
+    }
+
+    /* RELEASE：不回复，且租约确实被释放 */
+    req.msg_type = CONSOLE_DHCP_MSG_RELEASE;
+    replied = console_dhcp_decide(&t, &req, 1020, 30, CONSOLE_DHCP_LEASE_S, 0xC0A8A901u, &type, &ip);
+    CHECK(replied == false, "RELEASE 不应该有应答");
+    CHECK(console_dhcp_lease_release(&t, req.chaddr) == HAL_ENODEV,
+          "RELEASE 已经在 console_dhcp_decide 内部执行过一次，租约已不在表中，重复释放返回 ENODEV");
+
+    /* 不认识的消息类型（如 INFORM）：不回复 */
+    req.msg_type = CONSOLE_DHCP_MSG_INFORM;
+    replied = console_dhcp_decide(&t, &req, 1030, 30, CONSOLE_DHCP_LEASE_S, 0xC0A8A901u, &type, &ip);
+    CHECK(replied == false, "INFORM 等未实现的消息类型不回复");
+
+    /* 地址池耗尽时 DISCOVER 不回复 */
+    {
+        console_dhcp_lease_table_t full;
+        console_dhcp_msg_t req3;
+        uint32_t i;
+        console_dhcp_lease_table_init(&full);
+        for (i = 0; i < CONSOLE_DHCP_POOL_SIZE; i++) {
+            uint8_t m[6] = { 0,0,0,0,9,0 };
+            uint32_t h = 0;
+            m[5] = (uint8_t)i;
+            console_dhcp_lease_acquire(&full, m, 1000, &h);
+        }
+        memset(&req3, 0, sizeof(req3));
+        memcpy(req3.chaddr, "\x99\x99\x99\x99\x99\x99", 6);
+        req3.msg_type = CONSOLE_DHCP_MSG_DISCOVER;
+        replied = console_dhcp_decide(&full, &req3, 1000, 30, CONSOLE_DHCP_LEASE_S, 0xC0A8A901u, &type, &ip);
+        CHECK(replied == false, "地址池耗尽时 DISCOVER 不回复（客户端会重试或超时放弃）");
+    }
+}
+
 /* ---- REST 端点：/api/v1/net/{status,wifi/scan,wifi/connect} ---- */
 
 static void test_net_init_and_routes(void)
 {
     SECTION("网络子模块初始化与路由注册");
     CHECK(cfg_init(NULL, "console_test_cfg_net_init.json") == HAL_OK, "配置中心就绪");
-    /* 整个测试二进制里唯一一次 console_net_init()：既验证路由注册，也验证
-       net.wifi.ssid 配置规则登记不会崩——其余用例一律走 console_net_test_dispatch，
-       避免 http_route（不去重，ROUTE_MAX=8）被同一前缀反复占槽。 */
-    CHECK(console_net_init() == HAL_OK, "console_net_init 成功");
-    /* 精确核对命中的前缀本身，而不是只判非 NULL——本计划已因"/ 兜底使任何
-       路径恒非 NULL"吃过亏（见 progress.md 的派发注意事项）。此处没有注册
-       兜底路由，但仍按同一更严格的写法统一处理；短路 && 避免 matched 为
-       NULL 时 strcmp 直接崩溃掉整个测试进程。 */
+    /*
+     * 评审 Minor #7：只注册 /api/v1/net/ 一个前缀时，任何路径都只可能命中
+     * 它，"精确核对命中的前缀"这条断言对"最长前缀真的优先"这件事零证明力
+     * ——哪怕 http_route_match 退化成"先注册先赢"，因为压根没有第二个前缀
+     * 参与竞争，断言照样通过。要真正验证生产环境下 /api/v1/net/status 会
+     * 命中比 /api/v1/ 更长、更具体的 /api/v1/net/，必须让两个前缀同时
+     * 注册。console_api_init()（Task 7）在整个测试二进制里也是唯一一次
+     * 调用，与 console_net_init 各占一个路由槽（+ test_factory_bootstrap
+     * 已经注册的 /api/v1/auth/，共 3/8，预算充足）。
+     */
+    CHECK(console_api_init() == HAL_OK, "console_api_init 成功（注册 /api/v1/，唯一一次）");
+    CHECK(console_net_init() == HAL_OK, "console_net_init 成功（唯一一次）");
     {
-        const char *matched = http_route_match("/api/v1/net/status");
-        CHECK(matched != NULL && strcmp(matched, "/api/v1/net/") == 0,
-              "命中的前缀精确等于 /api/v1/net/，实际：%s", matched ? matched : "(NULL)");
+        const char *matched_net = http_route_match("/api/v1/net/status");
+        const char *matched_generic = http_route_match("/api/v1/config");
+        /* 短路 && 避免 matched 为 NULL 时 strcmp 直接崩溃掉整个测试进程
+           （本计划已因"/ 兜底使 !=NULL 检查零证明力"吃过亏，这里改成精确
+           比较前缀字符串本身）。 */
+        CHECK(matched_net != NULL && strcmp(matched_net, "/api/v1/net/") == 0,
+              "/api/v1/net/status 命中更长的 /api/v1/net/ 前缀而不是 /api/v1/，实际：%s",
+              matched_net ? matched_net : "(NULL)");
+        CHECK(matched_generic != NULL && strcmp(matched_generic, "/api/v1/") == 0,
+              "/api/v1/config 命中 /api/v1/ 前缀——证明两个前缀真的同时注册并生效，"
+              "而不是 net 是唯一注册过的前缀，实际：%s",
+              matched_generic ? matched_generic : "(NULL)");
     }
     cfg_deinit();
     remove("console_test_cfg_net_init.json");
@@ -1480,13 +1682,28 @@ static void test_net_wifi_no_capability(void)
  * console_net_handler（只测不碰 conn 的 net_dispatch），颠倒 handler 内部
  * 那两行调用顺序不会被上面任何一个端点测试发现。
  */
+/**
+ * 评审 Minor #8：原版本只断言 s_netst_defer_fail_count 不变——把
+ * console_net_handler 里整个 "if (dfn) {...}" 块删掉，这个计数同样不变，
+ * 测试照样通过，而 net_connect_handoff 在整个测试套件里一次都没有被真正
+ * 执行过。补两层验证：
+ *   1) handler 返回后立即 peek 静态槽位，确认提交的 ssid 确实被写进去了
+ *      （pending 此刻应仍为 false）——如果整个 if(dfn){} 块被删掉，这里
+ *      读到的会是空串，直接证伪；
+ *   2) 测试连接没有真实事件循环去 flush 它，defer 回调不会自动触发，用
+ *      console_net_test_run_handoff() 手动驱动一次，断言 handoff_count
+ *      确实 +1、且 pending 翻转为 true——如果 net_connect_handoff 的函数体
+ *      被清空，这两条会分别失败。
+ */
 static void test_net_connect_handler_order(void)
 {
     http_req_t req;
     http_conn_t *conn;
     char cookie[128];
+    char staged_ssid[HAL_SSID_MAX];
     bool must_change = false;
-    unsigned before;
+    bool pending = true;   /* 故意先置 true：若 peek 因某种原因没写这个变量，下面的断言不会假阳性 */
+    unsigned before, before_handoff;
 
     SECTION("console_net_handler：必须先入队 202 响应、再登记延后动作交给工作线程");
     console_net_test_reset();
@@ -1503,11 +1720,25 @@ static void test_net_connect_handler_order(void)
         req.conn = conn;   /* 生产路径由 http_server.c 的 dispatch_one 回填，这里手动模拟 */
 
         before = console_net_test_defer_fail_count();
+        before_handoff = console_net_test_handoff_count();
         CHECK(console_net_test_full_handler(&req) == 0, "配网请求处理成功（handler 返回 0，已自行响应）");
         CHECK(console_net_test_defer_fail_count() == before,
               "延后动作登记不应失败——若 console_net_handler 内部把 http_respond_json 与 "
               "http_conn_defer_after_flush 两行调用顺序颠倒，登记时发送队列还是空的，"
               "http_conn_defer_after_flush 会返回 HAL_ESTATE，这里的计数就会增加");
+
+        console_net_test_peek_connect(staged_ssid, sizeof(staged_ssid), &pending);
+        CHECK(strcmp(staged_ssid, "HomeWiFi") == 0,
+              "handler 已把提交的连接请求写进工作线程会消费的槽位，实际：%s", staged_ssid);
+        CHECK(pending == false, "此刻 defer 回调还没触发，pending 应仍为 false");
+
+        /* 测试连接没有真实事件循环去 flush 它，defer 回调不会自动触发；
+           手动驱动一次，验证它确实会把上面 staged 的数据转正。 */
+        console_net_test_run_handoff();
+        CHECK(console_net_test_handoff_count() == before_handoff + 1,
+              "net_connect_handoff 确实被执行了一次");
+        console_net_test_peek_connect(staged_ssid, sizeof(staged_ssid), &pending);
+        CHECK(pending == true, "回调执行后 pending 应翻转为 true，交给工作线程消费");
 
         http_ws_test_conn_free(conn);
     }
@@ -1544,6 +1775,7 @@ int main(void)
 
     test_net_ap_decision();
     test_net_ap_ssid();
+    test_ap_psk_derive();
     test_captive_portal();
     test_dhcp_parse_discover();
     test_dhcp_parse_request_with_options();
@@ -1552,7 +1784,10 @@ int main(void)
     test_dhcp_build_nak_exact_bytes();
     test_dhcp_build_buffer_too_small();
     test_dhcp_lease_table();
-    test_net_init_and_routes();       /* 唯一一次 console_net_init()，顺带注册路由 */
+    test_dhcp_lease_offer_short_ttl();
+    test_dhcp_lease_offer_then_request_upgrades_to_full_lease();
+    test_dhcp_decide_discover_and_request();
+    test_net_init_and_routes();       /* 唯一一次 console_net_init()/console_api_init()，顺带注册路由 */
     test_net_status_endpoint();
     test_net_wifi_scan_endpoint();
     test_net_wifi_connect_endpoint();

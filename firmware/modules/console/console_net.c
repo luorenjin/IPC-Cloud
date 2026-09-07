@@ -241,8 +241,15 @@ static void dhcp_lease_sweep(console_dhcp_lease_table_t *t, uint32_t now_s)
     }
 }
 
-hal_err_t console_dhcp_lease_acquire(console_dhcp_lease_table_t *t, const uint8_t mac[6],
-                                     uint32_t now_s, uint32_t *host_out)
+/**
+ * 取/续租的共同实现：该 MAC 已有记录（无论此前是短时预留还是正式租约）
+ * 则把到期时间续成 now_s+ttl_s，否则从空闲槽位分配一个；池满不驱逐。
+ * console_dhcp_lease_acquire 与 console_dhcp_lease_offer 的唯一区别就是
+ * 传给这里的 ttl_s（完整租期 vs 短时预留），共用同一份查找/分配逻辑，
+ * 避免两份几乎相同的代码分叉维护。
+ */
+static hal_err_t dhcp_lease_reserve(console_dhcp_lease_table_t *t, const uint8_t mac[6],
+                                    uint32_t now_s, uint32_t ttl_s, uint32_t *host_out)
 {
     uint32_t i, free_idx = CONSOLE_DHCP_POOL_SIZE;
 
@@ -251,7 +258,7 @@ hal_err_t console_dhcp_lease_acquire(console_dhcp_lease_table_t *t, const uint8_
 
     for (i = 0; i < CONSOLE_DHCP_POOL_SIZE; i++) {
         if (t->entries[i].used && memcmp(t->entries[i].mac, mac, 6) == 0) {
-            t->entries[i].expires_s = now_s + CONSOLE_DHCP_LEASE_S;   /* 续租 */
+            t->entries[i].expires_s = now_s + ttl_s;
             *host_out = CONSOLE_DHCP_POOL_START + i;
             return HAL_OK;
         }
@@ -263,9 +270,21 @@ hal_err_t console_dhcp_lease_acquire(console_dhcp_lease_table_t *t, const uint8_
 
     t->entries[free_idx].used = true;
     memcpy(t->entries[free_idx].mac, mac, 6);
-    t->entries[free_idx].expires_s = now_s + CONSOLE_DHCP_LEASE_S;
+    t->entries[free_idx].expires_s = now_s + ttl_s;
     *host_out = CONSOLE_DHCP_POOL_START + free_idx;
     return HAL_OK;
+}
+
+hal_err_t console_dhcp_lease_acquire(console_dhcp_lease_table_t *t, const uint8_t mac[6],
+                                     uint32_t now_s, uint32_t *host_out)
+{
+    return dhcp_lease_reserve(t, mac, now_s, CONSOLE_DHCP_LEASE_S, host_out);
+}
+
+hal_err_t console_dhcp_lease_offer(console_dhcp_lease_table_t *t, const uint8_t mac[6],
+                                   uint32_t now_s, uint32_t offer_ttl_s, uint32_t *host_out)
+{
+    return dhcp_lease_reserve(t, mac, now_s, offer_ttl_s, host_out);
 }
 
 hal_err_t console_dhcp_lease_release(console_dhcp_lease_table_t *t, const uint8_t mac[6])
@@ -282,6 +301,51 @@ hal_err_t console_dhcp_lease_release(console_dhcp_lease_table_t *t, const uint8_
 }
 
 /* ==========================================================================
+ * 三之二、DHCP 协议决策（纯函数：ACK/NAK 判定、want_ip 拼装、DISCOVER 是否
+ * 立即提交租约——这是协议策略，不是收发字节的胶水，抽出来单独做 KAT，
+ * 把六节"未验证的 socket 胶水"再缩小一圈，见评审 Minor #6）
+ * ========================================================================== */
+
+bool console_dhcp_decide(console_dhcp_lease_table_t *t, const console_dhcp_msg_t *req,
+                         uint32_t now_s, uint32_t offer_ttl_s, uint32_t lease_s,
+                         uint32_t server_ip, uint8_t *msg_type_out, uint32_t *your_ip_out)
+{
+    uint32_t host = 0, want_ip;
+    hal_err_t rc;
+
+    if (!t || !req || !msg_type_out || !your_ip_out) return false;
+    *your_ip_out = 0;
+
+    switch (req->msg_type) {
+    case CONSOLE_DHCP_MSG_DISCOVER:
+        if (console_dhcp_lease_offer(t, req->chaddr, now_s, offer_ttl_s, &host) != HAL_OK)
+            return false;   /* 地址池耗尽：不回应，客户端会重试或超时放弃 */
+        *msg_type_out = (uint8_t)CONSOLE_DHCP_MSG_OFFER;
+        *your_ip_out = (server_ip & 0xFFFFFF00u) | host;
+        return true;
+    case CONSOLE_DHCP_MSG_REQUEST:
+        /* 走 dhcp_lease_reserve 而不是 console_dhcp_lease_acquire，好让调用方
+           传入的 lease_s 真正生效——console_dhcp_lease_acquire 对外的公开
+           契约是固定 CONSOLE_DHCP_LEASE_S，这里需要的是"调用方指定的租期"，
+           两者在 lease_s==CONSOLE_DHCP_LEASE_S 时行为完全一致。 */
+        rc = dhcp_lease_reserve(t, req->chaddr, now_s, lease_s, &host);
+        want_ip = (server_ip & 0xFFFFFF00u) | host;
+        if (rc == HAL_OK && (req->requested_ip == 0 || req->requested_ip == want_ip)) {
+            *msg_type_out = (uint8_t)CONSOLE_DHCP_MSG_ACK;
+            *your_ip_out = want_ip;
+        } else {
+            *msg_type_out = (uint8_t)CONSOLE_DHCP_MSG_NAK;   /* your_ip_out 保持 0 */
+        }
+        return true;
+    case CONSOLE_DHCP_MSG_RELEASE:
+        console_dhcp_lease_release(t, req->chaddr);
+        return false;   /* RELEASE 不回复 */
+    default:
+        return false;   /* DECLINE/INFORM 等本极简实现不处理 */
+    }
+}
+
+/* ==========================================================================
  * 四、内部运行态（AP/STA 状态机、扫描缓存、连接请求）——由 s_netst_mu 保护
  * ========================================================================== */
 
@@ -291,6 +355,9 @@ typedef enum { NET_MODE_ETH = 0, NET_MODE_STA = 1, NET_MODE_AP = 2 } net_mode_t;
 #define NET_SCAN_TTL_US         (10ull * 1000000ull)   /* 缓存 10 秒内的扫描结果直接复用 */
 #define NET_CONNECT_WAIT_MS     20000u                 /* 等待关联+DHCP 拿到地址的最长时间 */
 #define NET_AP_REOPEN_DELAY_MS  60000u                 /* brief 原文：失败 60 秒后重开 AP */
+#define NET_AP_RECHECK_MS       5000u                  /* 空闲时周期复查 AP 决策的间隔（评审 Important 1） */
+#define NET_WIFI_ASSOC_GRACE_MS 15000u                 /* 已配置 WiFi 但未连上时，给 supplicant 的关联宽限期 */
+#define NET_DHCP_OFFER_TTL_S    30u                     /* DISCOVER 短时预留的有效期（评审 Minor #4） */
 #define NET_AP_GATEWAY_IP       "192.168.169.1"
 #define CONSOLE_NET_PREFIX      "/api/v1/net/"
 #define CONSOLE_NET_BODY_MAX    (4u * 1024u)
@@ -399,12 +466,54 @@ static bool net_interruptible_wait(uint32_t total_ms)
     return !stopped;
 }
 
-/** 按当前链路状态决定要不要开/关 AP（启动时、配网失败回落时都会调用）。 */
+/* 评审 Important 3：从出厂验证码派生一个合规 WPA2 PSK；完整规则/理由见
+ * console_internal.h 的声明注释。导出（非 static）是为了能直接单元测试
+ * ——它只在工作线程内的 net_apply_ap_decision 里被调用，测试套件从不
+ * 启动工作线程，不导出就测不到。 */
+hal_err_t console_ap_psk_derive(const char *code, char *out, size_t cap)
+{
+    char tmp[HAL_PSK_MAX];
+    size_t len;
+
+    if (!code || !code[0] || !out || cap == 0) return HAL_EINVAL;
+    if (fmt_safe(tmp, sizeof(tmp), "IPC%s", code) != HAL_OK) return HAL_ENOMEM;
+
+    len = strlen(tmp);
+    if (len < 8) {
+        static const char pad[] = "00000000";   /* 固定填充，不用随机数：结果必须可复现 */
+        size_t need = 8 - len;
+        if (need > sizeof(pad) - 1) { secure_wipe_local(tmp, sizeof(tmp)); return HAL_EINVAL; }
+        if (fmt_safe(out, cap, "%s%.*s", tmp, (int)need, pad) != HAL_OK) {
+            secure_wipe_local(tmp, sizeof(tmp));
+            return HAL_ENOMEM;
+        }
+    } else if (fmt_safe(out, cap, "%s", tmp) != HAL_OK) {
+        secure_wipe_local(tmp, sizeof(tmp));
+        return HAL_ENOMEM;
+    }
+    secure_wipe_local(tmp, sizeof(tmp));
+
+    len = strlen(out);
+    if (len < 8 || len > 63) { secure_wipe_local(out, cap); return HAL_EINVAL; }   /* 防御性兜底 */
+    return HAL_OK;
+}
+
+/**
+ * 按当前链路状态决定要不要开/关 AP。调用点：工作线程启动时、周期复查时
+ * （评审 Important 1，见 net_worker_thread 的 NET_AP_RECHECK_MS）、配网
+ * 失败回落时。
+ *
+ * 只会被工作线程调用（启动一次 + 循环内周期调用 + net_do_connect 失败路径
+ * 调用，三处都在同一个线程上），`s_wifi_grace_started_us` 因此不需要加锁。
+ */
+static uint64_t s_wifi_grace_started_us;   /* 0 表示当前不在"已配置但未连上"的宽限期内 */
+
 static void net_apply_ap_decision(void)
 {
     hal_netif_status_t st;
     bool eth_up = false, wifi_up = false, wifi_cfgd, want_ap;
     net_mode_t cur;
+    uint64_t now;
 
     if (hal_has(HAL_MOD_NET) && hal()->net->get_status &&
         hal()->net->get_status(HAL_NETIF_ETH, &st) == HAL_OK)
@@ -420,11 +529,34 @@ static void net_apply_ap_decision(void)
 
     want_ap = console_should_start_ap(eth_up, wifi_cfgd, wifi_up);
 
+    /* 宽限期（评审 Important 1）：已配置 WiFi 但尚未连上时，给 supplicant
+       一段时间完成关联，避免开机瞬间（还没来得及连）就误判成"连不上"而
+       开 AP——brief 原文的限定词就是"已配但未连上（超时后）"。只有
+       "eth down 且 wifi 未连上且 wifi 已配置"这一具体原因导致 want_ap 为
+       真时才启用宽限期；eth up 或 wifi 已连上时 console_should_start_ap
+       已经返回 false，走不到这里；wifi 从未配置过时没有什么好等的，
+       直接开 AP。
+       计时起点只在"从其他状态进入这个状态"时设一次（下面 else 分支里
+       条件不成立就清零），并不会在这个状态里被后续调用重置——这意味着
+       net_do_connect 失败路径里"等 60 秒后重开 AP"调用本函数时，如果设备
+       从等待关联开始就一直处于这个状态（没有中途 up 过），宽限期早就在
+       更早的周期复查里过期了，不会在 60 秒之外再叠加一段宽限期延迟。 */
+    now = os_monotonic_us();
+    if (want_ap && !eth_up && !wifi_up && wifi_cfgd) {
+        if (s_wifi_grace_started_us == 0) s_wifi_grace_started_us = now;
+        if (now - s_wifi_grace_started_us < (uint64_t)NET_WIFI_ASSOC_GRACE_MS * 1000ull)
+            want_ap = false;   /* 宽限期内先不开 AP，等下一次周期复查 */
+    } else {
+        s_wifi_grace_started_us = 0;   /* 条件不再成立（已经 up，或从未配置过），重置计时 */
+    }
+
     if (want_ap && cur != NET_MODE_AP) {
         char serial[HAL_NAME_MAX] = "";
         char ssid[HAL_SSID_MAX];
+        char code_buf[HAL_PSK_MAX];
         char psk[HAL_PSK_MAX];
         size_t len = 0;
+        hal_err_t rc;
 
         /* SSID：序列号取自 hal_sys 芯片信息（profile 无逐台设备的序列号字段） */
         if (hal_has(HAL_MOD_SYS) && hal()->sys->get_info) {
@@ -434,34 +566,50 @@ static void net_apply_ap_decision(void)
         }
         if (console_ap_ssid(serial, ssid, sizeof(ssid)) != HAL_OK) return;
 
-        /* PSK：出厂验证码，与 Web 登录同值——开放热点会让邻近用户直接进入
-           配网页，不可接受。取不到就不开热点，绝不退化为开放网络。 */
-        psk[0] = '\0';
+        /* PSK：从出厂验证码派生（console_ap_psk_derive，评审 Important 3）；
+           取不到验证码或派生失败就不开热点，绝不退化为开放网络——开放
+           热点会让邻近用户直接进入配网页，不可接受。 */
+        code_buf[0] = '\0';
         if (hal_has(HAL_MOD_CRYPTO) && hal()->crypto->secure_read) {
             uint8_t raw[HAL_PSK_MAX];
             if (hal()->crypto->secure_read(HAL_SEC_KEY_VERIFY_CODE, raw, sizeof(raw) - 1, &len) == HAL_OK
-                && len > 0 && len < sizeof(psk)) {
-                memcpy(psk, raw, len);
-                psk[len] = '\0';
-                while (len > 0 && (psk[len - 1] == '\n' || psk[len - 1] == '\r' ||
-                                   psk[len - 1] == ' '  || psk[len - 1] == '\t'))
-                    psk[--len] = '\0';
+                && len > 0 && len < sizeof(code_buf)) {
+                memcpy(code_buf, raw, len);
+                code_buf[len] = '\0';
+                while (len > 0 && (code_buf[len - 1] == '\n' || code_buf[len - 1] == '\r' ||
+                                   code_buf[len - 1] == ' '  || code_buf[len - 1] == '\t'))
+                    code_buf[--len] = '\0';
             }
             secure_wipe_local(raw, sizeof(raw));
         }
-        if (psk[0] == '\0') {
+        if (code_buf[0] == '\0') {
             LOGE(MOD, "无出厂验证码可用，无法开启带密码的配网热点（不使用开放热点兜底）");
-            secure_wipe_local(psk, sizeof(psk));
+            return;
+        }
+        rc = console_ap_psk_derive(code_buf, psk, sizeof(psk));
+        secure_wipe_local(code_buf, sizeof(code_buf));
+        if (rc != HAL_OK) {
+            LOGE(MOD, "从出厂验证码派生 WPA2 口令失败（rc=%d），无法开启配网热点", (int)rc);
             return;
         }
 
-        if (hal_has(HAL_MOD_NET) && hal()->net->wifi_ap_start &&
-            hal()->net->wifi_ap_start(ssid, psk, 0) == HAL_OK) {
+        rc = (hal_has(HAL_MOD_NET) && hal()->net->wifi_ap_start)
+             ? hal()->net->wifi_ap_start(ssid, psk, 0) : HAL_ENOTSUP;
+        if (rc == HAL_OK) {
             os_mutex_lock(s_netst_mu);
             s_netst.mode = NET_MODE_AP;
             snprintf(s_netst.ap_ssid, sizeof(s_netst.ap_ssid), "%s", ssid);
             os_mutex_unlock(s_netst_mu);
             LOGI(MOD, "已开启配网热点");   /* 绝不打印 SSID 之外的任何凭据信息 */
+        } else {
+            /* 评审 Important 3：失败不能静默——这是设备唯一的救济路径，
+               静默死掉会让现场无从排查。日志与 last_error 都只带错误码，
+               不带 psk/验证码。 */
+            LOGE(MOD, "开启配网热点失败 rc=%d", (int)rc);
+            os_mutex_lock(s_netst_mu);
+            snprintf(s_netst.last_error, sizeof(s_netst.last_error),
+                     "开启配网热点失败（hal_err=%d）", (int)rc);
+            os_mutex_unlock(s_netst_mu);
         }
         secure_wipe_local(psk, sizeof(psk));
     } else if (!want_ap && cur == NET_MODE_AP) {
@@ -511,6 +659,9 @@ static void net_do_connect(const net_connect_req_t *job)
     if (up) {
         os_mutex_lock(s_netst_mu);
         s_netst.mode = NET_MODE_STA;
+        s_netst.wifi_cfgd = true;   /* 评审 Minor #3：内存态同步置位，不只是落盘的 cfg；
+                                       Important 1 加了周期复查后 net_apply_ap_decision
+                                       真的会读到这个字段，必须保持自洽 */
         snprintf(s_netst.sta_ssid, sizeof(s_netst.sta_ssid), "%s", job->ssid);
         s_netst.last_error[0] = '\0';
         os_mutex_unlock(s_netst_mu);
@@ -573,19 +724,25 @@ static void net_dhcp_poll_if_ap(uint32_t timeout_ms)
 
 static void net_worker_thread(void *arg)
 {
+    uint64_t last_ap_check_us;
+
     (void)arg;
     net_apply_ap_decision();
+    last_ap_check_us = os_monotonic_us();
 
     for (;;) {
         net_connect_req_t job;
         bool do_connect = false, do_scan = false;
+        uint64_t now;
 
         memset(&job, 0, sizeof(job));
         os_mutex_lock(s_netst_mu);
         if (s_netst.stop) { os_mutex_unlock(s_netst_mu); break; }
         if (s_netst.connect_req.pending) {
             job = s_netst.connect_req;
-            s_netst.connect_req.pending = false;
+            /* 评审 Minor #2：消费后不能只清 pending，静态槽位里明文 psk 的
+               副本要跟着清零——堆副本、栈副本都已经 wipe，这份不能漏。 */
+            secure_wipe_local(&s_netst.connect_req, sizeof(s_netst.connect_req));
             do_connect = true;
         } else if (s_netst.scan.in_progress) {
             do_scan = true;
@@ -594,9 +751,25 @@ static void net_worker_thread(void *arg)
             os_cond_wait(s_netst_cv, s_netst_mu, 1000);
         os_mutex_unlock(s_netst_mu);
 
-        if (do_connect) net_do_connect(&job);
-        else if (do_scan) net_do_scan();
-        else net_dhcp_poll_if_ap(200);
+        if (do_connect) {
+            net_do_connect(&job);
+        } else if (do_scan) {
+            net_do_scan();
+        } else {
+            net_dhcp_poll_if_ap(200);
+        }
+
+        /* 评审 Important 1：AP 决策不能只在启动时算一次——开机时 WiFi 还没
+           关联就误开 AP 之后，如果没有周期复查，mode 会永远停在 "ap"，即使
+           supplicant 随后真的把 WiFi 连上了；反过来运行中插/拔网线也需要
+           能被感知到。每隔 NET_AP_RECHECK_MS 重新跑一次判定；do_connect 走
+           完之后也顺带重新计时——net_do_connect 自己已经在失败路径里调过
+           一次 net_apply_ap_decision，这里再核一次不会重复开/关，是幂等的。 */
+        now = os_monotonic_us();
+        if (now - last_ap_check_us >= (uint64_t)NET_AP_RECHECK_MS * 1000ull) {
+            net_apply_ap_decision();
+            last_ap_check_us = now;
+        }
     }
     net_dhcp_socket_close_if_open();
 }
@@ -654,7 +827,8 @@ typedef int net_sock_t;
 
 #define DHCP_SERVER_PORT 67
 #define DHCP_CLIENT_PORT 68
-#define NET_AP_GATEWAY_U32 0xC0A8A901u   /* 192.168.169.1，与 NET_AP_GATEWAY_IP 保持一致 */
+#define NET_AP_GATEWAY_U32          0xC0A8A901u   /* 192.168.169.1，与 NET_AP_GATEWAY_IP 保持一致 */
+#define NET_AP_SUBNET_BROADCAST_U32 (NET_AP_GATEWAY_U32 | 0x000000FFu)   /* 192.168.169.255 */
 
 static net_sock_t s_dhcp_sock = NET_SOCK_INVALID;
 static console_dhcp_lease_table_t s_dhcp_leases;
@@ -662,6 +836,30 @@ static console_dhcp_lease_table_t s_dhcp_leases;
 static bool s_wsa_started;
 #endif
 
+/**
+ * 评审 Important 4：socket 原来 bind 到 INADDR_ANY:67、应答又广播到
+ * 255.255.255.255——不区分接口，会接收/应答来自任意网卡（包括有线上联口）
+ * 的 DHCP 流量，在客户 LAN 上变成流氓 DHCP 服务器。改为：
+ *   1) bind 到 AP 网段自身地址（NET_AP_GATEWAY_U32），而非 INADDR_ANY；
+ *   2) 应答目的地址改为 AP 网段的定向广播（NET_AP_SUBNET_BROADCAST_U32=
+ *      192.168.169.255），不用全局受限广播 255.255.255.255——后者会经
+ *      内核路由表在所有具备广播能力的接口上外泄，前者只会经拥有该网段
+ *      路由的接口（AP 自身）送出。
+ *
+ * **已知的可移植性注意事项（本机无法验证，未来在真实硬件上必须确认）**：
+ * 多数 BSD 派生的 socket 实现里，UDP socket 若 bind 到一个具体的单播地址
+ * 而非 INADDR_ANY，只会收到目的地址精确匹配该地址的报文——而 DHCPDISCOVER
+ * 按 RFC 2131 通常以目的地址 255.255.255.255（受限广播）发出，客户端此时
+ * 还不知道网关地址。如果这一行为在目标平台上成立，bind 到具体地址会导致
+ * 收不到 DISCOVER，DHCP 服务名存实亡。真正正确、可移植的做法是绑定到
+ * INADDR_ANY 但把套接字绑定到具体网络接口（Linux 上是 SO_BINDTODEVICE，
+ * 需要 AP 接口名——目前 hal_net.h 的 wifi_ap_start 不回传接口名，取不到），
+ * 或用 recvmsg + IP_PKTINFO 按到达接口过滤。这两种做法都比现在复杂得多，
+ * 且都无法在 x86 + mock 上验证效果。当前先按评审的要求实现"bind 到具体
+ * 地址"这一步；**在真实硬件上联调这一层时，第一件事就是确认 DISCOVER
+ * 是否还能被收到**，收不到就需要换成上述按接口过滤的方案。无论 bind 方式
+ * 如何，"应答不经全局广播外泄到其他接口"这条改动都是纯收益、不用回退。
+ */
 static void net_dhcp_socket_ensure_open(void)
 {
     struct sockaddr_in addr;
@@ -688,7 +886,7 @@ static void net_dhcp_socket_ensure_open(void)
 
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    addr.sin_addr.s_addr = htonl(NET_AP_GATEWAY_U32);   /* 绑定到 AP 网段自身，而非 INADDR_ANY */
     addr.sin_port = htons(DHCP_SERVER_PORT);
     if (bind(s_dhcp_sock, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
         LOGE(MOD, "DHCP：绑定 UDP 67 端口失败（需要管理员/root 权限，或端口已被占用）");
@@ -708,7 +906,9 @@ static void net_dhcp_socket_close_if_open(void)
     s_dhcp_sock = NET_SOCK_INVALID;
 }
 
-/** 收一个 DHCP 请求、决策、回一个应答；timeout_ms 内无数据则直接返回。 */
+/** 收一个 DHCP 请求、决策、回一个应答；timeout_ms 内无数据则直接返回。
+ *  协议策略（要不要回、回什么）全部在纯函数 console_dhcp_decide 里，这里
+ *  只做"收字节→调用它→发字节"的胶水（评审 Minor #6，缩小未验证面）。 */
 static void net_dhcp_poll_once(uint32_t timeout_ms)
 {
     uint8_t buf[600], reply[600];
@@ -722,10 +922,9 @@ static void net_dhcp_poll_once(uint32_t timeout_ms)
     socklen_t fromlen = sizeof(from);
 #endif
     console_dhcp_msg_t msg;
-    uint32_t host = 0, want_ip, server_ip = NET_AP_GATEWAY_U32;
+    uint32_t your_ip = 0;
     size_t out_len = 0;
-    uint8_t reply_type;
-    hal_err_t rc;
+    uint8_t reply_type = 0;
     struct sockaddr_in to;
 
     if (s_dhcp_sock == NET_SOCK_INVALID) return;
@@ -745,37 +944,22 @@ static void net_dhcp_poll_once(uint32_t timeout_ms)
     if (console_dhcp_parse(buf, (size_t)n, &msg) != HAL_OK) return;
     if (msg.op != 1) return;   /* 只处理 BOOTREQUEST */
 
-    switch (msg.msg_type) {
-    case CONSOLE_DHCP_MSG_DISCOVER:
-        if (console_dhcp_lease_acquire(&s_dhcp_leases, msg.chaddr,
-                                       (uint32_t)(os_monotonic_us() / 1000000ull), &host) != HAL_OK)
-            return;   /* 地址池耗尽：不回应，客户端会重试或超时放弃 */
-        reply_type = (uint8_t)CONSOLE_DHCP_MSG_OFFER;
-        want_ip = (NET_AP_GATEWAY_U32 & 0xFFFFFF00u) | host;
-        break;
-    case CONSOLE_DHCP_MSG_REQUEST:
-        rc = console_dhcp_lease_acquire(&s_dhcp_leases, msg.chaddr,
-                                        (uint32_t)(os_monotonic_us() / 1000000ull), &host);
-        want_ip = (NET_AP_GATEWAY_U32 & 0xFFFFFF00u) | host;
-        reply_type = (uint8_t)((rc == HAL_OK && (msg.requested_ip == 0 || msg.requested_ip == want_ip))
-                     ? CONSOLE_DHCP_MSG_ACK : CONSOLE_DHCP_MSG_NAK);
-        break;
-    case CONSOLE_DHCP_MSG_RELEASE:
-        console_dhcp_lease_release(&s_dhcp_leases, msg.chaddr);
-        return;
-    default:
-        return;   /* DECLINE/INFORM 等本极简实现不处理 */
-    }
+    if (!console_dhcp_decide(&s_dhcp_leases, &msg, (uint32_t)(os_monotonic_us() / 1000000ull),
+                             NET_DHCP_OFFER_TTL_S, CONSOLE_DHCP_LEASE_S, NET_AP_GATEWAY_U32,
+                             &reply_type, &your_ip))
+        return;   /* 不需要回复：地址池耗尽 / RELEASE / 未实现的消息类型 */
 
-    if (console_dhcp_build_reply(&msg, reply_type, want_ip, server_ip, CONSOLE_DHCP_LEASE_S,
+    if (console_dhcp_build_reply(&msg, reply_type, your_ip, NET_AP_GATEWAY_U32, CONSOLE_DHCP_LEASE_S,
                                  reply, sizeof(reply), &out_len) != HAL_OK)
         return;
 
-    /* 客户端此刻多半还没有 IP：统一广播到 68 端口，比按 flags 广播位精确区分
-       单播/广播更简单可靠，对一个 /24 网段的极简实现代价可忽略。 */
+    /* 客户端此刻多半还没有 IP：广播到 68 端口而不是精确单播（比按 flags
+       广播位区分单播/广播更简单可靠）；用 AP 网段定向广播而不是全局受限
+       广播，见 net_dhcp_socket_ensure_open 顶部注释——避免应答外泄到其他
+       接口。 */
     memset(&to, 0, sizeof(to));
     to.sin_family = AF_INET;
-    to.sin_addr.s_addr = htonl(INADDR_BROADCAST);
+    to.sin_addr.s_addr = htonl(NET_AP_SUBNET_BROADCAST_U32);
     to.sin_port = htons(DHCP_CLIENT_PORT);
     sendto(s_dhcp_sock, (const char *)reply, (int)out_len, 0, (struct sockaddr *)&to, sizeof(to));
 }
@@ -997,8 +1181,9 @@ static hal_err_t ep_net_wifi_connect(const http_req_t *req, net_connect_req_t *j
  * console_api.c 的 api_dispatch 同一手法，使 console_net_test_dispatch
  * 能在没有真实/伪造连接的情况下驱动它。connect 端点成功时把要交给工作
  * 线程的 job 写进 *job_out、并把 *dfn 置为 net_connect_handoff；真正把
- * job 拷到堆上、登记 http_conn_defer_after_flush 由 console_net_handler
- * 负责（该函数持有 req->conn，本函数不持有）。
+ * job 写进工作线程会消费的静态槽位（s_netst.connect_req）、登记
+ * http_conn_defer_after_flush 由 console_net_handler 负责（该函数持有
+ * req->conn，本函数不持有）。**不经堆**——见 net_connect_handoff 的注释。
  */
 static void net_connect_handoff(void *arg);
 
@@ -1028,25 +1213,35 @@ static hal_err_t net_dispatch(const http_req_t *req, char *out, size_t cap,
     return HAL_ENODEV;
 }
 
+#ifdef IPC_TESTING
+static unsigned s_netst_handoff_count;
+#endif
+
 /**
- * 延后动作：把已校验好的连接请求交给工作线程。只做"锁内拷贝结构体 +
- * 信号 + 释放堆内存"这一件事，不做任何校验/解析（校验已经在 net_dispatch
- * 里、响应发出之前完成），符合 http_conn_defer_after_flush 的"不可阻塞"
- * 契约；同时也让这个回调本身足够简单，正确性可以直接由代码走查确认
- * （与 console_api.c 的 do_reboot/do_reset 同一档次）。
+ * 延后动作：把已经写进 s_netst.connect_req（pending 仍为 false）的连接
+ * 请求转正。评审 Important 2：原实现把含明文 psk 的 net_connect_req_t
+ * malloc 到堆上传给这里当 arg；而 http_server.c 的 conn_close 在回调触发
+ * 前断连时只清指针、不调用回调、也不释放 arg（它假设 arg 不需要释放，见
+ * http_server.h 的所有权语义说明）——"提交后连接必断"恰恰是这个端点自己
+ * 的设计场景，已登录用户提交后立刻断开还能反复触发，每次泄漏一块含明文
+ * 口令的堆内存。
+ *
+ * 改为不经堆：console_net_handler 在响应发出前就已经把 job 写进
+ * s_netst.connect_req（此时 pending 仍是 false，工作线程不会碰它），
+ * 这个回调只需要把 pending 翻成 true 并唤醒工作线程——不携带任何数据，
+ * arg 传 NULL 即可。即使连接在回调触发前断开，未转正的静态槽位也不是
+ * "泄漏"：不是堆内存，没有人需要为它调用 free，下一次配网请求会覆盖它。
  */
 static void net_connect_handoff(void *arg)
 {
-    net_connect_req_t *job = (net_connect_req_t *)arg;
-    if (!job) return;
-    net_sync_ensure();
+    (void)arg;
+#ifdef IPC_TESTING
+    s_netst_handoff_count++;
+#endif
     os_mutex_lock(s_netst_mu);
-    s_netst.connect_req = *job;
     s_netst.connect_req.pending = true;
     os_mutex_unlock(s_netst_mu);
     os_cond_signal(s_netst_cv);
-    secure_wipe_local(job, sizeof(*job));   /* job->psk 是明文口令，用完立即清零再释放 */
-    free(job);
 }
 
 #ifdef IPC_TESTING
@@ -1076,22 +1271,24 @@ static int console_net_handler(http_req_t *req, void *user)
        ——与 console_api.c 的 reboot/reset 同一约束，见其详细注释。 */
     e = http_respond_json(req->conn, http_status, body);
     free(body);
-    if (e != HAL_OK) return console_reply_err(req->conn, e);   /* 入队失败：不登记动作 */
+    if (e != HAL_OK) { secure_wipe_local(&job, sizeof(job)); return console_reply_err(req->conn, e); }   /* 入队失败：不登记动作 */
 
     if (dfn) {
-        net_connect_req_t *heap_job = (net_connect_req_t *)malloc(sizeof(job));
-        if (!heap_job) {
-            LOGE(MOD, "配网任务交接分配内存失败：本次连接请求已丢失，请客户端重试");
-        } else {
-            *heap_job = job;
-            if (http_conn_defer_after_flush(req->conn, dfn, heap_job) != HAL_OK) {
-                secure_wipe_local(heap_job, sizeof(*heap_job));
-                free(heap_job);
+        /* 不用堆：把已校验好的 job 直接写进工作线程会消费的静态槽位
+           （pending 保持 false，工作线程不会碰它），defer 回调
+           （net_connect_handoff）只需要在响应确认入队之后把 pending 翻成
+           true 并唤醒工作线程——回调本身不携带任何数据，arg 传 NULL。
+           这一步仍然安排在 http_respond_json 之后，与"先响应再动作"的
+           既有约定保持一致，虽然写静态槽位本身并不阻塞、也不会被
+           conn_close 需要清理。 */
+        os_mutex_lock(s_netst_mu);
+        s_netst.connect_req = job;
+        os_mutex_unlock(s_netst_mu);
+        if (http_conn_defer_after_flush(req->conn, dfn, NULL) != HAL_OK) {
 #ifdef IPC_TESTING
-                s_netst_defer_fail_count++;
+            s_netst_defer_fail_count++;
 #endif
-                LOGE(MOD, "延后动作登记失败：响应已发出但配网请求不会自动执行，请重试");
-            }
+            LOGE(MOD, "延后动作登记失败：响应已发出但配网请求不会自动执行，请重试");
         }
     }
     secure_wipe_local(&job, sizeof(job));   /* 栈上的明文 psk 副本用完清零 */
@@ -1187,6 +1384,25 @@ void console_net_test_seed_ap(const char *ssid)
     s_netst.mode = NET_MODE_AP;
     snprintf(s_netst.ap_ssid, sizeof(s_netst.ap_ssid), "%s", ssid);
     os_mutex_unlock(s_netst_mu);
+}
+
+void console_net_test_peek_connect(char *ssid_out, size_t cap, bool *pending_out)
+{
+    net_sync_ensure();
+    os_mutex_lock(s_netst_mu);
+    if (ssid_out && cap) snprintf(ssid_out, cap, "%s", s_netst.connect_req.ssid);
+    if (pending_out) *pending_out = s_netst.connect_req.pending;
+    os_mutex_unlock(s_netst_mu);
+}
+
+void console_net_test_run_handoff(void)
+{
+    net_connect_handoff(NULL);
+}
+
+unsigned console_net_test_handoff_count(void)
+{
+    return s_netst_handoff_count;
 }
 
 #endif /* IPC_TESTING */
