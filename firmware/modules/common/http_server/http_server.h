@@ -95,6 +95,35 @@ hal_err_t http_respond_json(http_conn_t *c, int status, const char *json);
 hal_err_t http_respond_ex(http_conn_t *c, int status, const char *content_type,
                           const char *extra_headers, const void *body, size_t len);
 
+/**
+ * 登记一个"该连接当前排队的响应数据被事件循环真正 send() 完毕后"触发一次的
+ * 回调，用于"先响应、再动作"场景（如重启、恢复出厂、OTA 切分区后重启）：
+ * handler 应先用 http_respond_* 把响应入队，再调用本函数登记后续动作——
+ * http_respond_* 只是把数据拷进该连接的发送队列，真正的 send() 只发生在
+ * 事件循环的可写分支（conn_flush_send）里，调用 http_respond_* 之后数据
+ * 不一定已经发出去。
+ *
+ * 保证的强度："已发出"仅指数据已经交给内核 socket 发送缓冲（send() 返回值
+ * 覆盖到 c->slen），**不代表对端已经收到**——重启会把内核里尚未真正发出的
+ * 字节一起带走，这是 TCP 与操作系统的边界，任何应用层机制都做不到更强。
+ * 即便如此也远好于在 handler 里内联执行动作（此时响应可能连发送队列都
+ * 还没排上）。
+ *
+ * 回调契约（务必遵守，否则会破坏调用它的事件循环本身）：
+ *   1) 在事件循环线程内同步调用，与 handler 同一线程；
+ *   2) 不可阻塞——与 handler 同一条非阻塞纪律（不做磁盘 I/O、不做网络阻塞调用）；
+ *   3) 不可在回调里对本连接 c 调用 conn_close，也不可调用 http_respond 系列
+ *      或 http_ws 发送函数——触发回调时 conn_flush_send 正在这条连接上执行，
+ *      重入会破坏它自身正在维护的状态。需要关闭连接可以直接返回后让上层
+ *      正常处理。
+ *
+ * 若该连接在回调触发前已经关闭（如对端提前断开），回调不会被调用——已经没有
+ * 响应可送达，执行动作也不再有意义，调用方不应假设它一定会执行。
+ * 同一连接重复调用以最后一次登记为准（覆盖此前尚未触发的登记，不叠加）。
+ * c 为 NULL 返回 HAL_EINVAL。
+ */
+hal_err_t http_conn_defer_after_flush(http_conn_t *c, void (*fn)(void *arg), void *arg);
+
 /** WS 上行文本消息回调（控制指令用），在 epoll 线程内调用，不可阻塞。
  *  text 指向内部静态复用缓冲，生存期仅到本次回调返回为止——需要跨调用
  *  保留内容必须自行复制，不可保存指针供之后使用。 */

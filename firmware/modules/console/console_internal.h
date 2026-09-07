@@ -127,4 +127,27 @@ hal_err_t console_auth_test_dispatch(const http_req_t *req, const char *client_i
                                      char *set_cookie, size_t cookie_cap);
 #endif
 
+/* ---- REST ---- */
+/** 登记 video.* 通道相关配置校验规则，上下界与编解码枚举由 profile 的
+ *  channels[].max 与 codecs_mask 动态生成；image./record./net. 等通用键
+ *  已由 core/config.c 的 cfg_init 统一登记，本函数不重复。 */
+hal_err_t console_api_register_rules(void);
+/** 生成能力清单 JSON，供前端按能力渲染菜单 */
+hal_err_t console_caps_json(char *buf, size_t cap);
+
+#ifdef IPC_TESTING
+/**
+ * 测试桩：不经 http_respond/真实连接直接跑一次 /api/v1/ 下（除
+ * /api/v1/auth/ 外）的分发。返回 HAL_OK 时 body 为 200 响应体；其他返回值
+ * 即真实 handler 交给 console_reply_err 的错误码，语义与
+ * console_auth_test_dispatch 一致。
+ * deferred_out 非 NULL 时，置位表示这次调用登记了一个"先响应再动作"
+ * （重启/恢复出厂）而不是内联执行——只判定"是否登记"，不会真的执行该
+ * 动作；动作确实会等到响应发出后才触发，由 http_server_test 对
+ * http_conn_defer_after_flush 本身的 e2e 测试覆盖，不在本模块重复验证。
+ */
+hal_err_t console_api_test_dispatch(const http_req_t *req, char *body, size_t body_cap,
+                                    bool *deferred_out);
+#endif
+
 #endif /* IPC_CONSOLE_INTERNAL_H */

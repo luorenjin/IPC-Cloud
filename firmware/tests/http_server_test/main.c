@@ -16,6 +16,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <windows.h>
 typedef SOCKET t_sock_t;
 #define T_SOCK_INVALID INVALID_SOCKET
 #define T_CLOSESOCK(f) closesocket(f)
@@ -24,10 +25,24 @@ typedef SOCKET t_sock_t;
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
+#include <time.h>
 typedef int t_sock_t;
 #define T_SOCK_INVALID (-1)
 #define T_CLOSESOCK(f) close(f)
 #endif
+
+/** 跨平台毫秒级 sleep，仅供下面的延后动作 e2e 测试轮询等待用 */
+static void t_sleep_ms(int ms)
+{
+#ifdef _WIN32
+    Sleep((DWORD)ms);
+#else
+    struct timespec ts;
+    ts.tv_sec = ms / 1000;
+    ts.tv_nsec = (long)(ms % 1000) * 1000000L;
+    nanosleep(&ts, NULL);
+#endif
+}
 
 static int g_pass, g_fail;
 #define CHECK(cond, ...) do { \
@@ -233,13 +248,25 @@ static int t_recv_response(t_sock_t fd, char *buf, size_t cap)
     return total;
 }
 
+/* 前向声明：http_conn_defer_after_flush 的 e2e 测试 handler，定义在文件靠后
+   与其测试函数放在一起，但必须挂在 echo_handler 已经占用的 "/e2e/echo"
+   前缀下面分发（见下）——ROUTE_MAX=8 在本文件里已经被既有测试注册满，
+   新场景不能再申请新前缀。 */
+static int defer_handler(http_req_t *req, void *user);
+
 static int echo_handler(http_req_t *req, void *user)
 {
     /* 顺带回显 http_conn_peer_ip：这是 handler 拿到来源 IP 的唯一途径（console
        的按 IP 登录锁定依赖它），只有走真实 accept 才能验证地址确实被记下来了。 */
-    const char *peer = http_conn_peer_ip(req->conn);
+    const char *peer;
     char body[128];
-    (void)user;
+
+    /* 复用本前缀承载 Task 7 resolution B 的 http_conn_defer_after_flush e2e
+       测试子路径，而不是新注册一个前缀（"/e2e/echo" 是这个子路径的最长匹配
+       前缀，route_lookup 会把它路由到这个 handler）。 */
+    if (strcmp(req->path, "/e2e/echo/defer1") == 0) return defer_handler(req, user);
+
+    peer = http_conn_peer_ip(req->conn);
     snprintf(body, sizeof(body), "{\"ok\":true,\"from\":\"e2e\",\"peer\":\"%s\"}", peer ? peer : "");
     return http_respond_json(req->conn, 200, body) == HAL_OK ? 0 : HAL_EIO;
 }
@@ -524,6 +551,100 @@ static void test_e2e_101_lean_template(void)
 }
 
 /* ------------------------------------------------------------------------ */
+/* e2e：http_conn_defer_after_flush（Task 7 resolution B）——"先响应再动作"       */
+/*                                                                            */
+/* 背景：console 的重启/恢复出厂端点需要"响应确实发出去之后才执行动作"，        */
+/* 而 http_respond_* 只是把数据拷进发送队列，真正的 send() 只发生在事件循环    */
+/* 的可写分支（conn_flush_send）里。这里不测 console，只测这个通用原语本身。    */
+/*                                                                            */
+/* 说明：最初尝试过用"收窄客户端 SO_RCVBUF + 70KB 大响应体 + 客户端故意不读"   */
+/* 去制造一个"响应确实还卡在队列里"的窗口，实测在本机回环 socket 上，即便客户端 */
+/* 完全不读，这套组合仍会在 300ms 内被 conn_flush_send 判定为已发送完毕——     */
+/* 回环网络栈的缓冲能力显然超出 SEND_QUEUE_MAX(81920 字节) 这个应用层上限，     */
+/* 无法在这个预算内可靠制造真正的部分发送/EWOULDBLOCK，勉强凑数只会做出一条    */
+/* 时快时慢的 flaky 测试。因此下面不去赌网络时序，改为验证两条不依赖时序的     */
+/* 事实：                                                                     */
+/*   1) 结构性事实（确定性）：conn_queue_send 只做 memcpy、从不调用 send()，   */
+/*      所以 handler 里"入队后立刻登记 defer"这一刻 c->soff 必然还没被推进过、 */
+/*      与刚刚增长的 c->slen 不相等——http_conn_defer_after_flush 不应该走     */
+/*      "登记时已经没有待发数据"的立即触发分支。                              */
+/*   2) 端到端事实（真实 socket，有界轮询）：一次正常的请求/响应之后，回调最终 */
+/*      确实会被触发且只触发一次。                                            */
+/* "连接在触发前关闭则动作被放弃"这条契约改为代码走查确认，不做 e2e：          */
+/* conn_close 新增的分支只清空 after_flush/after_flush_arg 两个字段，函数里   */
+/* 没有任何路径会调用存在里面的函数指针（见 http_server.c 的 conn_close）。    */
+/* ------------------------------------------------------------------------ */
+
+static volatile bool s_defer_fired;
+static volatile bool s_defer_fired_too_early;  /**< defer 登记时若被同步触发则置真——应恒为假 */
+
+static void defer_mark(void *arg) { *(volatile bool *)arg = true; }
+
+static int defer_handler(http_req_t *req, void *user)
+{
+    hal_err_t rc;
+    (void)user;
+    rc = http_respond_json(req->conn, 200, "{\"code\":0,\"msg\":\"ok\"}");
+    if (rc != HAL_OK) return (int)rc;
+    if (http_conn_defer_after_flush(req->conn, defer_mark, (void *)&s_defer_fired) != HAL_OK)
+        return HAL_ENOMEM;
+    /* 见文件头本节说明第 1 点：这里不依赖网络时序，纯粹是队列入队与真正
+       send() 之间的结构性时序——此刻必然还有数据待发，回调不应该已经触发。 */
+    if (s_defer_fired) s_defer_fired_too_early = true;
+    return 0;
+}
+
+static void test_defer_after_flush_fires_once_sent(void)
+{
+    const uint16_t port = 18084;
+    t_sock_t fd;
+    char resp[4096];
+    int i;
+    const char *raw =
+        "GET /e2e/echo/defer1 HTTP/1.1\r\n"
+        "Host: 127.0.0.1\r\n"
+        "\r\n";
+
+    SECTION("e2e http_conn_defer_after_flush：登记不同步触发，响应发出后回调最终必被触发一次");
+    s_defer_fired = false;
+    s_defer_fired_too_early = false;
+    t_net_init();
+
+    /* 不再新注册前缀：/e2e/echo/defer1 经 echo_handler 里的路径分支路由到
+       defer_handler（见 echo_handler 前的说明——本文件的 ROUTE_MAX(8) 已被
+       既有测试占满）。/e2e/echo 前缀已由 test_e2e_request_response 注册过，
+       该测试固定先于本测试运行。 */
+    CHECK(http_route_match("/e2e/echo/defer1") != NULL, "/e2e/echo 前缀已注册（由更早的 e2e 测试完成）");
+    CHECK(http_server_start(port) == HAL_OK, "服务端启动");
+
+    fd = t_connect(port);
+    CHECK(fd != T_SOCK_INVALID, "客户端连接成功");
+    if (fd != T_SOCK_INVALID) {
+        int sent = (int)send(fd, raw, (int)strlen(raw), 0);
+        CHECK(sent == (int)strlen(raw), "请求发送完整");
+
+        {
+            int n = t_recv_response(fd, resp, sizeof(resp));
+            CHECK(n > 0, "收到响应");
+            CHECK(strncmp(resp, "HTTP/1.1 200", strlen("HTTP/1.1 200")) == 0, "状态行应为 200");
+        }
+
+        CHECK(!s_defer_fired_too_early,
+              "defer 登记那一刻仍有数据待发（soff 必然落后于 slen），不应同步触发回调");
+
+        /* 回调在服务端事件循环线程里触发，与测试线程存在微小时序间隙：
+           有界轮询而非固定 sleep 或立即断言。 */
+        for (i = 0; i < 100 && !s_defer_fired; i++) t_sleep_ms(20);
+        CHECK(s_defer_fired, "响应数据全部交给内核之后，回调必须被触发");
+
+        T_CLOSESOCK(fd);
+    }
+
+    CHECK(http_server_stop() == HAL_OK, "服务端停止");
+    t_net_cleanup();
+}
+
+/* ------------------------------------------------------------------------ */
 /* 握手 accept 值已知答案测试（Task 4 评审 Important 3-1）                        */
 /*                                                                            */
 /* 853 行手写密码学（SHA-1+Base64+GUID 拼接）此前没有任何直接测试，唯一兜底是   */
@@ -651,6 +772,7 @@ int main(void)
     test_e2e_enotsup_501();
     test_e2e_respond_ex_atomic_on_overflow();
     test_e2e_101_lean_template();
+    test_defer_after_flush_fires_once_sent();
     test_ws_handshake_known_answer();
     test_ws_ring_wraparound();
     test_ws_backpressure();

@@ -214,6 +214,15 @@ static hal_err_t set_nonblocking(sock_t fd)
 void conn_close(http_conn_t *c)
 {
     if (!c->used) return;
+    if (c->after_flush) {
+        /* 连接在"先响应再动作"钩子触发前就断了：响应大概率没有完整送达，
+           执行动作已无意义——清空但不调用（见 http_conn_defer_after_flush
+           声明注释）。这通常意味着运维点了重启/恢复出厂却没有生效，
+           必须留痕，否则现场很难查。 */
+        LOGW(MOD, "fd=%d 连接在延后动作触发前关闭，动作已放弃（响应可能未送达对端）", (int)c->fd);
+        c->after_flush = NULL;
+        c->after_flush_arg = NULL;
+    }
     if (c->is_ws) http_ws_conn_cleanup(c);
 #ifndef _WIN32
     if (s_srv.epfd >= 0) epoll_ctl(s_srv.epfd, EPOLL_CTL_DEL, c->fd, NULL);
@@ -395,11 +404,44 @@ static void conn_flush_send(http_conn_t *c)
         c->scap = 0;
     }
     conn_update_poll_interest(c);
+
+    /* resolution B（Task 7）：排队的响应数据这一刻才真正全部交给了内核；
+       若有登记的"先响应再动作"回调，在这里触发一次并立即清空，防止重入。
+       先清空字段、再调用：回调契约禁止在回调里对本连接调用 conn_close/
+       http_respond*，但即便回调违反契约重新登记，也不会覆盖到已经在执行
+       的这一份局部拷贝。 */
+    if (c->after_flush) {
+        void (*fn)(void *) = c->after_flush;
+        void *arg = c->after_flush_arg;
+        c->after_flush = NULL;
+        c->after_flush_arg = NULL;
+        fn(arg);
+        if (!c->used) return; /* 防御：回调若违反契约间接导致连接被关闭 */
+    }
 }
 
 /* ------------------------------------------------------------------------ */
 /* 响应接口：handler 与框架内部错误兜底共用；只入队，从不直接 send/write           */
 /* ------------------------------------------------------------------------ */
+
+hal_err_t http_conn_defer_after_flush(http_conn_t *c, void (*fn)(void *arg), void *arg)
+{
+    if (!c || !fn) return HAL_EINVAL;
+    c->after_flush = fn;
+    c->after_flush_arg = arg;
+    /* 若此刻发送队列已经是空的（响应体很小，上一次可写事件已经连本次一起
+       发完，或调用方压根没有排队任何数据），后面不会再有 conn_flush_send
+       调用来触发它——直接原地判一次。仍然保持"事件循环线程内同步调用"的
+       契约：本函数与 handler 一样只在事件循环线程内被调用。 */
+    if (c->slen == c->soff) {
+        void (*f)(void *) = c->after_flush;
+        void *a = c->after_flush_arg;
+        c->after_flush = NULL;
+        c->after_flush_arg = NULL;
+        f(a);
+    }
+    return HAL_OK;
+}
 
 hal_err_t http_respond_ex(http_conn_t *c, int status, const char *content_type,
                           const char *extra_headers, const void *body, size_t len)

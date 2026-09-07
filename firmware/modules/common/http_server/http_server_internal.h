@@ -51,6 +51,16 @@ struct http_conn {
     size_t soff;        /**< 已发送字节数（soff <= slen） */
     bool   is_ws;       /**< 是否已完成 WS 升级 */
     struct http_ws_state *ws; /**< is_ws 时非 NULL；分配/释放均由 http_ws.c 负责 */
+    /** resolution B（Task 7）："先响应再动作"钩子：conn_flush_send 观察到本连接
+     *  排队数据已全部交给内核（slen==soff）后调用一次并清空这两个字段；
+     *  若连接在触发前被 conn_close，同样清空但不调用。字段直接放在结构体里
+     *  （而非按连接指针做键的旁表）：s_srv.conns[] 槽位会被 accept_new_conn
+     *  复用，旁表一旦漏清就会把回调错误地继承给复用同一槽位的下一条连接；
+     *  结构体字段则天然享受 accept_new_conn 里已有的 memset(slot, 0, ...)，
+     *  不需要新增任何清理路径。完整契约见 http_server.h 的
+     *  http_conn_defer_after_flush 声明注释。 */
+    void (*after_flush)(void *arg);
+    void  *after_flush_arg;
 };
 
 /* ---- http_server.c 定义，供 http_ws.c 调用 ---- */

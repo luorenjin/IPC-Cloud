@@ -673,6 +673,217 @@ static void test_cred_fallback_store(void)
     CHECK(hal_init(profile_raw_json()) == HAL_OK, "恢复 HAL");
 }
 
+/* ========================================================================== */
+/* Task 7：REST —— 配置读写与系统信息                                            */
+/* ========================================================================== */
+
+static void test_config_rules(void)
+{
+    cfg_reject_t rejects[4];
+    int n;
+
+    /* 自成一段独立的 cfg_init/cfg_deinit 窗口，与 test_cred_not_in_config
+       各自独立（互不重叠，顺序执行不会造成重复初始化）；cfg_apply_json/
+       cfg_register_rules 都要求 g.inited 已为真。持久化文件名与
+       test_cred_not_in_config 的不同，避免任何残留文件互相干扰。 */
+    CHECK(cfg_init(NULL, "console_test_cfg_rules.json") == HAL_OK, "配置中心就绪");
+
+    SECTION("配置规则与拒绝列表");
+    CHECK(console_api_register_rules() == HAL_OK, "登记 video.* 规则");
+
+    /* 合法值应被接受 */
+    n = cfg_apply_json("{\"video.0.main.kbps\":2048}", rejects, 4);
+    CHECK(n == 0, "合法码率被接受，rejected=%d", n);
+
+    /* 越界值应进入 rejected 而非整体失败 */
+    n = cfg_apply_json("{\"video.0.main.kbps\":99999,\"video.0.main.gop\":50}", rejects, 4);
+    CHECK(n == 1, "越界码率被拒，其余照常应用，rejected=%d", n);
+    CHECK(strcmp(rejects[0].key, "video.0.main.kbps") == 0, "拒绝的键名正确：%s", rejects[0].key);
+    {
+        int64_t gop = 0;
+        CHECK(cfg_get_int("video.0.main.gop", &gop) == HAL_OK && gop == 50,
+              "同批次的合法键仍被应用（部分成功语义）");
+    }
+
+    /* 子码流只允许 h264 */
+    n = cfg_apply_json("{\"video.1.sub.codec\":\"h265\"}", rejects, 4);
+    CHECK(n == 1, "子码流拒绝 h265");
+
+    cfg_deinit();
+    remove("console_test_cfg_rules.json");
+}
+
+static void test_caps_json(void)
+{
+    char buf[1024];
+    SECTION("能力清单");
+    CHECK(console_caps_json(buf, sizeof(buf)) == HAL_OK, "生成能力清单");
+    CHECK(strstr(buf, "\"wifi\"") != NULL, "含 wifi 字段");
+    CHECK(strstr(buf, "\"tf\"") != NULL, "含 tf 字段");
+    CHECK(strstr(buf, "\"h265\"") != NULL, "含 h265 字段");
+    /* 能力值应来自 profile，而非硬编码 */
+    CHECK(strstr(buf, "\"model\"") != NULL, "含型号");
+}
+
+/**
+ * 覆盖 GET/PUT /api/v1/config 的端点层：鉴权门禁、全量/前缀读取、部分成功
+ * 语义、畸形输入。经 console_api_test_dispatch 分发，不依赖真实 socket。
+ */
+static void test_api_config_endpoints(void)
+{
+    http_req_t req;
+    char body[8192];
+    char cookie[128];
+    bool must_change = false;
+
+    SECTION("REST 配置读写端点");
+    CHECK(cfg_init(NULL, "console_test_cfg_api.json") == HAL_OK, "配置中心就绪");
+    CHECK(console_api_register_rules() == HAL_OK, "登记规则");
+    console_auth_reset_lockout();
+
+    /* 未登录 */
+    req_make(&req, "GET", "/api/v1/config", NULL, NULL);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_EUNAUTH_,
+          "未登录访问 config 返回未登录");
+
+    CHECK(console_auth_seed("ABCD1234") == HAL_OK, "播种凭据（出厂态）");
+    CHECK(do_login("admin", "ABCD1234", "192.168.50.10", cookie, sizeof(cookie), &must_change) == HAL_OK,
+          "登录成功");
+
+    /* 出厂态必须先改密，config 端点应 403（未豁免强制改密） */
+    req_make(&req, "GET", "/api/v1/config", NULL, cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_EPERM_,
+          "未改密时 403");
+
+    CHECK(console_auth_set_password("ABCD1234", "NewPass@123") == HAL_OK, "改密解除强制改密");
+    CHECK(do_login("admin", "NewPass@123", "192.168.50.10", cookie, sizeof(cookie), &must_change) == HAL_OK,
+          "以新口令重新登录");
+
+    /* GET 全量：至少含 profile 播种的已知键 */
+    req_make(&req, "GET", "/api/v1/config", NULL, cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "GET 全量配置成功");
+    CHECK(strstr(body, "\"code\":0") != NULL, "响应含 code:0");
+    CHECK(strstr(body, "\"data\":{") != NULL, "响应含 data 对象");
+    CHECK(strstr(body, "video.0.main.kbps") != NULL, "全量配置含已知键，实际：%s", body);
+
+    /* GET 前缀过滤：键名应已去掉前缀本身。req_make 只填 path，不解析
+       "?"——必须像 http_parse_request 那样把 query 单独放进 req.query，
+       否则 path 里带着字面 "?prefix=..." 会导致 api_dispatch 的精确匹配
+       全部落空。 */
+    req_make(&req, "GET", "/api/v1/config", NULL, cookie);
+    snprintf(req.query, sizeof(req.query), "prefix=video.0.main");
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK,
+          "GET 前缀过滤成功");
+    CHECK(strstr(body, "\"kbps\"") != NULL, "前缀过滤后含去掉前缀的键名，实际：%s", body);
+    CHECK(strstr(body, "video.0.main.kbps") == NULL, "前缀过滤后不应再重复带前缀");
+
+    /* 前缀不命中任何键：视为空对象而非错误 */
+    req_make(&req, "GET", "/api/v1/config", NULL, cookie);
+    snprintf(req.query, sizeof(req.query), "prefix=no.such.prefix");
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "不存在的前缀仍是成功响应");
+    CHECK(strstr(body, "\"data\":{}") != NULL, "不存在的前缀返回空对象，实际：%s", body);
+
+    /* PUT 部分成功：一个合法、一个越界 */
+    req_make(&req, "PUT", "/api/v1/config",
+             "{\"video.0.main.kbps\":2048,\"video.0.main.gop\":99999}", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "PUT 部分成功仍是 200");
+    CHECK(strstr(body, "\"applied\":1") != NULL, "applied=1（其余 1 个被拒），实际：%s", body);
+    CHECK(strstr(body, "\"video.0.main.gop\"") != NULL, "rejected 数组含被拒键名");
+    CHECK(strstr(body, "\"reason\"") != NULL, "rejected 条目含 reason 字段");
+
+    /* PUT 畸形 JSON / 空 body / 不支持的方法 */
+    req_make(&req, "PUT", "/api/v1/config", "not-json", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_EINVAL, "畸形 JSON 被拒");
+    req_make(&req, "PUT", "/api/v1/config", NULL, cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_EINVAL, "空 body 被拒");
+    req_make(&req, "DELETE", "/api/v1/config", NULL, cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_EINVAL, "不支持的方法被拒");
+
+    cfg_deinit();
+    remove("console_test_cfg_api.json");
+}
+
+/**
+ * 覆盖 system/info、system/status、reboot、reset、video/params、
+ * storage/info：鉴权门禁（含 system/info 的强制改密豁免）、响应体关键字段、
+ * 以及 reboot/reset "登记延后动作而非内联执行"这一 resolution B 核心约束。
+ * 这几个端点都不碰 core/config，不需要 cfg_init。
+ */
+static void test_api_system_endpoints(void)
+{
+    http_req_t req;
+    char body[4096];
+    char cookie[128];
+    bool must_change = false;
+    bool deferred;
+
+    SECTION("REST 系统信息与动作端点");
+    console_auth_reset_lockout();
+    CHECK(console_auth_seed("ABCD1234") == HAL_OK, "播种凭据（出厂态）");
+
+    /* system/info 豁免的是"强制改密"，不是"登录"本身 */
+    req_make(&req, "GET", "/api/v1/system/info", NULL, NULL);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_EUNAUTH_,
+          "system/info 未登录时仍返回未登录");
+
+    CHECK(do_login("admin", "ABCD1234", "192.168.50.11", cookie, sizeof(cookie), &must_change) == HAL_OK,
+          "登录成功（出厂态）");
+    CHECK(must_change == true, "出厂态需要改密");
+
+    req_make(&req, "GET", "/api/v1/system/info", NULL, cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK,
+          "system/info 在强制改密期间仍可访问（服务端豁免）");
+    CHECK(strstr(body, "\"model\":\"MOCK-X86\"") != NULL, "含型号，实际：%s", body);
+    CHECK(strstr(body, "\"caps\":{") != NULL, "内嵌能力清单对象");
+    CHECK(strstr(body, "\"uptime_s\"") != NULL, "含运行时长");
+
+    /* system/status 未豁免，强制改密期间应 403 */
+    req_make(&req, "GET", "/api/v1/system/status", NULL, cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_EPERM_,
+          "system/status 未豁免强制改密，403");
+
+    CHECK(console_auth_set_password("ABCD1234", "NewPass@123") == HAL_OK, "改密");
+    CHECK(do_login("admin", "NewPass@123", "192.168.50.11", cookie, sizeof(cookie), &must_change) == HAL_OK,
+          "以新口令重新登录");
+
+    req_make(&req, "GET", "/api/v1/system/status", NULL, cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "改密后 system/status 可访问");
+    CHECK(strstr(body, "\"cpu_usage_pct\"") != NULL, "含 CPU 占用");
+    CHECK(strstr(body, "\"modules\":[") != NULL, "含模块列表");
+
+    req_make(&req, "GET", "/api/v1/video/params", NULL, cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "video/params 成功");
+    CHECK(strstr(body, "\"channels\":[") != NULL, "含通道数组");
+    CHECK(strstr(body, "\"running\":false") != NULL,
+          "未 set_encoder/start 的通道 running=false（本测试未打开 hal video）");
+
+    req_make(&req, "GET", "/api/v1/storage/info", NULL, cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "storage/info 成功");
+    CHECK(strstr(body, "\"present\":true") != NULL, "mock TF 卡存在");
+    CHECK(strstr(body, "\"fs\":\"exfat\"") != NULL, "文件系统类型正确");
+
+    /* resolution B 核心约束：reboot/reset 登记延后动作，而不是内联执行
+       hal()->sys->reboot/factory_reset——该原语本身（回调确实等到响应字节
+       交给内核之后才触发）已由 http_server_test 的真实 socket e2e 测试
+       覆盖，这里只验证 console 侧确实调用了登记。 */
+    req_make(&req, "POST", "/api/v1/system/reboot", NULL, cookie);
+    deferred = false;
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), &deferred) == HAL_OK, "reboot 端点返回成功");
+    CHECK(strstr(body, "\"code\":0") != NULL, "reboot 响应体正确，实际：%s", body);
+    CHECK(deferred == true, "reboot 登记了延后动作而不是内联执行");
+
+    req_make(&req, "POST", "/api/v1/system/reset", "{\"keep_network\":true}", cookie);
+    deferred = false;
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), &deferred) == HAL_OK, "reset 端点返回成功");
+    CHECK(deferred == true, "reset 登记了延后动作而不是内联执行");
+
+    req_make(&req, "GET", "/api/v1/system/reboot", NULL, cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_EINVAL, "reboot 必须是 POST");
+
+    req_make(&req, "GET", "/api/v1/bogus", NULL, cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_ENODEV, "未知路径 404 语义");
+}
+
 int main(void)
 {
     if (profile_load("profiles/mock-x86.json") != HAL_OK) {
@@ -695,6 +906,10 @@ int main(void)
     test_auth_endpoints();
     test_cred_not_in_config();
     test_cred_fallback_store();
+    test_config_rules();
+    test_caps_json();
+    test_api_config_endpoints();
+    test_api_system_endpoints();
 
     printf("RESULT: console pass=%d fail=%d\n", g_pass, g_fail);
     return g_fail;
