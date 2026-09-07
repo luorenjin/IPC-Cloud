@@ -53,5 +53,6 @@ enable_testing()
 add_subdirectory(tests/hal_conformance)
 add_subdirectory(tests/core_test)
 add_subdirectory(tests/http_server_test)
+add_subdirectory(tests/console_test)
 
 message(STATUS "IPC_PLATFORM=${IPC_PLATFORM}  IPC_PROFILE=${IPC_PROFILE}")
