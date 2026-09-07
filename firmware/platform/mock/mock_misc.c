@@ -157,6 +157,10 @@ static hal_err_t n_status(hal_netif_t t, hal_netif_status_t *s)
     memset(s, 0, sizeof(*s));
     s->type = t; strncpy(s->ifname, "eth0", HAL_IFNAME_MAX - 1); s->link = HAL_LINK_UP; s->speed_mbps = 100;
     s->mac[0] = 0x02; s->mac[1] = 0x00; s->mac[2] = 0x00; s->mac[3] = 0xCA; s->mac[4] = 0xFE; s->mac[5] = 0x01;
+    /* mock 里以太网恒 up，因此恒有一个固定地址；真实平台在 DHCP 完成前应
+       把该字段留空（HAL_IP_MAX 缓冲区语义见 hal_net.h 的字段注释），不是
+       必须模拟"尚未拿到地址"这一瞬态。 */
+    strncpy(s->ip, "192.168.1.100", HAL_IP_MAX - 1);
     return HAL_OK;
 }
 static hal_err_t n_mac(hal_netif_t t, uint8_t m[6]) { hal_netif_status_t s; hal_err_t rc = n_status(t, &s); if (rc) return rc; memcpy(m, s.mac, 6); return HAL_OK; }

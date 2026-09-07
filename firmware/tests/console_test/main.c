@@ -1290,8 +1290,10 @@ static void test_net_status_endpoint(void)
     CHECK(do_login("admin", "NewPass@123", "192.168.60.10", cookie, sizeof(cookie), &must_change) == HAL_OK,
           "以新口令重新登录");
 
-    /* 默认状态：mock 以太网恒 up、未开 AP、未连 WiFi → mode=eth；
-       ip/ssid/rssi/last_error 均未知/不适用，必须省略而不是硬凑假数据 */
+    /* 默认状态：mock 以太网恒 up、未开 AP、未连 WiFi → mode=eth。
+       ip 自 HAL v1.2 起恒存在（hal_netif_status_t 新增字段，mock 的
+       n_status 填了固定值）；ssid/rssi/last_error 仍然是不适用即省略，
+       不硬凑假数据。 */
     req_make(&req, "GET", "/api/v1/net/status", NULL, cookie);
     CHECK(console_net_test_dispatch(&req, body, sizeof(body), &http_status) == HAL_OK, "net/status 成功");
     CHECK(http_status == 200, "net/status 状态码 200，实际 %d", http_status);
@@ -1299,7 +1301,8 @@ static void test_net_status_endpoint(void)
     CHECK(strstr(body, "\"mode\":\"eth\"") != NULL, "默认模式为 eth，实际：%s", body);
     CHECK(strstr(body, "\"mac\":\"02:00:00:CA:FE:01\"") != NULL,
           "eth 模式下 mac 精确等于 mock 以太网地址，实际：%s", body);
-    CHECK(strstr(body, "\"ip\"") == NULL, "eth 模式下没有 netmgr 可读 IP，字段应省略，实际：%s", body);
+    CHECK(strstr(body, "\"ip\":\"192.168.1.100\"") != NULL,
+          "eth 模式下 ip 精确等于 mock hal_netif_status_t.ip 的值（HAL v1.2 新增字段），实际：%s", body);
     CHECK(strstr(body, "\"ssid\"") == NULL, "eth 模式下不应出现 ssid 字段，实际：%s", body);
     CHECK(strstr(body, "\"rssi\"") == NULL, "eth 模式下不应出现 rssi 字段，实际：%s", body);
     CHECK(strstr(body, "\"last_error\"") == NULL, "未曾配网失败过，不应出现 last_error 字段，实际：%s", body);
@@ -1462,6 +1465,9 @@ static void test_net_wifi_no_capability(void)
     req_make(&req, "GET", "/api/v1/net/status", NULL, cookie);
     CHECK(console_net_test_dispatch(&req, body, sizeof(body), &http_status) == HAL_OK,
           "net/status 不依赖 WiFi 能力，无 HAL 时仍能返回（降级为无 mac 字段），不崩溃");
+    CHECK(strstr(body, "\"ip\":\"\"") != NULL,
+          "无 HAL 时 ip 字段仍然存在、只是降级为空串（而不是被整个省略），"
+          "调用方不需要区分“字段缺失”和“值未知”两种情况，实际：%s", body);
 
     CHECK(hal_init(profile_raw_json()) == HAL_OK, "恢复 HAL，避免影响后续测试");
     console_net_test_reset();

@@ -789,10 +789,10 @@ static hal_err_t ep_net_status(char *out, size_t cap)
     net_mode_t mode;
     char mac_hex[24] = "";
     char ssid_buf[HAL_SSID_MAX] = "";
-    char ip_buf[16] = "";
+    char ip_buf[HAL_IP_MAX] = "";
     char last_err[128] = "";
     int rssi = 0;
-    bool have_mac = false, have_ssid = false, have_rssi = false, have_ip = false;
+    bool have_mac = false, have_ssid = false, have_rssi = false;
     json_t *root;
     char *txt;
     hal_err_t rc;
@@ -801,8 +801,9 @@ static hal_err_t ep_net_status(char *out, size_t cap)
     os_mutex_lock(s_netst_mu);
     mode = s_netst.mode;
     if (mode == NET_MODE_AP) {
+        /* AP 网段是我们自己固定分配的网关地址，不查 HAL——mock 的
+           get_status(WIFI) 恒 ENOTSUP，且这个值本就不该由 HAL 决定。 */
         snprintf(ip_buf, sizeof(ip_buf), "%s", NET_AP_GATEWAY_IP);
-        have_ip = true;
         if (s_netst.ap_ssid[0]) { snprintf(ssid_buf, sizeof(ssid_buf), "%s", s_netst.ap_ssid); have_ssid = true; }
     } else if (mode == NET_MODE_STA) {
         if (s_netst.sta_ssid[0]) { snprintf(ssid_buf, sizeof(ssid_buf), "%s", s_netst.sta_ssid); have_ssid = true; }
@@ -810,8 +811,11 @@ static hal_err_t ep_net_status(char *out, size_t cap)
     snprintf(last_err, sizeof(last_err), "%s", s_netst.last_error);
     os_mutex_unlock(s_netst_mu);
 
-    /* mac/rssi 尽力而为：mock 平台 get_status(WIFI) 恒 ENOTSUP，AP/STA 模式下
-       这两个字段会省略，而不是硬凑假数据（与 ep_video_params 的既有约定一致）。 */
+    /* mac/ip（eth/sta 模式）、rssi 尽力而为：mock 平台 get_status(WIFI) 恒
+       ENOTSUP，sta 模式下这三个字段会省略/留空，而不是硬凑假数据（与
+       ep_video_params 的既有约定一致）。ip 字段本身自 HAL v1.2 起恒存在于
+       响应体中——hal_netif_status_t.ip 未获取到地址时约定为空串，直接
+       透传即可，调用方不需要再猜"缺字段是什么意思"。 */
     if (hal_has(HAL_MOD_NET) && hal()->net->get_status) {
         hal_netif_status_t st;
         hal_netif_t iface = (mode == NET_MODE_ETH) ? HAL_NETIF_ETH : HAL_NETIF_WIFI;
@@ -819,6 +823,7 @@ static hal_err_t ep_net_status(char *out, size_t cap)
             snprintf(mac_hex, sizeof(mac_hex), "%02X:%02X:%02X:%02X:%02X:%02X",
                      st.mac[0], st.mac[1], st.mac[2], st.mac[3], st.mac[4], st.mac[5]);
             have_mac = true;
+            if (mode != NET_MODE_AP) snprintf(ip_buf, sizeof(ip_buf), "%s", st.ip);
             if (mode == NET_MODE_STA && st.rssi_dbm != 0) { rssi = st.rssi_dbm; have_rssi = true; }
         }
     }
@@ -829,7 +834,8 @@ static hal_err_t ep_net_status(char *out, size_t cap)
     json_object_set(root, "mode", json_new_string(
         mode == NET_MODE_AP ? "ap" : (mode == NET_MODE_STA ? "sta" : "eth")));
     if (have_mac)    json_object_set(root, "mac", json_new_string(mac_hex));
-    if (have_ip)     json_object_set(root, "ip", json_new_string(ip_buf));
+    /* ip 恒存在（HAL v1.2 起有明确"未知即空串"的约定），不再按 have_ip 省略 */
+    json_object_set(root, "ip", json_new_string(ip_buf));
     if (have_ssid)   json_object_set(root, "ssid", json_new_string(ssid_buf));
     if (have_rssi)   json_object_set(root, "rssi", json_new_int(rssi));
     if (last_err[0]) json_object_set(root, "last_error", json_new_string(last_err));

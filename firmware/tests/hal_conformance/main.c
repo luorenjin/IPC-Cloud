@@ -276,6 +276,13 @@ static void test_gpio_net_storage(void)
 
     CHECK(n->get_mac(HAL_NETIF_ETH, mac) == HAL_OK, "eth mac");
     CHECK(n->get_status(HAL_NETIF_ETH, &ns) == HAL_OK && ns.ifname[0], "eth status");
+    /* ip 是尽力而为字段（hal_net.h 的字段注释：未获取到地址时约定为空串），
+       不强制要求非空——不同平台的以太网在 HAL 查询这一刻是否已经拿到地址
+       是运行期状态，不是 HAL 契约能保证的东西。这里只核对缓冲区语义本身：
+       必须是 HAL_IP_MAX 缓冲区内 NUL 结尾的字符串，不能是未终止的溢出写入
+       （否则 console 侧的 "%s" 格式化会读出界）。 */
+    CHECK(memchr(ns.ip, '\0', sizeof(ns.ip)) != NULL,
+          "eth status.ip 必须是缓冲区内 NUL 结尾的字符串（空串合法，表示尚未获取地址）");
     rc = n->poll_event(&ne, 20);
     CHECK(rc == HAL_OK || rc == HAL_EAGAIN, "net poll_event");
 

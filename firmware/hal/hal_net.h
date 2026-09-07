@@ -18,6 +18,10 @@ extern "C" {
 #define HAL_SSID_MAX 33
 #define HAL_PSK_MAX  65
 #define HAL_IFNAME_MAX 16
+/** IPv4 点分十进制或 IPv6 冒号十六进制文本形式的缓冲宽度（INET6_ADDRSTRLEN=46，
+ *  含 NUL），与 modules/common/http_server 的 CONN_PEER_IP_MAX 取值一致，
+ *  为将来的 IPv6 预留空间。 */
+#define HAL_IP_MAX 46
 
 typedef enum {
     HAL_NETIF_ETH = 0,
@@ -51,6 +55,11 @@ typedef struct {
     char             ifname[HAL_IFNAME_MAX];
     hal_link_state_t link;
     uint8_t          mac[6];
+    /** 当前 IPv4/IPv6 地址的文本形式。**未获取到地址时（未启用 DHCP、
+     *  链路未 up、DHCP 尚未完成等）约定为空串**——调用方据此判断"是否已知"，
+     *  不应对空串做任何进一步解析。不保证地址仍然有效（可能已过期），
+     *  只反映平台实现最近一次查询到的值。 */
+    char             ip[HAL_IP_MAX];
     /* WiFi 专用 */
     char             ssid[HAL_SSID_MAX];
     int              rssi_dbm;
