@@ -33,19 +33,31 @@ hal_err_t console_api_init(void);
 #define CONSOLE_FAIL_LIMIT   5
 #define CONSOLE_NONCE_MAX    4      /**< 在途挑战上限，60s 过期，满则淘汰最旧 */
 #define CONSOLE_USER_MAX     32     /**< 本地账号名缓冲（含 NUL） */
-#define CONSOLE_PWD_MIN      8      /**< 新口令长度下限 */
-#define CONSOLE_PWD_MAX      63     /**< 新口令长度上限 */
+/**
+ * 新口令长度上下限。**只对 `console_auth_set_password()`（测试与本地调用者）生效**；
+ * 生产端点 `POST /api/v1/auth/password` 走掩码路径，服务端看不到明文，
+ * 无法在此强制——长度/复杂度由前端把关。后续任务不要误以为服务端有这层保护。
+ */
+#define CONSOLE_PWD_MIN      8
+#define CONSOLE_PWD_MAX      63
 
 /** 鉴权端点前缀：`console_auth_check` 的强制改密豁免与路由注册共用同一常量 */
 #define CONSOLE_AUTH_PREFIX  "/api/v1/auth/"
 
 /**
- * 无 `hal_crypto` 平台的凭据软存储文件（相对进程工作目录）。
+ * 无 `hal_crypto` 平台的凭据软存储文件名，置于私有数据目录下
+ * （目录取 `cfg_get_str("system.data_dir")`，缺省见 `console_auth.c`；
+ * 目录 0700 / 文件 0600，POSIX 下显式 chmod）。
  * 与 `hal_crypto.h` 头注释一致："core 层退化为文件系统权限保护的软存储"。
  * 无论走哪条路径，凭据都**不进** `core/config`，因此不会出现在 `cfg_dump_json`
  * 的输出里（Task 7 的 `GET /api/v1/config` 正是在其之上做前缀过滤）。
  */
-#define CONSOLE_CRED_FILE    "console_local_user.bin"
+#define CONSOLE_CRED_FILE    "local_user.bin"
+/** 私有数据目录的配置键（R3：路径不硬编码，从配置取） */
+#define CONSOLE_DATA_DIR_KEY "system.data_dir"
+
+/** 兜底软存储的完整路径（内部静态缓冲，供日志与测试使用） */
+const char *console_auth_cred_path(void);
 
 hal_err_t console_pbkdf2_sha256(const char *pwd, size_t pwd_len,
                                 const uint8_t *salt, size_t salt_len,
@@ -58,6 +70,10 @@ hal_err_t console_auth_seed(const char *factory_code);
 /** 取挑战：salt 十六进制串 + 一次性 nonce（60s 过期） */
 hal_err_t console_auth_challenge(const char *user, char *salt_hex, size_t salt_cap,
                                  char *nonce, size_t nonce_cap);
+/** 带来源 IP 的取挑战：nonce 表满时优先淘汰**同一 IP** 的最旧条目，
+ *  使未鉴权攻击者无法用几个请求挤掉他人在途的 challenge */
+hal_err_t console_auth_challenge_from(const char *user, char *salt_hex, size_t salt_cap,
+                                      char *nonce, size_t nonce_cap, const char *client_ip);
 /** 校验 proof；nonce 用后即废 */
 hal_err_t console_auth_verify(const char *user, const char *nonce, const char *proof);
 /** 带来源 IP 的校验（用于锁定计数） */
@@ -75,11 +91,19 @@ hal_err_t console_auth_set_password(const char *old_pwd, const char *new_pwd);
  * `masked = new_key XOR HMAC(old_key, "pwdchg|" || nonce)` 上送，服务端用自己持有的
  * stored_key 解掩码。`proof` 与登录同构，**必须先验通过**才解掩码——否则任何人推一串
  * 随机字节就能把凭据改成谁都不知道的值（DoS）。
- * new_salt_hex 为 32 位小写十六进制（16 字节），masked_key_hex 为 64 位（32 字节）。
+ *
+ * `masked_chk_hex` 是"新旧口令不得相同"的判据：客户端另用**旧盐**算
+ * `chk = PBKDF2(新口令, old_salt, iter)`，以第三条域分隔掩码
+ * `HMAC(old_key, "pwdchk|" || nonce)` 遮蔽后上送；服务端解出后与 stored_key 恒定时间
+ * 比对，相等即判"口令未变"并拒绝。三条掩码必须互不相同，否则同一 nonce 下两个明文
+ * 共用掩码，观察者直接得到二者异或。
+ *
+ * new_salt_hex 为 32 位小写十六进制（16 字节），masked_key_hex 与 masked_chk_hex
+ * 均为 64 位（32 字节）。
  */
 hal_err_t console_auth_set_key_masked(const char *user, const char *nonce, const char *proof,
                                       const char *new_salt_hex, const char *masked_key_hex,
-                                      const char *client_ip);
+                                      const char *masked_chk_hex, const char *client_ip);
 /** 校验请求中的会话 token；未登录返回 HAL_EUNAUTH_，未改密返回 HAL_EPERM_ */
 hal_err_t console_auth_check(const http_req_t *req);
 
@@ -92,7 +116,8 @@ void console_auth_test_reload(void);
  * 返回 HAL_OK 时 body 为 200 响应体、set_cookie 为 Set-Cookie 值（无则为空串）；
  * 其他返回值即真实 handler 交给 `console_reply_err` 的错误码。
  */
-hal_err_t console_auth_test_dispatch(const http_req_t *req, char *body, size_t body_cap,
+hal_err_t console_auth_test_dispatch(const http_req_t *req, const char *client_ip,
+                                     char *body, size_t body_cap,
                                      char *set_cookie, size_t cookie_cap);
 #endif
 

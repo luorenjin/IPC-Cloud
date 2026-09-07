@@ -30,6 +30,10 @@
  * 日志脱敏（规则 R8）：口令、出厂验证码、salt、stored_key、nonce、proof、
  * session token 不出现在任何日志分支里。
  */
+#ifdef _WIN32
+#define _CRT_RAND_S     /* 必须在 <stdlib.h> 之前定义，才能拿到 rand_s */
+#endif
+
 #include "console_internal.h"
 #include "core/config.h"
 #include "core/json.h"
@@ -41,10 +45,18 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifndef _WIN32
+#include <sys/stat.h>   /* chmod：兜底软存储要收紧到 0600 */
+#endif
+
 #define MOD "console"
 
 #define CONSOLE_DEFAULT_USER   "admin"
 #define CONSOLE_IP_UNKNOWN     "unknown"   /**< 拿不到对端地址时的锁定桶 */
+/** 来源 IP 字符串缓冲宽度。**必须 >= http_server 的 CONN_PEER_IP_MAX（46）**——
+ *  地址正是从 `http_conn_peer_ip()` 取来的。两者分居不同头文件（`http_server_internal.h`
+ *  不对外可见），无法用 _Static_assert 绑定，改宽任一处时请同步检查另一处。 */
+#define CONSOLE_IP_MAX         46
 
 #define CONSOLE_NONCE_LEN      16          /**< nonce 随机字节数（十六进制 32 字符） */
 #define CONSOLE_TOKEN_LEN      32          /**< 会话 token 随机字节数 */
@@ -357,6 +369,35 @@ static bool ct_str_equal(const char *a, const char *b)
  * 四、随机数：优先 hal_crypto，缺失时退化为时钟/地址混合
  * ========================================================================== */
 
+/**
+ * 平台 CSPRNG：POSIX 读 `/dev/urandom`，Windows 用 `rand_s`（底层 RtlGenRandom）。
+ * 取不到返回 false，由调用方退到强度不足的时钟混合并告警。
+ * `/dev/urandom` 在启动后不阻塞，读几十字节的代价可忽略；且该路径只在平台没有
+ * hal_crypto 时才会走到。
+ */
+static bool platform_csprng(uint8_t *buf, size_t len)
+{
+#ifdef _WIN32
+    size_t i = 0;
+    while (i < len) {
+        unsigned int v;
+        size_t take;
+        if (rand_s(&v) != 0) return false;
+        take = len - i < sizeof(v) ? len - i : sizeof(v);
+        memcpy(buf + i, &v, take);
+        i += take;
+    }
+    return true;
+#else
+    FILE *fp = fopen("/dev/urandom", "rb");
+    size_t n;
+    if (!fp) return false;
+    n = fread(buf, 1, len, fp);
+    fclose(fp);
+    return n == len;
+#endif
+}
+
 static hal_err_t rand_bytes(uint8_t *buf, size_t len)
 {
     static uint64_t counter;
@@ -366,12 +407,16 @@ static hal_err_t rand_bytes(uint8_t *buf, size_t len)
 
     if (hal_has(HAL_MOD_CRYPTO) && hal()->crypto->random) {
         if (hal()->crypto->random(buf, len) == HAL_OK) return HAL_OK;
-        LOGW(MOD, "hal_crypto 随机数失败，退化为软随机源");
+        LOGW(MOD, "hal_crypto 随机数失败，改用平台 CSPRNG");
     }
+    if (platform_csprng(buf, len)) return HAL_OK;
 
-    /* 退化路径：单调时钟 + 墙钟 + 栈地址 + 递增计数过 SHA-256。
-       强度弱于硬件 RNG，仅在平台未提供 crypto 模块时使用；能力清单应据实声明
-       security.hw_secure=false。 */
+    /* 最后的兜底：单调时钟 + 墙钟 + 栈地址 + 递增计数过 SHA-256。
+       **不具密码学强度**——无 ASLR 的设备上栈地址恒定、计数器可由请求数推断，
+       真实熵只剩微秒抖动。而本函数同时供 nonce 与 32 字节 session token 使用，
+       走到这里意味着会话可被预测。故每次都按 ERROR 级别告警，不做降噪。 */
+    LOGE(MOD, "无 hal_crypto 且平台 CSPRNG 不可用，随机源强度不达标："
+              "会话 token 与 nonce 可能可预测，请为该平台提供 crypto 模块或 /dev/urandom");
     while (done < len) {
         struct {
             uint64_t mono, wall, counter;
@@ -456,6 +501,45 @@ static bool crypto_store_available(void)
     return hal_has(HAL_MOD_CRYPTO) && hal()->crypto->secure_read && hal()->crypto->secure_write;
 }
 
+/* 私有数据目录的缺省值（R3：优先取配置键 CONSOLE_DATA_DIR_KEY，此处只是兜底）。
+   POSIX 上必须是绝对路径——凭据里含 stored_key，按本方案读到它即可算出 proof
+   完成鉴权，落在进程工作目录下等于把它交给任何能改变 CWD 的启动方式。
+   Windows 分支仅供 x86 开发/测试环境。 */
+#ifdef _WIN32
+#define CONSOLE_DATA_DIR_DEFAULT "ipc_state"
+#else
+#define CONSOLE_DATA_DIR_DEFAULT "/var/lib/ipc-console"
+#endif
+
+const char *console_auth_cred_path(void)
+{
+    static char path[HAL_PATH_MAX];
+    char dir[HAL_PATH_MAX - 32];
+
+    dir[0] = '\0';
+    if (cfg_get_str(CONSOLE_DATA_DIR_KEY, dir, sizeof(dir)) != HAL_OK || dir[0] == '\0')
+        snprintf(dir, sizeof(dir), "%s", CONSOLE_DATA_DIR_DEFAULT);
+    snprintf(path, sizeof(path), "%s/%s", dir, CONSOLE_CRED_FILE);
+    return path;
+}
+
+/** 建好私有目录并收紧权限（POSIX 0700）；失败不致命，写文件时会再报错 */
+static void cred_dir_prepare(void)
+{
+    char dir[HAL_PATH_MAX];
+    char *slash;
+
+    snprintf(dir, sizeof(dir), "%s", console_auth_cred_path());
+    slash = strrchr(dir, '/');
+    if (!slash) return;
+    *slash = '\0';
+    if (dir[0] == '\0') return;
+    os_mkdir_p(dir);
+#ifndef _WIN32
+    chmod(dir, S_IRWXU);   /* 0700 */
+#endif
+}
+
 static hal_err_t cred_persist(const cred_t *c)
 {
     uint8_t blob[CRED_BLOB_LEN];
@@ -473,9 +557,16 @@ static hal_err_t cred_persist(const cred_t *c)
     if (crypto_store_available()) {
         rc = hal()->crypto->secure_write(HAL_SEC_KEY_LOCAL_USER, blob, sizeof(blob));
     } else {
-        /* 退化软存储：靠文件系统权限保护（由部署侧的 rootfs 挂载/umask 负责，
-           模块层不引入平台分支去 chmod）。关键点是它同样不经 core/config。 */
-        rc = os_file_write_atomic(CONSOLE_CRED_FILE, blob, sizeof(blob)) == 0 ? HAL_OK : HAL_EIO;
+        /* 退化软存储：私有目录 0700 + 文件 0600。文件内含 stored_key，
+           读到它即可算出 proof 完成鉴权，权限收紧不是可选项。
+           关键点同样是它不经 core/config。 */
+        const char *path = console_auth_cred_path();
+        cred_dir_prepare();
+        rc = os_file_write_atomic(path, blob, sizeof(blob)) == 0 ? HAL_OK : HAL_EIO;
+#ifndef _WIN32
+        if (rc == HAL_OK && chmod(path, S_IRUSR | S_IWUSR) != 0)   /* 0600 */
+            LOGW(MOD, "凭据软存储权限收紧失败，请检查数据目录挂载与 umask");
+#endif
     }
     secure_wipe(blob, sizeof(blob));
     return rc;
@@ -493,7 +584,7 @@ static hal_err_t cred_fetch(cred_t *c)
         if (rc != HAL_OK) return rc;
     } else {
         size_t flen = 0;
-        char *raw = os_file_read_all(CONSOLE_CRED_FILE, &flen);
+        char *raw = os_file_read_all(console_auth_cred_path(), &flen);
         if (!raw) return HAL_ENODEV;
         if (flen == sizeof(blob)) { memcpy(blob, raw, sizeof(blob)); len = flen; }
         secure_wipe(raw, flen);
@@ -582,6 +673,7 @@ static hal_err_t decoy_salt(const char *user, uint8_t out[CONSOLE_SALT_LEN])
 typedef struct {
     char     nonce[CONSOLE_HEX_CAP(CONSOLE_NONCE_LEN)];
     char     user[CONSOLE_USER_MAX];
+    char     ip[CONSOLE_IP_MAX];
     uint64_t issued_us;
     bool     used;
 } nonce_ent_t;
@@ -593,20 +685,38 @@ static void nonces_clear(void)
     secure_wipe(s_nonces, sizeof(s_nonces));
 }
 
-static void nonce_add(const char *nonce, const char *user)
+/**
+ * 选一个 nonce 槽位。淘汰序刻意按来源 IP 分区：
+ *   1) 空闲或已过期的槽位；
+ *   2) **同一 IP** 的最旧条目；
+ *   3) 实在没有才动别人的最旧条目。
+ * `/api/v1/auth/challenge` 不需要会话、也不受登录锁定约束，若一律淘汰全表最旧，
+ * 攻击者只要在运维取 challenge 与提交 login 之间插 4 个请求就能持续把运维挤出去。
+ * 分区之后，只要攻击者自己已占着一个槽位，就再也挤不掉别人的。
+ */
+static nonce_ent_t *nonce_slot(uint64_t now, const char *ip)
 {
-    uint64_t now = os_monotonic_us();
-    nonce_ent_t *slot = &s_nonces[0];
+    nonce_ent_t *same_ip = NULL, *oldest = &s_nonces[0];
     size_t i;
 
     for (i = 0; i < CONSOLE_NONCE_MAX; i++) {
         nonce_ent_t *e = &s_nonces[i];
-        if (!e->used || now - e->issued_us > CONSOLE_NONCE_TTL_US) { slot = e; break; }
-        if (e->issued_us < slot->issued_us) slot = e;   /* 满则淘汰最旧 */
+        if (!e->used || now - e->issued_us > CONSOLE_NONCE_TTL_US) return e;
+        if (strcmp(e->ip, ip) == 0 && (!same_ip || e->issued_us < same_ip->issued_us)) same_ip = e;
+        if (e->issued_us < oldest->issued_us) oldest = e;
     }
+    return same_ip ? same_ip : oldest;
+}
+
+static void nonce_add(const char *nonce, const char *user, const char *ip)
+{
+    uint64_t now = os_monotonic_us();
+    nonce_ent_t *slot = nonce_slot(now, ip);
+
     memset(slot, 0, sizeof(*slot));
     snprintf(slot->nonce, sizeof(slot->nonce), "%s", nonce);
     snprintf(slot->user, sizeof(slot->user), "%s", user);
+    snprintf(slot->ip, sizeof(slot->ip), "%s", ip);
     slot->issued_us = now;
     slot->used = true;
 }
@@ -704,7 +814,7 @@ static void session_drop(const char *token)
  * ========================================================================== */
 
 typedef struct {
-    char     ip[46];            /**< 与 http_server 的 CONN_PEER_IP_MAX 同宽 */
+    char     ip[CONSOLE_IP_MAX];
     uint32_t fails;
     uint32_t lock_ms;           /**< 上一次锁定时长，用于 2 倍退避 */
     uint64_t lock_until_us;
@@ -815,9 +925,10 @@ fail:
     return rc;
 }
 
-hal_err_t console_auth_challenge(const char *user, char *salt_hex, size_t salt_cap,
-                                 char *nonce, size_t nonce_cap)
+hal_err_t console_auth_challenge_from(const char *user, char *salt_hex, size_t salt_cap,
+                                      char *nonce, size_t nonce_cap, const char *client_ip)
 {
+    const char *ip = (client_ip && client_ip[0]) ? client_ip : CONSOLE_IP_UNKNOWN;
     uint8_t salt[CONSOLE_SALT_LEN];
     uint8_t raw[CONSOLE_NONCE_LEN];
     char text[CONSOLE_HEX_CAP(CONSOLE_NONCE_LEN)];
@@ -837,9 +948,15 @@ hal_err_t console_auth_challenge(const char *user, char *salt_hex, size_t salt_c
     if ((rc = hex_encode(raw, sizeof(raw), text, sizeof(text))) != HAL_OK) return rc;
     secure_wipe(raw, sizeof(raw));
 
-    nonce_add(text, user);
+    nonce_add(text, user, ip);
     snprintf(nonce, nonce_cap, "%s", text);
     return HAL_OK;
+}
+
+hal_err_t console_auth_challenge(const char *user, char *salt_hex, size_t salt_cap,
+                                 char *nonce, size_t nonce_cap)
+{
+    return console_auth_challenge_from(user, salt_hex, salt_cap, nonce, nonce_cap, NULL);
 }
 
 hal_err_t console_auth_verify_from(const char *user, const char *nonce, const char *proof,
@@ -962,36 +1079,58 @@ fail:
 }
 
 /**
- * 改密掩码 = HMAC(stored_key, "pwdchg|" || nonce)。
- * 必须与登录 proof（= HMAC(stored_key, nonce)）做域分隔：proof 本身是明文上送的，
- * 若掩码复用同一条 HMAC，等于把掩码随包附送，遮蔽就完全失效了。
+ * 掩码 = HMAC(stored_key, <用途标签> || "|" || nonce)。
+ *
+ * 域分隔在这里是必需项而不是洁癖，两层理由：
+ *  - 与登录 proof（= HMAC(stored_key, nonce)）分隔：proof 本身明文上送，
+ *    若掩码复用同一条 HMAC，等于把掩码随包附送；
+ *  - 两条掩码彼此也必须分隔：同一 nonce 下两个不同明文若共用一条掩码，
+ *    观察者把两个密文异或就直接得到两份明文的异或。
  */
-static hal_err_t mask_derive(const char *nonce, uint8_t out[32])
+static hal_err_t mask_derive(const char *tag, const char *nonce, uint8_t out[32])
 {
     char msg[16 + CONSOLE_HEX_CAP(CONSOLE_NONCE_LEN)];
-    if (fmt_safe(msg, sizeof(msg), "pwdchg|%s", nonce) != HAL_OK) return HAL_EINVAL;
+    if (fmt_safe(msg, sizeof(msg), "%s|%s", tag, nonce) != HAL_OK) return HAL_EINVAL;
     return console_hmac_sha256(s_cred.key, CONSOLE_KEY_LEN,
                                (const uint8_t *)msg, strlen(msg), out);
 }
 
+/** 解掩码：out = masked XOR HMAC(stored_key, tag||"|"||nonce) */
+static hal_err_t unmask(const char *tag, const char *nonce,
+                        const uint8_t masked[CONSOLE_KEY_LEN], uint8_t out[CONSOLE_KEY_LEN])
+{
+    uint8_t mask[32];
+    size_t i;
+    hal_err_t rc = mask_derive(tag, nonce, mask);
+    if (rc != HAL_OK) return rc;
+    for (i = 0; i < CONSOLE_KEY_LEN; i++) out[i] = (uint8_t)(masked[i] ^ mask[i]);
+    secure_wipe(mask, sizeof(mask));
+    return HAL_OK;
+}
+
 hal_err_t console_auth_set_key_masked(const char *user, const char *nonce, const char *proof,
                                       const char *new_salt_hex, const char *masked_key_hex,
-                                      const char *client_ip)
+                                      const char *masked_chk_hex, const char *client_ip)
 {
     cred_t c;
-    uint8_t new_salt[CONSOLE_SALT_LEN], masked[CONSOLE_KEY_LEN], mask[32];
-    size_t salt_len = 0, masked_len = 0, i;
+    uint8_t new_salt[CONSOLE_SALT_LEN];
+    uint8_t masked_key[CONSOLE_KEY_LEN], masked_chk[CONSOLE_KEY_LEN], chk[CONSOLE_KEY_LEN];
+    size_t n = 0;
     hal_err_t rc;
+    bool same_pwd;
 
-    if (!user || !nonce || !proof || !new_salt_hex || !masked_key_hex) return HAL_EINVAL;
+    if (!user || !nonce || !proof || !new_salt_hex || !masked_key_hex || !masked_chk_hex)
+        return HAL_EINVAL;
     cred_ensure_loaded();
     if (!s_cred.valid) return HAL_ESTATE;
 
     /* 先解析再校验：格式错误不该消耗 nonce，也不该计进按 IP 的失败锁定 */
-    rc = hex_decode(new_salt_hex, new_salt, sizeof(new_salt), &salt_len);
-    if (rc != HAL_OK || salt_len != CONSOLE_SALT_LEN) return HAL_EINVAL;
-    rc = hex_decode(masked_key_hex, masked, sizeof(masked), &masked_len);
-    if (rc != HAL_OK || masked_len != CONSOLE_KEY_LEN) return HAL_EINVAL;
+    rc = hex_decode(new_salt_hex, new_salt, sizeof(new_salt), &n);
+    if (rc != HAL_OK || n != CONSOLE_SALT_LEN) return HAL_EINVAL;
+    rc = hex_decode(masked_key_hex, masked_key, sizeof(masked_key), &n);
+    if (rc != HAL_OK || n != CONSOLE_KEY_LEN) return HAL_EINVAL;
+    rc = hex_decode(masked_chk_hex, masked_chk, sizeof(masked_chk), &n);
+    if (rc != HAL_OK || n != CONSOLE_KEY_LEN) return HAL_EINVAL;
 
     /* 先验旧口令（含 nonce 一次性与按 IP 锁定），通过后才解掩码 */
     if ((rc = console_auth_verify_from(user, nonce, proof, client_ip)) != HAL_OK) {
@@ -999,27 +1138,46 @@ hal_err_t console_auth_set_key_masked(const char *user, const char *nonce, const
         return rc;
     }
 
-    if ((rc = mask_derive(nonce, mask)) != HAL_OK) return rc;
+    /* 新旧口令不得相同。客户端另用**旧盐**算 chk = PBKDF2(新口令, old_salt, iter)：
+       若新口令就是旧口令，chk 必然等于 stored_key。
+       注意这条只对如实计算 chk 的客户端成立——服务端看不到明文，无法把客户端
+       钉死在"chk 确实由新口令派生"上。它挡住的是"用户图省事把新口令填成出厂码"
+       这一真实场景（也正是 must_change 存在的理由）；一个已经知道旧口令、
+       刻意伪造 chk 的攻击者绕得过去，但那种攻击者本就能把设备改成任意口令，
+       并不因此多拿到什么。零知识改密无法做得更强，详见报告。 */
+    if ((rc = unmask("pwdchk", nonce, masked_chk, chk)) != HAL_OK) return rc;
+    same_pwd = ct_equal(chk, s_cred.key, CONSOLE_KEY_LEN);
+    secure_wipe(chk, sizeof(chk));
+    secure_wipe(masked_chk, sizeof(masked_chk));
+    if (same_pwd) {
+        LOGW(MOD, "改密被拒：新口令与旧口令相同");
+        return HAL_EINVAL;
+    }
 
     c = s_cred;
     memcpy(c.salt, new_salt, sizeof(new_salt));
-    for (i = 0; i < CONSOLE_KEY_LEN; i++) c.key[i] = (uint8_t)(masked[i] ^ mask[i]);
+    /* XOR 遮蔽只保机密性、不保完整性（可延展），这不是 AEAD：中间人翻转密文位
+       就能翻转 new_key 对应位。实际影响接近零——明文 HTTP 下主动中间人本来就能
+       重写整条请求，而没有旧口令仍过不了上面的 verify_from，翻转的结果只是把设备
+       改成一个谁都不知道的口令。别在此基础上假设它有完整性保护。 */
+    if ((rc = unmask("pwdchg", nonce, masked_key, c.key)) != HAL_OK) goto fail;
     /* iter 保持不变：客户端正是按 challenge 下发的 auth_iter()（即当前 s_cred.iter）
        派生 new_key 的，这里改成别的值会与客户端算出的密钥失配。 */
     c.must_change = false;
-    secure_wipe(mask, sizeof(mask));
-    secure_wipe(masked, sizeof(masked));
+    secure_wipe(masked_key, sizeof(masked_key));
 
-    if ((rc = cred_persist(&c)) != HAL_OK) {
-        secure_wipe(&c, sizeof(c));
-        return rc;
-    }
+    if ((rc = cred_persist(&c)) != HAL_OK) goto fail;
     s_cred = c;
     secure_wipe(&c, sizeof(c));
     sessions_clear();   /* 改密后全部会话失效，必须以新口令重新登录 */
     nonces_clear();
     LOGI(MOD, "本地账号口令已修改（掩码方式，口令未上线），全部会话已失效");
     return HAL_OK;
+
+fail:
+    secure_wipe(&c, sizeof(c));
+    secure_wipe(masked_key, sizeof(masked_key));
+    return rc;
 }
 
 /** 从 Cookie 头里取一个 cookie 值；不存在返回 HAL_ENODEV，超长返回 HAL_EINVAL */
@@ -1103,7 +1261,7 @@ static hal_err_t body_str(const json_t *j, const char *key, char *out, size_t ca
     return HAL_OK;
 }
 
-static hal_err_t ep_challenge(const json_t *j, char *out, size_t cap)
+static hal_err_t ep_challenge(const json_t *j, const char *ip, char *out, size_t cap)
 {
     char user[CONSOLE_USER_MAX];
     char salt_hex[CONSOLE_HEX_CAP(CONSOLE_SALT_LEN)];
@@ -1111,15 +1269,15 @@ static hal_err_t ep_challenge(const json_t *j, char *out, size_t cap)
     hal_err_t rc;
 
     if ((rc = body_str(j, "user", user, sizeof(user))) != HAL_OK) return rc;
-    if ((rc = console_auth_challenge(user, salt_hex, sizeof(salt_hex),
-                                     nonce, sizeof(nonce))) != HAL_OK) return rc;
+    if ((rc = console_auth_challenge_from(user, salt_hex, sizeof(salt_hex),
+                                          nonce, sizeof(nonce), ip)) != HAL_OK) return rc;
     return fmt_safe(out, cap,
                     "{\"code\":0,\"salt\":\"%s\",\"iter\":%u,\"nonce\":\"%s\",\"expire_s\":%u}",
                     salt_hex, (unsigned)auth_iter(), nonce,
                     (unsigned)(CONSOLE_NONCE_TTL_US / 1000000ull));
 }
 
-static hal_err_t ep_login(const json_t *j, const http_req_t *req,
+static hal_err_t ep_login(const json_t *j, const char *ip,
                           char *out, size_t cap, char *cookie, size_t cookie_cap)
 {
     char user[CONSOLE_USER_MAX];
@@ -1132,8 +1290,7 @@ static hal_err_t ep_login(const json_t *j, const http_req_t *req,
     if ((rc = body_str(j, "nonce", nonce, sizeof(nonce))) != HAL_OK) return rc;
     if ((rc = body_str(j, "proof", proof, sizeof(proof))) != HAL_OK) return rc;
 
-    if ((rc = console_auth_verify_from(user, nonce, proof, req_client_ip(req))) != HAL_OK)
-        return rc;
+    if ((rc = console_auth_verify_from(user, nonce, proof, ip)) != HAL_OK) return rc;
     if ((rc = session_new(user, token, sizeof(token))) != HAL_OK) return rc;
 
     /* token 只经 HttpOnly Cookie 下发，不进响应体：明文 HTTP 下 token 本就可被
@@ -1146,7 +1303,7 @@ static hal_err_t ep_login(const json_t *j, const http_req_t *req,
                   console_auth_must_change() ? "true" : "false",
                   (unsigned)(CONSOLE_SESSION_IDLE_US / 1000000ull));
     if (rc != HAL_OK) return rc;
-    LOGI(MOD, "用户 %s 登录成功（来源 %s）", user, req_client_ip(req));
+    LOGI(MOD, "用户 %s 登录成功（来源 %s）", user, ip);
     return HAL_OK;
 }
 
@@ -1161,7 +1318,7 @@ static hal_err_t cookie_clear(char *cookie, size_t cap)
  * 代价是服务端看不到明文，无法在此校验口令强度（长度/复杂度由前端把关，
  * `console_auth_set_password` 的 8..63 限制只覆盖本地/测试路径）。
  */
-static hal_err_t ep_password(const json_t *j, const http_req_t *req,
+static hal_err_t ep_password(const json_t *j, const http_req_t *req, const char *ip,
                              char *out, size_t cap, char *cookie, size_t cookie_cap)
 {
     char user[CONSOLE_USER_MAX];
@@ -1169,6 +1326,7 @@ static hal_err_t ep_password(const json_t *j, const http_req_t *req,
     char proof[CONSOLE_HEX_CAP(CONSOLE_KEY_LEN)];
     char new_salt[CONSOLE_HEX_CAP(CONSOLE_SALT_LEN)];
     char masked[CONSOLE_HEX_CAP(CONSOLE_KEY_LEN)];
+    char masked_chk[CONSOLE_HEX_CAP(CONSOLE_KEY_LEN)];
     hal_err_t rc;
 
     /* 需已登录；CONSOLE_AUTH_PREFIX 已从强制改密拦截里豁免，故此处可达 */
@@ -1179,8 +1337,9 @@ static hal_err_t ep_password(const json_t *j, const http_req_t *req,
     if ((rc = body_str(j, "proof", proof, sizeof(proof))) != HAL_OK) return rc;
     if ((rc = body_str(j, "new_salt", new_salt, sizeof(new_salt))) != HAL_OK) return rc;
     if ((rc = body_str(j, "new_key_masked", masked, sizeof(masked))) != HAL_OK) return rc;
+    if ((rc = body_str(j, "chk_masked", masked_chk, sizeof(masked_chk))) != HAL_OK) return rc;
 
-    rc = console_auth_set_key_masked(user, nonce, proof, new_salt, masked, req_client_ip(req));
+    rc = console_auth_set_key_masked(user, nonce, proof, new_salt, masked, masked_chk, ip);
     if (rc != HAL_OK) return rc;
 
     if ((rc = cookie_clear(cookie, cookie_cap)) != HAL_OK) return rc; /* 会话已全部作废，同步清掉浏览器 Cookie */
@@ -1207,15 +1366,18 @@ static hal_err_t ep_logout(const http_req_t *req, char *out, size_t cap,
  * 返回 HAL_OK 时 out 为 200 响应体、cookie 为 Set-Cookie 值（无则空串）；
  * 其他返回值由调用方交给 console_reply_err。
  */
-static hal_err_t auth_dispatch(const http_req_t *req, char *out, size_t cap,
-                               char *cookie, size_t cookie_cap)
+static hal_err_t auth_dispatch(const http_req_t *req, const char *ip_override,
+                               char *out, size_t cap, char *cookie, size_t cookie_cap)
 {
     const size_t plen = sizeof(CONSOLE_AUTH_PREFIX) - 1;
     const char *sub;
+    const char *ip;
     json_t *j = NULL;
     hal_err_t rc;
 
     if (!req || !out || cap == 0 || !cookie || cookie_cap == 0) return HAL_EINVAL;
+    /* ip_override 只由测试桩传入（构造不出真实连接）；生产路径恒为 NULL */
+    ip = (ip_override && ip_override[0]) ? ip_override : req_client_ip(req);
     out[0] = '\0';
     cookie[0] = '\0';
 
@@ -1233,9 +1395,9 @@ static hal_err_t auth_dispatch(const http_req_t *req, char *out, size_t cap,
         if (!j) return HAL_EINVAL;
     }
 
-    if (strcmp(sub, "challenge") == 0)     rc = ep_challenge(j, out, cap);
-    else if (strcmp(sub, "login") == 0)    rc = ep_login(j, req, out, cap, cookie, cookie_cap);
-    else if (strcmp(sub, "password") == 0) rc = ep_password(j, req, out, cap, cookie, cookie_cap);
+    if (strcmp(sub, "challenge") == 0)     rc = ep_challenge(j, ip, out, cap);
+    else if (strcmp(sub, "login") == 0)    rc = ep_login(j, ip, out, cap, cookie, cookie_cap);
+    else if (strcmp(sub, "password") == 0) rc = ep_password(j, req, ip, out, cap, cookie, cookie_cap);
     else                                   rc = ep_logout(req, out, cap, cookie, cookie_cap);
 
     json_free(j);
@@ -1248,7 +1410,7 @@ static int console_auth_handler(http_req_t *req, void *user)
     hal_err_t rc;
 
     (void)user;
-    rc = auth_dispatch(req, body, sizeof(body), cookie, sizeof(cookie));
+    rc = auth_dispatch(req, NULL, body, sizeof(body), cookie, sizeof(cookie));
     if (rc != HAL_OK) return console_reply_err(req->conn, rc);
 
     if (cookie[0]) {
@@ -1261,10 +1423,57 @@ static int console_auth_handler(http_req_t *req, void *user)
     return http_respond_json(req->conn, 200, body);
 }
 
+/**
+ * 首次启动 / 恢复出厂后自动播种：从安全存储读产线烧录的出厂验证码
+ * （HAL 为此预留了 HAL_SEC_KEY_VERIFY_CODE），派生凭据并置 must_change。
+ *
+ * 没有这一步，`s_cred.valid` 在真机上永远为假，每次登录都返回 HAL_EPERM_——
+ * 控制台根本进不去。两条纪律：
+ *  - 取不到验证码时**绝不静默放行**，打明确的 ERROR，登录继续失败；
+ *  - 但也**不让 console_init 失败**，否则整个 console 模块起不来，连诊断页都没了。
+ */
+static void cred_bootstrap_from_factory_code(void)
+{
+    uint8_t raw[64];
+    char code[sizeof(raw) + 1];
+    size_t len = 0;
+    hal_err_t rc;
+
+    if (s_cred.valid) return;
+
+    if (!crypto_store_available()) {
+        LOGE(MOD, "无安全存储可读出厂验证码：本地控制台将无法登录，"
+                  "该平台需实现 hal_crypto 或预置凭据");
+        return;
+    }
+    rc = hal()->crypto->secure_read(HAL_SEC_KEY_VERIFY_CODE, raw, sizeof(raw), &len);
+    if (rc != HAL_OK || len == 0 || len > sizeof(raw)) {
+        LOGE(MOD, "安全存储中没有出厂验证码（键 %s，rc=%d）：本地控制台将无法登录，"
+                  "需产线烧录后重启或恢复出厂", HAL_SEC_KEY_VERIFY_CODE, (int)rc);
+        secure_wipe(raw, sizeof(raw));
+        return;
+    }
+
+    memcpy(code, raw, len);
+    code[len] = '\0';
+    /* 产线写入可能带尾随换行/空白，去掉后再派生 */
+    while (len > 0 && (code[len - 1] == '\n' || code[len - 1] == '\r' ||
+                       code[len - 1] == ' '  || code[len - 1] == '\t')) code[--len] = '\0';
+
+    if (len == 0) {
+        LOGE(MOD, "出厂验证码为空：本地控制台将无法登录");
+    } else if ((rc = console_auth_seed(code)) != HAL_OK) {
+        LOGE(MOD, "以出厂验证码播种本地账号失败：%s（控制台将无法登录）", hal_strerror(rc));
+    }
+    secure_wipe(code, sizeof(code));
+    secure_wipe(raw, sizeof(raw));
+}
+
 hal_err_t console_auth_init(void)
 {
     /* 启动期读一次凭据：请求路径上因此不会出现读安全存储/文件的阻塞动作 */
     cred_ensure_loaded();
+    cred_bootstrap_from_factory_code();
     return http_route(CONSOLE_AUTH_PREFIX, console_auth_handler, NULL);
 }
 
@@ -1281,10 +1490,11 @@ void console_auth_test_reload(void)
     s_cred_loaded = false;
 }
 
-hal_err_t console_auth_test_dispatch(const http_req_t *req, char *body, size_t body_cap,
+hal_err_t console_auth_test_dispatch(const http_req_t *req, const char *client_ip,
+                                     char *body, size_t body_cap,
                                      char *set_cookie, size_t cookie_cap)
 {
-    return auth_dispatch(req, body, body_cap, set_cookie, cookie_cap);
+    return auth_dispatch(req, client_ip, body, body_cap, set_cookie, cookie_cap);
 }
 
 #endif /* IPC_TESTING */

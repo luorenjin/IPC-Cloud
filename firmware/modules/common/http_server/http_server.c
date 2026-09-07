@@ -315,7 +315,10 @@ static void accept_new_conn(void)
         memset(slot, 0, sizeof(*slot));
         slot->fd = fd;
         slot->used = 1;
-        memcpy(slot->peer_ip, peer_ip, sizeof(slot->peer_ip)); /* memset 之后再填，避免被清掉 */
+        /* memset 之后再填，避免被清掉。用 snprintf 而不是整块 memcpy：peer_ip 是
+           未初始化的栈缓冲，整块拷会把栈残留搬进长期存活的连接结构（不可利用，
+           但 MSAN/valgrind 会报，也白白抵消上面两行的 memset）。 */
+        snprintf(slot->peer_ip, sizeof(slot->peer_ip), "%s", peer_ip);
         slot->rbuf = (char *)malloc(CONN_BUF_MAX);
         if (!slot->rbuf) {
             LOGE(MOD, "连接接收缓冲区分配失败");
