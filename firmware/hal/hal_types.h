@@ -24,7 +24,7 @@ extern "C" {
 
 /** HAL 接口版本：主版本不兼容变更，次版本向后兼容扩展 */
 #define HAL_API_VERSION_MAJOR 1
-#define HAL_API_VERSION_MINOR 0
+#define HAL_API_VERSION_MINOR 1 /* v1.1：hal_net 增加 wifi_ap_start/wifi_ap_stop 与 caps.wifi_ap（向后兼容扩展） */
 #define HAL_API_VERSION ((HAL_API_VERSION_MAJOR << 16) | HAL_API_VERSION_MINOR)
 
 /* ---------------------------------------------------------------------- */

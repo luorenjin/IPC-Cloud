@@ -149,7 +149,7 @@ const hal_gpio_ops_t mock_gpio_ops = { g_mask, g_set, g_get, g_pwm, g_adc, g_wai
 
 /* ======================= 网络 ======================= */
 
-static hal_err_t n_caps(hal_net_caps_t *c) { if (!c) return HAL_EINVAL; memset(c, 0, sizeof(*c)); c->eth = true; c->wifi = false; return HAL_OK; }
+static hal_err_t n_caps(hal_net_caps_t *c) { if (!c) return HAL_EINVAL; memset(c, 0, sizeof(*c)); c->eth = true; c->wifi = false; c->wifi_ap = true; return HAL_OK; }
 static hal_err_t n_status(hal_netif_t t, hal_netif_status_t *s)
 {
     if (!s) return HAL_EINVAL;
@@ -164,9 +164,32 @@ static hal_err_t n_wpower(bool on) { (void)on; return HAL_ENOTSUP; }
 static hal_err_t n_wscan(hal_wifi_ap_t *a, uint32_t mx, uint32_t *c, uint32_t to) { (void)a; (void)mx; (void)to; if (c) *c = 0; return HAL_ENOTSUP; }
 static hal_err_t n_wconn(const char *s, const char *p, hal_wifi_sec_t sec) { (void)s; (void)p; (void)sec; return HAL_ENOTSUP; }
 static hal_err_t n_wdisc(void) { return HAL_ENOTSUP; }
+
+static bool s_ap_running;
+
+static hal_err_t mock_wifi_ap_start(const char *ssid, const char *psk, uint8_t channel)
+{
+    size_t psk_len;
+    if (!ssid || !psk) return HAL_EINVAL;
+    if (ssid[0] == '\0') return HAL_EINVAL;
+    psk_len = strlen(psk);
+    if (psk_len < 8 || psk_len > 63) return HAL_EINVAL;   /* WPA2 约束 */
+    if (channel > 13) return HAL_EINVAL;
+    if (s_ap_running) return HAL_EBUSY;
+    s_ap_running = true;
+    return HAL_OK;
+}
+
+static hal_err_t mock_wifi_ap_stop(void)
+{
+    if (!s_ap_running) return HAL_ESTATE;
+    s_ap_running = false;
+    return HAL_OK;
+}
+
 static hal_err_t n_poll(hal_net_event_t *e, uint32_t to) { if (!e) return HAL_EINVAL; mock_os_sleep_ms(to > 50 ? 50 : to); return HAL_EAGAIN; }
 
-const hal_net_ops_t mock_net_ops = { n_caps, n_status, n_mac, n_wpower, n_wscan, n_wconn, n_wdisc, n_poll };
+const hal_net_ops_t mock_net_ops = { n_caps, n_status, n_mac, n_wpower, n_wscan, n_wconn, n_wdisc, mock_wifi_ap_start, mock_wifi_ap_stop, n_poll };
 
 /* ======================= 存储 ======================= */
 

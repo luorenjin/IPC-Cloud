@@ -70,6 +70,7 @@ typedef struct {
     bool wifi;
     bool wifi_5g;
     uint32_t wifi_sec_mask;   /**< bit(HAL_WIFI_SEC_x) */
+    bool wifi_ap;             /**< 是否支持 AP（热点）模式，供本地配网使用 */
 } hal_net_caps_t;
 
 typedef struct hal_net_ops {
@@ -82,6 +83,18 @@ typedef struct hal_net_ops {
     hal_err_t (*wifi_scan)(hal_wifi_ap_t *aps, uint32_t max, uint32_t *count, uint32_t timeout_ms);
     hal_err_t (*wifi_connect)(const char *ssid, const char *psk, hal_wifi_sec_t sec);
     hal_err_t (*wifi_disconnect)(void);
+
+    /**
+     * 启动 AP（热点）模式，供未配网时的本地 Web 配网使用。
+     * 可选能力：不支持的平台将本指针置 NULL，并在 get_caps 中置 wifi_ap=false。
+     * ssid    热点名，不超过 HAL_SSID_MAX-1
+     * psk     WPA2 密码，8~63 字符；短于 8 返回 HAL_EINVAL
+     * channel 2.4G 信道 1~13；0 表示由实现自选
+     * 已启动时重复调用返回 HAL_EBUSY。
+     */
+    hal_err_t (*wifi_ap_start)(const char *ssid, const char *psk, uint8_t channel);
+    /** 停止 AP；未启动时返回 HAL_ESTATE */
+    hal_err_t (*wifi_ap_stop)(void);
 
     /** 链路事件轮询；HAL_EAGAIN 表示无事件 */
     hal_err_t (*poll_event)(hal_net_event_t *evt, uint32_t timeout_ms);

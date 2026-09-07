@@ -288,6 +288,25 @@ static void test_gpio_net_storage(void)
     }
     rc = st->poll_event(&se, 20);
     CHECK(rc == HAL_OK || rc == HAL_EAGAIN, "storage poll_event");
+
+    /* AP 模式（可选能力：不支持须返回 HAL_ENOTSUP，且 caps.wifi_ap 为 false） */
+    {
+        hal_net_caps_t caps;
+        bool has_ap = (hal()->net->wifi_ap_start != NULL);
+        CHECK(hal()->net->get_caps(&caps) == HAL_OK, "net get_caps");
+        if (has_ap) {
+            CHECK(caps.wifi_ap == true, "声明了 wifi_ap_start 则 caps.wifi_ap 必须为 true");
+            CHECK(hal()->net->wifi_ap_start("IPC-TEST", "12345678", 6) == HAL_OK, "wifi_ap_start");
+            CHECK(hal()->net->wifi_ap_start("IPC-TEST", "12345678", 6) == HAL_EBUSY,
+                  "重复 start 返回 EBUSY");
+            CHECK(hal()->net->wifi_ap_stop() == HAL_OK, "wifi_ap_stop");
+            CHECK(hal()->net->wifi_ap_stop() == HAL_ESTATE, "未启动时 stop 返回 ESTATE");
+            /* PSK 过短须拒绝：WPA2 要求 8~63 字符 */
+            CHECK(hal()->net->wifi_ap_start("IPC-TEST", "123", 6) == HAL_EINVAL, "PSK 过短");
+        } else {
+            CHECK(caps.wifi_ap == false, "未实现 AP 则 caps.wifi_ap 必须为 false");
+        }
+    }
 }
 
 /* ---------------- HAL-08 crypto（可选） ---------------- */
