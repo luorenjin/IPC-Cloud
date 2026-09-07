@@ -6,7 +6,6 @@
 #include <string.h>
 #include <stdlib.h>
 #include <ctype.h>
-#include <stdio.h>
 
 static int ci_equal(const char *a, const char *b)
 {

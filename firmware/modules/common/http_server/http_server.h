@@ -24,6 +24,10 @@ extern "C" {
 #define HTTP_HEADERS_MAX  24
 #define HTTP_BODY_MAX     (72 * 1024)   /**< 单请求体上限；OTA 走分块，每块 64KB */
 
+/**
+ * name/value 指向解析器内部的暂存缓冲区，仅在**下一次** http_parse_request()
+ * 调用之前有效；与 http_req_t.body（生命周期同调用者 buf）不同，不可跨请求缓存。
+ */
 typedef struct {
     const char *name;
     const char *value;
@@ -35,7 +39,7 @@ typedef struct {
     char   method[HTTP_METHOD_MAX];
     char   path[HTTP_PATH_MAX];       /**< 已 URL 解码，不含 query */
     char   query[HTTP_QUERY_MAX];     /**< ? 之后的原始串，未解析 */
-    http_header_t headers[HTTP_HEADERS_MAX];
+    http_header_t headers[HTTP_HEADERS_MAX]; /**< 生命周期见 http_header_t 上方注释 */
     size_t header_count;
     const char *body;                 /**< 指向调用者缓冲区，非拥有 */
     size_t body_len;
