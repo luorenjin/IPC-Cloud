@@ -58,7 +58,20 @@ static struct {
 #ifndef _WIN32
     int          epfd;
 #endif
-} s_srv;
+} s_srv = {
+    /* 静态零初始化本身会把 listen_fd/epfd 都置 0，而 0 在 POSIX 上恰好是
+     * stdin 的 fd 号——"服务从未启动"这一状态因此和"epfd/listen_fd 是合法
+     * 值 0"在类型层面无法区分，conn_update_poll_interest/conn_close 里
+     * "epfd < 0 即未运行"的守卫在从未 start 过时（IPC_TESTING 测试桩场景）
+     * 会被 0 骗过，仍然对垃圾 fd 调用 epoll_ctl（评审指出：这条守卫此前
+     * 带着"服务未运行"的注释，却并不真正提供这个保护）。显式初始化为
+     * SOCK_INVALID/-1，让"未运行"从一开始就是这两个守卫能正确识别的值。
+     * conns[]/thread 未在此列出的字段仍按 C 规则隐式零初始化，行为不变。 */
+    .listen_fd = SOCK_INVALID,
+#ifndef _WIN32
+    .epfd = -1,
+#endif
+};
 
 static os_mutex_t *s_stop_mu;
 static bool        s_should_stop;
