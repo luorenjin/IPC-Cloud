@@ -331,6 +331,115 @@ static void test_e2e_enotsup_501(void)
     t_net_cleanup();
 }
 
+/* ------------------------------------------------------------------------ */
+/* e2e：http_respond_ex 发送队列溢出时必须原子失败（Task 3 fix round 1 回归测试）  */
+/*                                                                            */
+/* 缺陷背景：http_respond_ex 对 head/body 分两次独立调用 conn_queue_send 入队；  */
+/* 若 head 入队成功但 body 因发送队列容量上限而入队失败，此前 head 会不可逆地    */
+/* 残留在队列里——handler 把失败透传给框架后，dispatch_one 会在同一连接上再追    */
+/* 加一个完整的错误响应，与残留的半截 head 拼接成对端无法解析的畸形 HTTP 流。    */
+/*                                                                            */
+/* http_server.c 内部 SEND_QUEUE_MAX = HTTP_BODY_MAX + 8192 = 81920 字节        */
+/* （文件内静态常量，测试文件拿不到）。这里让响应体达到 100KB，无论加不加上     */
+/* 响应头都稳定超过这个上限，从而确定性地触发"容量上限"这条失败分支——不依赖    */
+/* 真实 OOM/realloc 失败，可移植。                                             */
+/* ------------------------------------------------------------------------ */
+
+#define T_OVERFLOW_BODY_LEN (100 * 1024)
+static char s_overflow_body[T_OVERFLOW_BODY_LEN];
+
+static int overflow_handler(http_req_t *req, void *user)
+{
+    hal_err_t rc;
+    (void)user;
+    rc = http_respond_ex(req->conn, 200, "application/octet-stream", NULL,
+                          s_overflow_body, sizeof(s_overflow_body));
+    /* 既定用法约定：http_respond* 失败时，handler 把失败原样透传给框架
+       （见文件头注释与上面的 echo_handler），由 dispatch_one 在同一连接上
+       追加错误响应。这正是暴露"半截 head 残留 + 框架错误响应拼接"缺陷的路径。 */
+    return (rc == HAL_OK) ? 0 : (int)rc;
+}
+
+static void test_e2e_respond_ex_atomic_on_overflow(void)
+{
+    const uint16_t port = 18082;
+    t_sock_t fd;
+    char resp[4096];
+    const char *raw =
+        "GET /e2e/overflow HTTP/1.1\r\n"
+        "Host: 127.0.0.1\r\n"
+        "\r\n";
+
+    SECTION("e2e http_respond_ex 发送队列溢出必须原子失败（不残留半截 head）");
+    memset(s_overflow_body, 'x', sizeof(s_overflow_body));
+    t_net_init();
+
+    CHECK(http_route("/e2e/overflow", overflow_handler, NULL) == HAL_OK, "注册 /e2e/overflow");
+    CHECK(http_server_start(port) == HAL_OK, "服务端启动");
+
+    fd = t_connect(port);
+    CHECK(fd != T_SOCK_INVALID, "客户端连接成功");
+    if (fd != T_SOCK_INVALID) {
+        int sent = (int)send(fd, raw, (int)strlen(raw), 0);
+        CHECK(sent == (int)strlen(raw), "请求发送完整");
+
+        {
+            int n = t_recv_response(fd, resp, sizeof(resp));
+
+            CHECK(n > 0, "收到响应");
+            /* 核心断言：缺陷复现时，body 入队失败前 head（200，声明
+               Content-Length=T_OVERFLOW_BODY_LEN）已经不可逆入队成功，框架
+               随后追加的 500 错误响应会紧跟在这个不完整的 head 后面一起被
+               发出——客户端首先看到的会是那个残留的 200 状态行。修复后
+               head+body 应作为一个整体一起失败，队列里应只有框架追加的这
+               一个完整 500 响应。 */
+            CHECK(strncmp(resp, "HTTP/1.1 500", strlen("HTTP/1.1 500")) == 0,
+                  "必须是框架追加的单个完整 500 响应，而非残留的 200 头，实际收到: %s", resp);
+
+            {
+                const char *hdr_end = strstr(resp, "\r\n\r\n");
+                const char *cl = strstr(resp, "Content-Length:");
+                CHECK(hdr_end != NULL, "响应头必须以空行结束（格式完整）");
+                CHECK(cl != NULL && hdr_end != NULL && cl < hdr_end, "响应必须带 Content-Length 头");
+                if (hdr_end && cl && cl < hdr_end) {
+                    long declared_len = strtol(cl + strlen("Content-Length:"), NULL, 10);
+                    int head_bytes = (int)(hdr_end + 4 - resp);
+                    /* 字节流必须恰好是一个完整响应：实际收到的 body 字节数与
+                       响应头声明的 Content-Length 完全一致，既不短少（被截断，
+                       客户端会一直等待剩余字节直至超时）也不多出（被其他
+                       响应的字节拼接污染）。 */
+                    CHECK((n - head_bytes) == (int)declared_len,
+                          "body 字节数应等于声明的 Content-Length（头部 %d 字节之后实收 %d 字节 body，声明 %ld）",
+                          head_bytes, n - head_bytes, declared_len);
+                }
+            }
+            CHECK(strstr(resp, "HAL_ENOMEM") != NULL,
+                  "错误体应包含 HAL_ENOMEM（http_respond_ex 因发送队列溢出返回的错误码）: %s", resp);
+        }
+
+        /* 溢出发生后，同一 keep-alive 连接必须仍能干净地处理下一个请求，
+           证明这次失败没有把连接拖入不可恢复的畸形状态。 */
+        {
+            char resp2[4096];
+            const char *raw2 =
+                "GET /e2e/echo HTTP/1.1\r\n"
+                "Host: 127.0.0.1\r\n"
+                "\r\n";
+            int sent2 = (int)send(fd, raw2, (int)strlen(raw2), 0);
+            int n2;
+            CHECK(sent2 == (int)strlen(raw2), "溢出之后，同连接再次发送请求成功");
+            n2 = t_recv_response(fd, resp2, sizeof(resp2));
+            CHECK(n2 > 0 && strncmp(resp2, "HTTP/1.1 200", strlen("HTTP/1.1 200")) == 0,
+                  "溢出之后同连接仍可正常处理后续请求: %s", resp2);
+        }
+
+        T_CLOSESOCK(fd);
+    }
+
+    CHECK(http_server_stop() == HAL_OK, "服务端停止");
+    t_net_cleanup();
+}
+
 int main(void)
 {
     test_parse_basic();
@@ -341,6 +450,7 @@ int main(void)
     test_route_match();
     test_e2e_request_response();
     test_e2e_enotsup_501();
+    test_e2e_respond_ex_atomic_on_overflow();
     printf("RESULT: http_server pass=%d fail=%d\n", g_pass, g_fail);
     return g_fail;
 }

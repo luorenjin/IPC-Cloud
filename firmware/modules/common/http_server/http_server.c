@@ -296,9 +296,16 @@ static void accept_new_conn(void)
 /* 发送队列：只入队/出队，实际 send() 只在事件循环“可写”分支里调用                  */
 /* ------------------------------------------------------------------------ */
 
-static hal_err_t conn_queue_send(http_conn_t *c, const void *data, size_t len)
+/**
+ * 校验并在需要时扩容发送队列，使其足以再容纳 len 字节（只做容量准备，不写入
+ * 数据、不推进 slen）。从 conn_queue_send 中抽出这部分逻辑，供 http_respond_ex
+ * 在两段 memcpy 之前按 head+body 合计长度一次性预检查/扩容——只要这一步成功，
+ * 后续对 conn_queue_send 的调用就已保证不会再因容量不足而失败，从而让
+ * head/body 的入队相对调用方呈现原子语义（要么都成功，要么调用失败时
+ * c->slen/c->sbuf 相对调用前保持不变）。
+ */
+static hal_err_t conn_queue_reserve(http_conn_t *c, size_t len)
 {
-    if (len == 0) return HAL_OK;
     if (c->slen + len > SEND_QUEUE_MAX) {
         LOGE(MOD, "fd=%d 发送队列溢出（待发 %zu + 新增 %zu 超过上限 %d）",
              (int)c->fd, c->slen, len, SEND_QUEUE_MAX);
@@ -313,6 +320,15 @@ static hal_err_t conn_queue_send(http_conn_t *c, const void *data, size_t len)
         c->sbuf = nb;
         c->scap = newcap;
     }
+    return HAL_OK;
+}
+
+static hal_err_t conn_queue_send(http_conn_t *c, const void *data, size_t len)
+{
+    hal_err_t rc;
+    if (len == 0) return HAL_OK;
+    rc = conn_queue_reserve(c, len);
+    if (rc != HAL_OK) return rc;
     memcpy(c->sbuf + c->slen, data, len);
     c->slen += len;
     conn_update_poll_interest(c); /* 数据入队后标记可写兴趣，交由事件循环发送 */
@@ -369,6 +385,12 @@ hal_err_t http_respond_ex(http_conn_t *c, int status, const char *content_type,
         LOGE(MOD, "响应头拼接失败或过长（extra_headers 是否过长？）");
         return HAL_EINVAL;
     }
+    /* 按 head+body 合计长度一次性预检查/扩容：这一步成功后，下面两次
+       conn_queue_send 保证不会再因容量不足而失败，从而保证 head/body 要么
+       一起入队成功，要么本次调用失败时发送队列相对调用前保持不变——不会像
+       之前那样把已入队的 head 残留在队列里，被框架后续追加的错误响应拼接
+       成对端无法解析的畸形 HTTP 流。 */
+    if (conn_queue_reserve(c, (size_t)n + ((len && body) ? len : 0)) != HAL_OK) return HAL_ENOMEM;
     if (conn_queue_send(c, head, (size_t)n) != HAL_OK) return HAL_ENOMEM;
     if (len && body) {
         if (conn_queue_send(c, body, len) != HAL_OK) return HAL_ENOMEM;
