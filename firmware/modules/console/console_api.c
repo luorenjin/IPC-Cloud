@@ -141,18 +141,24 @@ static bool cap_playback(void)
 #endif
 }
 
-hal_err_t console_caps_json(char *buf, size_t cap)
+/**
+ * 构建能力清单的 json_t 对象，调用者持有并负责 json_free。
+ * console_caps_json（对外，序列化成字符串）与 ep_system_info（内嵌为
+ * "caps" 子对象）共用，避免"构建 → 序列化成串 → 再解析回来"这趟往返——
+ * 后者不仅浪费一次 malloc/parse，还引入了一个本不必存在的失败态
+ * （重新解析理论上可能失败，之前的实现对此静默降级、caps 字段直接消失，
+ * 与"caps 恒存在"的对外契约不符；现在两个调用方都直接拿 json_t*，
+ * 这个失败态整个消失了）。返回 NULL 表示 profile 未加载或内存不足，
+ * 调用方自行决定映射成哪个 hal_err_t。
+ */
+static json_t *build_caps_object(void)
 {
-    const profile_t *p;
+    const profile_t *p = profile_get();
     json_t *obj;
-    char *txt;
 
-    if (!buf || cap == 0) return HAL_EINVAL;
-    p = profile_get();
-    if (!p) return HAL_ESTATE;
-
+    if (!p) return NULL;
     obj = json_new_object();
-    if (!obj) return HAL_ENOMEM;
+    if (!obj) return NULL;
     if (json_object_set(obj, "model", json_new_string(p->model)) != 0 ||
         json_object_set(obj, "vendor", json_new_string(p->vendor)) != 0 ||
         json_object_set(obj, "wifi", json_new_bool(cap_wifi(p))) != 0 ||
@@ -161,8 +167,21 @@ hal_err_t console_caps_json(char *buf, size_t cap)
         json_object_set(obj, "h265", json_new_bool(cap_h265())) != 0 ||
         json_object_set(obj, "playback", json_new_bool(cap_playback())) != 0) {
         json_free(obj);
-        return HAL_ENOMEM;
+        return NULL;
     }
+    return obj;
+}
+
+hal_err_t console_caps_json(char *buf, size_t cap)
+{
+    json_t *obj;
+    char *txt;
+
+    if (!buf || cap == 0) return HAL_EINVAL;
+    if (!profile_get()) return HAL_ESTATE;
+
+    obj = build_caps_object();
+    if (!obj) return HAL_ENOMEM;
 
     txt = json_dump(obj, false);
     json_free(obj);
@@ -228,7 +247,13 @@ static hal_err_t ep_config_get(const http_req_t *req, char *out, size_t out_cap)
  */
 static hal_err_t ep_config_put(const http_req_t *req, char *out, size_t out_cap)
 {
-    cfg_reject_t rejects[8];
+    /* 必须清零：core/config.c 的 validate() 只拒绝 strlen(key) >= CFG_KEY_MAX
+       （96），一个恰好 95 字符的键会被 strncpy(dst, src, 95) 拷满 0..94
+       且不补 NUL——rejects[i].key[95] 与整条 reason 都可能停留在未初始化
+       状态，被下面的 json_new_string 当字符串处理时读出栈残留、甚至越读进
+       同一数组里下一个元素。与本任务较早前修的 http_query 用法 bug
+       同一类问题（http_server.c 头注释明确禁止"栈残留"）。 */
+    cfg_reject_t rejects[8] = {0};
     char *bodycopy;
     const json_t *counted;
     int total, rejected, i;
@@ -267,6 +292,11 @@ static hal_err_t ep_config_put(const http_req_t *req, char *out, size_t out_cap)
 
     json_object_set(root, "code", json_new_int(0));
     json_object_set(root, "applied", json_new_int(total - rejected));
+    /* rejected_total 是准确的被拒总数（cfg_apply_json 对每个被拒键都计数，
+       与是否还有空位记录详情无关）；rejected[] 数组本身受限于上面固定的
+       容量 8，超过 8 条时静默截断——没有 rejected_total，前端按
+       rejected.length 展示会少报"到底拒了多少个"。 */
+    json_object_set(root, "rejected_total", json_new_int(rejected));
     for (i = 0; i < rejected && i < 8; i++) {
         json_t *r = json_new_object();
         if (!r) continue;
@@ -317,7 +347,6 @@ static hal_err_t ep_system_info(char *out, size_t out_cap)
     hal_sys_stats_t st;
     hal_ota_state_t ota;
     char serial[64];
-    char caps_buf[1024];
     json_t *root, *caps_obj;
     char *txt;
     hal_err_t rc;
@@ -330,8 +359,13 @@ static hal_err_t ep_system_info(char *out, size_t out_cap)
     if (hal_has(HAL_MOD_SYS) && hal()->sys->ota_get_state) hal()->sys->ota_get_state(&ota);
     device_serial(serial, sizeof(serial));
 
-    if (console_caps_json(caps_buf, sizeof(caps_buf)) != HAL_OK) return HAL_ENOMEM;
-    caps_obj = json_parse(caps_buf, 0, NULL, 0);
+    /* 直接拿 build_caps_object() 的 json_t*，不再走 console_caps_json 的
+       "序列化成串 → 再解析回来"往返：既省一次 malloc/parse，也让"重新解析
+       失败"这个原本需要单独处理、且曾经被静默吞掉的边界情况彻底消失——
+       caps 字段现在要么正确出现，要么整个端点返回 HAL_ENOMEM，不会有
+       "200 但 caps 不见了"这种与对外契约（caps 恒存在）矛盾的中间态。 */
+    caps_obj = build_caps_object();
+    if (!caps_obj) return HAL_ENOMEM;
 
     root = json_new_object();
     if (!root) { json_free(caps_obj); return HAL_ENOMEM; }
@@ -341,7 +375,7 @@ static hal_err_t ep_system_info(char *out, size_t out_cap)
     json_object_set(root, "serial", json_new_string(serial));
     json_object_set(root, "fw_version", json_new_string(ota.current_version));
     json_object_set(root, "uptime_s", json_new_int((int64_t)st.uptime_s));
-    if (caps_obj) json_object_set(root, "caps", caps_obj);   /* 接管所有权 */
+    json_object_set(root, "caps", caps_obj);   /* 接管所有权 */
 
     txt = json_dump(root, false);
     json_free(root);
@@ -445,7 +479,17 @@ static void do_reboot(void *arg)
 static void do_reset(void *arg)
 {
     /* keep_network 借 void* 本身的值传递，不做堆分配——避免
-       http_respond_json 失败导致不登记动作时出现悬空的堆块需要回收。 */
+       http_respond_json 失败导致不登记动作时出现悬空的堆块需要回收。
+
+       契约豁免（如实记录）：http_server.h 对 http_conn_defer_after_flush
+       的回调契约第 2 条明令"不可阻塞——不做磁盘 I/O"，而 factory_reset
+       在真实平台上要擦写 flash，是彻头彻尾的阻塞磁盘操作，字面上违反了
+       这条契约。这里刻意豁免：紧跟着的 reboot() 让整个进程/事件循环
+       随后立即终止，阻塞事件循环不再有"后续请求排队等待"这个代价——
+       契约要保护的东西（不让其他连接被饿死）在"即将重启"这个前提下不
+       成立。仍然遵守第 1、3 条（同步、不重入本连接）。这是本模块唯一
+       用到这条豁免的回调；新增"以终态收尾"的回调前，请先确认是否真的
+       满足"随后立即重启/关机、不再服务任何请求"这个前提。 */
     bool keep_network = (bool)(intptr_t)arg;
     if (!hal_has(HAL_MOD_SYS)) return;
     if (hal()->sys->factory_reset) hal()->sys->factory_reset(keep_network);
@@ -654,6 +698,17 @@ static hal_err_t api_dispatch(const http_req_t *req, char *out, size_t out_cap,
     return HAL_ENODEV;
 }
 
+#ifdef IPC_TESTING
+/** 测试可见的计数器：正常调用顺序（先 http_respond_json 入队、再
+ *  http_conn_defer_after_flush 登记）下应恒为 0。颠倒这两行的调用顺序会
+ *  让登记那一刻发送队列已空（c->slen==c->soff），http_conn_defer_after_flush
+ *  据此返回 HAL_ESTATE 而不是静默成功或同步执行——这正是它存在的意义，
+ *  见 http_server.h 的声明注释。这个计数器只用来让"顺序反了"这件事在
+ *  测试里可观察：console_api_handler 本身收到失败后只能记日志（响应
+ *  已经发出，来不及回头改响应内容），日志不适合被测试断言。 */
+static unsigned s_defer_register_fail_count;
+#endif
+
 static int console_api_handler(http_req_t *req, void *user)
 {
     char *body;
@@ -668,15 +723,22 @@ static int console_api_handler(http_req_t *req, void *user)
     e = api_dispatch(req, body, CONSOLE_API_BODY_MAX, &dfn, &darg);
     if (e != HAL_OK) { free(body); return console_reply_err(req->conn, e); }
 
+    /* 调用顺序是硬约束：必须先让响应真正入队，才能登记"响应发出后"的动作。
+       http_conn_defer_after_flush 用返回值强制这一点——若这两行被颠倒，
+       登记时发送队列还是空的，它会返回 HAL_ESTATE 而不是替我们决定要不要
+       同步执行（见 http_server.h 声明注释）。 */
     e = http_respond_json(req->conn, 200, body);
     free(body);
     if (e != HAL_OK) return console_reply_err(req->conn, e);   /* 入队失败：不登记动作 */
 
     if (dfn && http_conn_defer_after_flush(req->conn, dfn, darg) != HAL_OK) {
-        /* http_conn_defer_after_flush 只在 c 或 fn 为 NULL 时返回非 HAL_OK，
-           这里两者都已确定非空，正常不会走到这条分支——纯防御。响应已经
-           发出，不能退回来同步执行动作（那样会破坏"响应先发出"这条约束
-           本身），只能记日志留痕。 */
+        /* 正常调用顺序下不会走到这里（响应刚入队，发送队列必然非空）。
+           响应已经发出，不能退回来同步执行动作（那样会破坏"响应先发出"
+           这条约束本身），只能记日志留痕 + 让测试能观察到（见上面
+           s_defer_register_fail_count 的注释）。 */
+#ifdef IPC_TESTING
+        s_defer_register_fail_count++;
+#endif
         LOGE(MOD, "延后动作登记失败：响应已发出但设备不会自动执行该动作，请重试");
     }
     return 0;
@@ -699,5 +761,15 @@ hal_err_t console_api_test_dispatch(const http_req_t *req, char *body, size_t bo
     if (deferred_out) *deferred_out = (rc == HAL_OK) && (dfn != NULL);
     (void)darg;
     return rc;
+}
+
+int console_api_test_full_handler(http_req_t *req)
+{
+    return console_api_handler(req, NULL);
+}
+
+unsigned console_api_test_defer_fail_count(void)
+{
+    return s_defer_register_fail_count;
 }
 #endif

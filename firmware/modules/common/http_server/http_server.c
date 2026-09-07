@@ -395,7 +395,7 @@ static void conn_flush_send(http_conn_t *c)
         conn_close(c);
         return;
     }
-    /* 全部发送完毕：回收发送缓冲避免长期占用内存，并撤销可写兴趣 */
+    /* 全部发送完毕：回收发送缓冲避免长期占用内存 */
     c->slen = 0;
     c->soff = 0;
     if (c->scap > 16384) {
@@ -403,21 +403,28 @@ static void conn_flush_send(http_conn_t *c)
         c->sbuf = NULL;
         c->scap = 0;
     }
-    conn_update_poll_interest(c);
 
     /* resolution B（Task 7）：排队的响应数据这一刻才真正全部交给了内核；
        若有登记的"先响应再动作"回调，在这里触发一次并立即清空，防止重入。
        先清空字段、再调用：回调契约禁止在回调里对本连接调用 conn_close/
        http_respond*，但即便回调违反契约重新登记，也不会覆盖到已经在执行
-       的这一份局部拷贝。 */
+       的这一份局部拷贝。
+       刻意放在 conn_update_poll_interest(c) 之前调用：若回调违反契约、
+       间接导致本连接被 conn_close（此时 c 已被 memset 清零，c->fd 变成
+       0——在 POSIX 上是标准输入的 fd 号），下面的 if (!c->used) return
+       才能真正拦住"对一个已清零的连接调用 conn_update_poll_interest"，
+       避免用 fd 0 去调 epoll_ctl 这个真实的危险操作。若调换成先撤销可写
+       兴趣、回调放最后，这条判断就会像先前版本那样沦为函数末尾"看似防线
+       实则什么都不改变"的死代码。 */
     if (c->after_flush) {
         void (*fn)(void *) = c->after_flush;
         void *arg = c->after_flush_arg;
         c->after_flush = NULL;
         c->after_flush_arg = NULL;
         fn(arg);
-        if (!c->used) return; /* 防御：回调若违反契约间接导致连接被关闭 */
+        if (!c->used) return; /* 连接已被回调间接关闭：不再对它做任何操作 */
     }
+    conn_update_poll_interest(c);
 }
 
 /* ------------------------------------------------------------------------ */
@@ -427,19 +434,16 @@ static void conn_flush_send(http_conn_t *c)
 hal_err_t http_conn_defer_after_flush(http_conn_t *c, void (*fn)(void *arg), void *arg)
 {
     if (!c || !fn) return HAL_EINVAL;
+    /* 若此刻发送队列已经是空的（响应体很小、上一次可写事件已经连本次一起
+       发完，或者调用方压根没有先排队任何数据），后面不会再有 conn_flush_send
+       调用来触发它。不替调用方决定"既然没数据就干脆现在同步执行"——那正是
+       resolution B 要防止的"响应还没发出动作先执行"，只是把顺序颠倒的
+       位置从"接口内部"搬到了"调用方没检查返回值"，一样危险且更隐蔽。
+       返回 HAL_ESTATE，不注册、不执行，把调用顺序错误变成一个调用方
+       必须处理的响亮失败，而不是静默地做错事。 */
+    if (c->slen == c->soff) return HAL_ESTATE;
     c->after_flush = fn;
     c->after_flush_arg = arg;
-    /* 若此刻发送队列已经是空的（响应体很小，上一次可写事件已经连本次一起
-       发完，或调用方压根没有排队任何数据），后面不会再有 conn_flush_send
-       调用来触发它——直接原地判一次。仍然保持"事件循环线程内同步调用"的
-       契约：本函数与 handler 一样只在事件循环线程内被调用。 */
-    if (c->slen == c->soff) {
-        void (*f)(void *) = c->after_flush;
-        void *a = c->after_flush_arg;
-        c->after_flush = NULL;
-        c->after_flush_arg = NULL;
-        f(a);
-    }
     return HAL_OK;
 }
 

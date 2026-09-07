@@ -154,6 +154,19 @@ hal_err_t console_caps_json(char *buf, size_t cap);
  */
 hal_err_t console_api_test_dispatch(const http_req_t *req, char *body, size_t body_cap,
                                     bool *deferred_out);
+/**
+ * 测试桩：直接跑真正的 console_api_handler（而非绕过它的 api_dispatch），
+ * 用于钉住"先 http_respond_json 入队、再 http_conn_defer_after_flush 登记"
+ * 这个调用顺序本身——颠倒顺序会让 http_conn_defer_after_flush 命中"此刻
+ * 无待发数据"分支返回 HAL_ESTATE，被 console_api_test_defer_fail_count()
+ * 的计数捕获。req->conn 必须由调用方设成一个真实或测试用连接（如
+ * http_ws_test_conn_new 的返回值）——不同于 console_api_test_dispatch，
+ * 这个函数会真的调用 http_respond_json/http_conn_defer_after_flush。
+ */
+int console_api_test_full_handler(http_req_t *req);
+/** 见 console_api_test_full_handler 的用法说明：延后动作登记失败的次数，
+ *  正常调用顺序下恒为 0。 */
+unsigned console_api_test_defer_fail_count(void);
 #endif
 
 #endif /* IPC_CONSOLE_INTERNAL_H */

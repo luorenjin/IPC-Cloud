@@ -551,7 +551,8 @@ static void test_e2e_101_lean_template(void)
 }
 
 /* ------------------------------------------------------------------------ */
-/* e2e：http_conn_defer_after_flush（Task 7 resolution B）——"先响应再动作"       */
+/* e2e/单元测试：http_conn_defer_after_flush（Task 7 resolution B）              */
+/* ——"先响应再动作"，调用顺序由返回值强制                                     */
 /*                                                                            */
 /* 背景：console 的重启/恢复出厂端点需要"响应确实发出去之后才执行动作"，        */
 /* 而 http_respond_* 只是把数据拷进发送队列，真正的 send() 只发生在事件循环    */
@@ -562,35 +563,53 @@ static void test_e2e_101_lean_template(void)
 /* 完全不读，这套组合仍会在 300ms 内被 conn_flush_send 判定为已发送完毕——     */
 /* 回环网络栈的缓冲能力显然超出 SEND_QUEUE_MAX(81920 字节) 这个应用层上限，     */
 /* 无法在这个预算内可靠制造真正的部分发送/EWOULDBLOCK，勉强凑数只会做出一条    */
-/* 时快时慢的 flaky 测试。因此下面不去赌网络时序，改为验证两条不依赖时序的     */
-/* 事实：                                                                     */
-/*   1) 结构性事实（确定性）：conn_queue_send 只做 memcpy、从不调用 send()，   */
-/*      所以 handler 里"入队后立刻登记 defer"这一刻 c->soff 必然还没被推进过、 */
-/*      与刚刚增长的 c->slen 不相等——http_conn_defer_after_flush 不应该走     */
-/*      "登记时已经没有待发数据"的立即触发分支。                              */
-/*   2) 端到端事实（真实 socket，有界轮询）：一次正常的请求/响应之后，回调最终 */
-/*      确实会被触发且只触发一次。                                            */
+/* 时快时慢的 flaky 测试。因此不去赌网络时序，改为验证三条不依赖时序的事实：   */
+/*   1) 单元级、确定性：登记时若发送队列已空（未入队任何数据），必须返回      */
+/*      HAL_ESTATE，不注册、不同步执行——这是评审后新加的契约，用一个不含     */
+/*      任何真实 socket 的裸连接直接测，不需要 HTTP 往返。                    */
+/*   2) 端到端事实（真实 socket，有界轮询）：先入队响应、再登记，一次正常的   */
+/*      请求/响应之后，回调最终确实会被触发且只触发一次。                     */
+/*   3) 顺序契约本身：defer_handler 里"先 respond 后 defer"这个正确顺序，     */
+/*      登记调用必须成功（不应该返回 HAL_ESTATE）——颠倒这两行的调用顺序      */
+/*      会让这条断言变红，钉住调用顺序而不只是钉住"最终会不会 fire"。         */
 /* "连接在触发前关闭则动作被放弃"这条契约改为代码走查确认，不做 e2e：          */
 /* conn_close 新增的分支只清空 after_flush/after_flush_arg 两个字段，函数里   */
 /* 没有任何路径会调用存在里面的函数指针（见 http_server.c 的 conn_close）。    */
 /* ------------------------------------------------------------------------ */
 
-static volatile bool s_defer_fired;
-static volatile bool s_defer_fired_too_early;  /**< defer 登记时若被同步触发则置真——应恒为假 */
-
 static void defer_mark(void *arg) { *(volatile bool *)arg = true; }
+
+static void test_defer_after_flush_requires_pending_data(void)
+{
+    http_conn_t *c;
+    bool fired = false;
+
+    SECTION("http_conn_defer_after_flush：登记时若无待发数据，必须返回 HAL_ESTATE（不注册、不同步执行）");
+    c = http_ws_test_conn_new(4096);
+    CHECK(c != NULL, "创建测试连接（不含真实 socket，也不入队任何响应）");
+    if (c) {
+        CHECK(http_conn_defer_after_flush(c, defer_mark, (void *)&fired) == HAL_ESTATE,
+              "未先入队任何响应就登记，必须返回 HAL_ESTATE");
+        CHECK(!fired, "回调不应该被同步触发——调用顺序错误应该报错，而不是静默替调用方执行");
+        http_ws_test_conn_free(c);
+    }
+}
+
+static volatile bool s_defer_fired;
+static volatile bool s_defer_register_failed;  /**< 顺序正确（先 respond 后 defer）时登记若仍失败则置真——应恒为假 */
 
 static int defer_handler(http_req_t *req, void *user)
 {
     hal_err_t rc;
     (void)user;
+    /* 顺序是本测试要钉住的东西：respond 必须在 defer 之前。颠倒这两行，
+       下面的 http_conn_defer_after_flush 调用会因为此刻还没有入队任何
+       数据（c->slen==c->soff）而返回 HAL_ESTATE，被 test_defer_after_
+       flush_fires_once_sent 的断言捕获。 */
     rc = http_respond_json(req->conn, 200, "{\"code\":0,\"msg\":\"ok\"}");
     if (rc != HAL_OK) return (int)rc;
-    if (http_conn_defer_after_flush(req->conn, defer_mark, (void *)&s_defer_fired) != HAL_OK)
-        return HAL_ENOMEM;
-    /* 见文件头本节说明第 1 点：这里不依赖网络时序，纯粹是队列入队与真正
-       send() 之间的结构性时序——此刻必然还有数据待发，回调不应该已经触发。 */
-    if (s_defer_fired) s_defer_fired_too_early = true;
+    rc = http_conn_defer_after_flush(req->conn, defer_mark, (void *)&s_defer_fired);
+    if (rc != HAL_OK) s_defer_register_failed = true;
     return 0;
 }
 
@@ -605,16 +624,19 @@ static void test_defer_after_flush_fires_once_sent(void)
         "Host: 127.0.0.1\r\n"
         "\r\n";
 
-    SECTION("e2e http_conn_defer_after_flush：登记不同步触发，响应发出后回调最终必被触发一次");
+    SECTION("e2e http_conn_defer_after_flush：先响应再登记的正确顺序下，回调最终必被触发一次");
     s_defer_fired = false;
-    s_defer_fired_too_early = false;
+    s_defer_register_failed = false;
     t_net_init();
 
     /* 不再新注册前缀：/e2e/echo/defer1 经 echo_handler 里的路径分支路由到
        defer_handler（见 echo_handler 前的说明——本文件的 ROUTE_MAX(8) 已被
        既有测试占满）。/e2e/echo 前缀已由 test_e2e_request_response 注册过，
-       该测试固定先于本测试运行。 */
-    CHECK(http_route_match("/e2e/echo/defer1") != NULL, "/e2e/echo 前缀已注册（由更早的 e2e 测试完成）");
+       该测试固定先于本测试运行——用 strcmp 精确核对命中的就是这个前缀本身，
+       而不是随便断言"非 NULL"：本文件已经注册了 "/" 兜底路由，任何路径
+       （包括打错的）在那种写法下都会非 NULL，断言形同虚设。 */
+    CHECK(strcmp(http_route_match("/e2e/echo/defer1"), "/e2e/echo") == 0,
+          "/e2e/echo 前缀已注册（由更早的 e2e 测试完成），且命中的正是这个前缀");
     CHECK(http_server_start(port) == HAL_OK, "服务端启动");
 
     fd = t_connect(port);
@@ -629,8 +651,9 @@ static void test_defer_after_flush_fires_once_sent(void)
             CHECK(strncmp(resp, "HTTP/1.1 200", strlen("HTTP/1.1 200")) == 0, "状态行应为 200");
         }
 
-        CHECK(!s_defer_fired_too_early,
-              "defer 登记那一刻仍有数据待发（soff 必然落后于 slen），不应同步触发回调");
+        CHECK(!s_defer_register_failed,
+              "响应已经入队后再登记 defer，必须成功（不应返回 HAL_ESTATE）——"
+              "颠倒 defer_handler 里 respond/defer 两行的调用顺序会让这里变红");
 
         /* 回调在服务端事件循环线程里触发，与测试线程存在微小时序间隙：
            有界轮询而非固定 sleep 或立即断言。 */
@@ -772,6 +795,7 @@ int main(void)
     test_e2e_enotsup_501();
     test_e2e_respond_ex_atomic_on_overflow();
     test_e2e_101_lean_template();
+    test_defer_after_flush_requires_pending_data();
     test_defer_after_flush_fires_once_sent();
     test_ws_handshake_known_answer();
     test_ws_ring_wraparound();

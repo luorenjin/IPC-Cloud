@@ -819,8 +819,27 @@ static void test_api_config_endpoints(void)
              "{\"video.0.main.kbps\":2048,\"video.0.main.gop\":99999}", cookie);
     CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "PUT 部分成功仍是 200");
     CHECK(strstr(body, "\"applied\":1") != NULL, "applied=1（其余 1 个被拒），实际：%s", body);
+    CHECK(strstr(body, "\"rejected_total\":1") != NULL,
+          "rejected_total=1——rejected[] 数组容量固定 8，被拒数超过时会静默截断，"
+          "前端靠这个字段判断有没有截断，实际：%s", body);
     CHECK(strstr(body, "\"video.0.main.gop\"") != NULL, "rejected 数组含被拒键名");
     CHECK(strstr(body, "\"reason\"") != NULL, "rejected 条目含 reason 字段");
+
+    /* rejected[] 数组容量固定为 8（ep_config_put 里 cfg_apply_json(.., rejects, 8)），
+       提交 9 个全部不合法的键，验证 rejected_total 反映真实的 9、而数组本身
+       按插入顺序截断到前 8 个——第 9 个键（zzz.marker）不应出现在响应体里，
+       前端必须靠 rejected_total 而不是数组长度才能知道"还有没截断的"。 */
+    req_make(&req, "PUT", "/api/v1/config",
+             "{\"video.0.main.w\":999999,\"video.0.main.h\":999999,\"video.0.main.fps\":999999,"
+             "\"video.0.main.kbps\":999999,\"video.0.main.gop\":999999,"
+             "\"video.0.main.codec\":\"bogus\",\"video.0.main.rc\":\"bogus\","
+             "\"video.1.sub.codec\":\"h265\",\"zzz.marker.beyond.eighth\":1}", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "全部 9 个键都不合法仍是 200");
+    CHECK(strstr(body, "\"applied\":0") != NULL, "9 个键全部不合法，applied=0，实际：%s", body);
+    CHECK(strstr(body, "\"rejected_total\":9") != NULL,
+          "rejected_total 反映真实被拒总数 9（超过数组容量 8），实际：%s", body);
+    CHECK(strstr(body, "zzz.marker.beyond.eighth") == NULL,
+          "第 9 个被拒键的详情应被数组容量截断掉，不出现在 rejected[] 里");
 
     /* PUT 畸形 JSON / 空 body / 不支持的方法 */
     req_make(&req, "PUT", "/api/v1/config", "not-json", cookie);
@@ -915,6 +934,50 @@ static void test_api_system_endpoints(void)
     CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_ENODEV, "未知路径 404 语义");
 }
 
+/**
+ * 钉住 console_api_handler 内部"先 http_respond_json 入队、再
+ * http_conn_defer_after_flush 登记"这个调用顺序本身。上面用
+ * console_api_test_dispatch 做的 reboot/reset 测试都绕过了
+ * console_api_handler（只测 api_dispatch 这个不碰 conn 的纯函数），
+ * 颠倒 handler 内部那两行调用顺序不会被那些测试发现——评审实测过，
+ * 对调之后全套测试仍然全绿。这里改用 console_api_test_full_handler
+ * 真正走一遍 handler，配一个不含真实 socket 的测试连接
+ * （http_ws_test_conn_new）：顺序正确时 http_conn_defer_after_flush
+ * 应该成功（发送队列里已经有刚入队的响应）；顺序一旦被颠倒，登记那一刻
+ * 发送队列还是空的，会返回 HAL_ESTATE，被下面的计数捕获。
+ */
+static void test_reboot_handler_order(void)
+{
+    http_req_t req;
+    http_conn_t *conn;
+    char cookie[128];
+    bool must_change = false;
+    unsigned before;
+
+    SECTION("console_api_handler：必须先入队响应、再登记延后动作");
+    console_auth_reset_lockout();
+    CHECK(console_auth_seed("ABCD1234") == HAL_OK, "播种凭据（出厂态）");
+    CHECK(console_auth_set_password("ABCD1234", "NewPass@123") == HAL_OK, "改密解除强制改密");
+    CHECK(do_login("admin", "NewPass@123", "192.168.50.12", cookie, sizeof(cookie), &must_change) == HAL_OK,
+          "登录成功");
+
+    conn = http_ws_test_conn_new(4096);
+    CHECK(conn != NULL, "创建测试连接（不含真实 socket，足够承载 http_respond_json 的入队）");
+    if (conn) {
+        req_make(&req, "POST", "/api/v1/system/reboot", NULL, cookie);
+        req.conn = conn;   /* 生产路径由 http_server.c 的 dispatch_one 回填，这里手动模拟 */
+
+        before = console_api_test_defer_fail_count();
+        CHECK(console_api_test_full_handler(&req) == 0, "reboot 请求处理成功（handler 返回 0，已自行响应）");
+        CHECK(console_api_test_defer_fail_count() == before,
+              "延后动作登记不应失败——若 console_api_handler 内部把 http_respond_json 与 "
+              "http_conn_defer_after_flush 两行调用顺序颠倒，登记时发送队列还是空的，"
+              "http_conn_defer_after_flush 会返回 HAL_ESTATE，这里的计数就会增加");
+
+        http_ws_test_conn_free(conn);
+    }
+}
+
 int main(void)
 {
     if (profile_load("profiles/mock-x86.json") != HAL_OK) {
@@ -941,6 +1004,7 @@ int main(void)
     test_caps_json();
     test_api_config_endpoints();
     test_api_system_endpoints();
+    test_reboot_handler_order();
 
     printf("RESULT: console pass=%d fail=%d\n", g_pass, g_fail);
     return g_fail;
