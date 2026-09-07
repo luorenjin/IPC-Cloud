@@ -441,6 +441,79 @@ static void test_e2e_respond_ex_atomic_on_overflow(void)
 }
 
 /* ------------------------------------------------------------------------ */
+/* e2e：http_respond_ex 对 1xx 状态码必须走精简模板（Task 4 评审修正 1 回归测试）  */
+/*                                                                            */
+/* 缺陷背景：http_respond_ex 的通用模板固定给每个响应追加 Content-Type/         */
+/* Content-Length/Connection 三行；直接把这套模板套在 101 上会违反 RFC 7230    */
+/* §3.3.2（"a server MUST NOT send a Content-Length header field in any       */
+/* response with a status code of 1xx"），且与 http_ws_upgrade 通过           */
+/* extra_headers 追加的 Connection: Upgrade 重复。这里不走真实 WS 握手（无需  */
+/* 构造 Sec-WebSocket-Key 等头），直接调用 http_respond_ex(..., 101, ...) 验证 */
+/* 的是模板本身的字节输出，覆盖面与 http_ws_upgrade 内部实际调用完全一致。      */
+/* ------------------------------------------------------------------------ */
+
+static int ws101_handler(http_req_t *req, void *user)
+{
+    hal_err_t rc;
+    (void)user;
+    rc = http_respond_ex(req->conn, 101, NULL,
+                          "Upgrade: websocket\r\nConnection: Upgrade\r\n", NULL, 0);
+    return (rc == HAL_OK) ? 0 : (int)rc;
+}
+
+static void test_e2e_101_lean_template(void)
+{
+    const uint16_t port = 18083;
+    t_sock_t fd;
+    char resp[4096];
+    const char *raw =
+        "GET /e2e/ws101 HTTP/1.1\r\n"
+        "Host: 127.0.0.1\r\n"
+        "\r\n";
+
+    SECTION("e2e 1xx 响应必须走精简模板（不带 Content-Length，Connection 不重复）");
+    t_net_init();
+
+    CHECK(http_route("/e2e/ws101", ws101_handler, NULL) == HAL_OK, "注册 /e2e/ws101");
+    CHECK(http_server_start(port) == HAL_OK, "服务端启动");
+
+    fd = t_connect(port);
+    CHECK(fd != T_SOCK_INVALID, "客户端连接成功");
+    if (fd != T_SOCK_INVALID) {
+        int sent = (int)send(fd, raw, (int)strlen(raw), 0);
+        CHECK(sent == (int)strlen(raw), "请求发送完整");
+
+        {
+            /* 101 精简模板没有 Content-Length，t_response_complete 对没有
+               Content-Length 的响应按"收到头部空行即算完整"处理，正好匹配。 */
+            int n = t_recv_response(fd, resp, sizeof(resp));
+            const char *p;
+            int conn_header_count = 0;
+
+            CHECK(n > 0, "收到响应");
+            CHECK(strncmp(resp, "HTTP/1.1 101", strlen("HTTP/1.1 101")) == 0,
+                  "状态行必须是 101，实际响应: %s", resp);
+            CHECK(strstr(resp, "Content-Length:") == NULL,
+                  "1xx 响应绝不能带 Content-Length（RFC 7230 §3.3.2 MUST NOT）: %s", resp);
+            CHECK(strstr(resp, "Content-Type:") == NULL,
+                  "1xx 精简模板不应带 Content-Type: %s", resp);
+
+            for (p = resp; (p = strstr(p, "Connection:")) != NULL; p += strlen("Connection:")) {
+                conn_header_count++;
+            }
+            CHECK(conn_header_count == 1,
+                  "Connection 头必须恰好出现一次，不与通用模板的 Connection: keep-alive 重复，"
+                  "实际 %d 次: %s", conn_header_count, resp);
+        }
+
+        T_CLOSESOCK(fd);
+    }
+
+    CHECK(http_server_stop() == HAL_OK, "服务端停止");
+    t_net_cleanup();
+}
+
+/* ------------------------------------------------------------------------ */
 /* WS 背压：队列满后丢弃非关键帧，恢复时必须从关键帧续传                            */
 /* ------------------------------------------------------------------------ */
 
@@ -490,6 +563,7 @@ int main(void)
     test_e2e_request_response();
     test_e2e_enotsup_501();
     test_e2e_respond_ex_atomic_on_overflow();
+    test_e2e_101_lean_template();
     test_ws_backpressure();
     printf("RESULT: http_server pass=%d fail=%d\n", g_pass, g_fail);
     return g_fail;

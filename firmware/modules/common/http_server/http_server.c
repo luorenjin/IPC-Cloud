@@ -356,8 +356,33 @@ hal_err_t http_respond_ex(http_conn_t *c, int status, const char *content_type,
     int n;
 
     if (!c) return HAL_EINVAL;
-    if (!content_type) content_type = "application/octet-stream";
     if (!extra_headers) extra_headers = "";
+
+    if (status / 100 == 1) {
+        /* 1xx 信息性响应：RFC 7230 §3.3.2 明确规定"A server MUST NOT send a
+         * Content-Length header field in any response with a status code of
+         * 1xx"，且 1xx 本身没有实体正文语义，也不该带 Content-Type。是否需要
+         * Connection 等头完全交给调用方通过 extra_headers 表达（例如 WS 升级
+         * 需要 Connection: Upgrade），这里不再像下面的通用模板那样自行追加
+         * Content-Type/Content-Length/Connection 三行，只发状态行 +
+         * extra_headers + 空行。body/len 无论调用方传入什么，在 1xx 路径下
+         * 一律按空处理——没有 Content-Length 也没有 chunked 编码，对端根本
+         * 无法界定 body 边界，发了也没有意义。单次 conn_queue_send 自身已是
+         * 全有全无的原子操作（reserve 失败则完全不写入、不推进 slen），不需要
+         * 像下面 head+body 两段那样额外做合并 reserve。 */
+        n = snprintf(head, sizeof(head),
+                     "HTTP/1.1 %d %s\r\n"
+                     "%s"
+                     "\r\n",
+                     status, status_reason(status), extra_headers);
+        if (n < 0 || (size_t)n >= sizeof(head)) {
+            LOGE(MOD, "1xx 响应头拼接失败或过长（extra_headers 是否过长？）");
+            return HAL_EINVAL;
+        }
+        return conn_queue_send(c, head, (size_t)n);
+    }
+
+    if (!content_type) content_type = "application/octet-stream";
 
     n = snprintf(head, sizeof(head),
                  "HTTP/1.1 %d %s\r\n"

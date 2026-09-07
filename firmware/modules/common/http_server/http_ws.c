@@ -14,10 +14,20 @@
  *   - 任意其他线程：http_ws_send/http_ws_send_text/http_ws_close/
  *     http_ws_queue_used/http_ws_dropped 可从任意线程调用（例如未来的采集/
  *     编码线程把视频帧推给某个正在直播的连接）。
- *   - 两类线程通过每条连接一把的 struct http_ws_state::mu 互斥锁同步，锁的
- *     临界区只做环形缓冲记账与几个标志位的读写，绝不在锁内调用 send()，
- *     也絕不在锁内调用调用方注册的回调（text_fn）——避免 epoll 线程被任何
- *     阻塞操作拖住，也避免回调重入同一把锁造成死锁。
+ *   - 两类线程通过每条连接一把的 struct http_ws_state::mu 互斥锁同步。真实
+ *     不变量（供后续任务——尤其 Task 10 预览与录像回放 B 线——判断能否在
+ *     http_ws_send 的生产者线程里做时延敏感的事）：
+ *       · 锁内允许调用非阻塞 send()：http_ws_flush 的临界区里就有一次
+ *         send()，这是刻意的选择而非疏漏——连接 fd 在 accept 时已
+ *         set_nonblocking，一次非阻塞 send() 系统调用耗时有界，不会因对端
+ *         迟迟不收数据而被无限拖长，故没有搬到锁外的必要（task-4 集成说明
+ *         明确把这一取舍留给实现者裁量）。
+ *       · 锁内绝不调用调用方注册的回调（text_fn）：接收路径总是先在锁内把
+ *         回调指针复制到局部变量、解锁之后才调用，避免回调同步重入
+ *         http_ws_send/http_ws_close 等函数时对同一把非递归锁死锁。
+ *       · 锁内绝不调用 conn_close：conn_close 只能在事件循环线程调用且要求
+ *         调用时不持有任何 WS 锁，http_ws_flush/http_ws_tick/收到 close 帧
+ *         三处调用点均已先解锁再调用它。
  *
  * 已知限制（详见任务报告"关注点"一节）：
  *   1. 不支持分片消息（continuation frame，opcode 0x0/FIN=0 的延续帧）：
@@ -28,11 +38,6 @@
  *      连接，struct http_ws_state 有被并发释放的理论风险。当前 brief 与
  *      集成说明均未要求引入引用计数/世代号机制，本实现暂不处理，留给后续
  *      任务（真正接入采集/编码线程时）解决。
- *   3. 101 升级响应复用现成的 http_respond_ex，其固定模板会额外带上
- *      Content-Type、Content-Length: 0、Connection: keep-alive 三行，与本
- *      文件通过 extra_headers 追加的 Connection: Upgrade 共存，导致 Connection
- *      头出现两次。101 响应本无 body 语义，重复的 Connection 头按 RFC 7230
- *      §3.2.2 应解释为取值并集，主流 WS 客户端实测均可正常识别。
  */
 #include "http_server_internal.h"
 
@@ -66,9 +71,13 @@
 struct http_ws_state {
     os_mutex_t *mu; /**< 保护本结构体全部字段的统一锁。心跳时间戳/失联计数
                          目前只在事件循环线程访问，本可不加锁，但统一用同一把
-                         锁保护全部字段可以省去"哪些字段需要加锁"的心智负担，
-                         临界区极短（纯内存读写，不含 send()/回调），开销可
-                         忽略不计。 */
+                         锁保护全部字段可以省去"哪些字段需要加锁"的心智负担。
+                         多数临界区是纯内存读写，唯一例外是 http_ws_flush：它
+                         的临界区内会调用一次非阻塞 send()（fd 早已
+                         set_nonblocking，耗时有界，是刻意的取舍而非疏漏，
+                         详见文件头线程模型一节）。所有临界区一致遵守的两条
+                         硬约束：绝不调用调用方注册的回调（text_fn），绝不
+                         调用 conn_close。 */
 
     /* 发送环形缓冲：仅记账，真正 send() 只发生在 http_ws_flush（事件循环线程） */
     uint8_t *buf;
@@ -636,9 +645,12 @@ hal_err_t http_ws_upgrade(http_req_t *req, size_t queue_cap)
              "Sec-WebSocket-Accept: %s\r\n",
              accept_key);
 
-    /* 复用现成的 http_respond_ex 回 101，见文件头注释的"已知限制 3"：其固定
-     * 模板会额外带上 Connection: keep-alive，与这里的 Connection: Upgrade
-     * 共存，属于已接受的折中，不在本任务范围内改造 http_respond_ex。 */
+    /* 复用现成的 http_respond_ex 回 101（brief Step 4 明确要求）。http_respond_ex
+     * 对 1xx 状态码走精简模板：只发状态行 + extra_headers + 空行，不会像
+     * 2xx/4xx/5xx 通用路径那样自行追加 Content-Type/Content-Length/
+     * Connection 三行（Content-Length 出现在 1xx 响应上是 RFC 7230 §3.3.2
+     * 的 MUST NOT）——这里 extra 里的 Connection: Upgrade 就是响应里唯一的
+     * Connection 头，不会重复。 */
     rc = http_respond_ex(c, 101, NULL, extra, NULL, 0);
     if (rc != HAL_OK) {
         ws_state_destroy(ws);
