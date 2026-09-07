@@ -961,6 +961,67 @@ fail:
     return rc;
 }
 
+/**
+ * 改密掩码 = HMAC(stored_key, "pwdchg|" || nonce)。
+ * 必须与登录 proof（= HMAC(stored_key, nonce)）做域分隔：proof 本身是明文上送的，
+ * 若掩码复用同一条 HMAC，等于把掩码随包附送，遮蔽就完全失效了。
+ */
+static hal_err_t mask_derive(const char *nonce, uint8_t out[32])
+{
+    char msg[16 + CONSOLE_HEX_CAP(CONSOLE_NONCE_LEN)];
+    if (fmt_safe(msg, sizeof(msg), "pwdchg|%s", nonce) != HAL_OK) return HAL_EINVAL;
+    return console_hmac_sha256(s_cred.key, CONSOLE_KEY_LEN,
+                               (const uint8_t *)msg, strlen(msg), out);
+}
+
+hal_err_t console_auth_set_key_masked(const char *user, const char *nonce, const char *proof,
+                                      const char *new_salt_hex, const char *masked_key_hex,
+                                      const char *client_ip)
+{
+    cred_t c;
+    uint8_t new_salt[CONSOLE_SALT_LEN], masked[CONSOLE_KEY_LEN], mask[32];
+    size_t salt_len = 0, masked_len = 0, i;
+    hal_err_t rc;
+
+    if (!user || !nonce || !proof || !new_salt_hex || !masked_key_hex) return HAL_EINVAL;
+    cred_ensure_loaded();
+    if (!s_cred.valid) return HAL_ESTATE;
+
+    /* 先解析再校验：格式错误不该消耗 nonce，也不该计进按 IP 的失败锁定 */
+    rc = hex_decode(new_salt_hex, new_salt, sizeof(new_salt), &salt_len);
+    if (rc != HAL_OK || salt_len != CONSOLE_SALT_LEN) return HAL_EINVAL;
+    rc = hex_decode(masked_key_hex, masked, sizeof(masked), &masked_len);
+    if (rc != HAL_OK || masked_len != CONSOLE_KEY_LEN) return HAL_EINVAL;
+
+    /* 先验旧口令（含 nonce 一次性与按 IP 锁定），通过后才解掩码 */
+    if ((rc = console_auth_verify_from(user, nonce, proof, client_ip)) != HAL_OK) {
+        LOGW(MOD, "改密被拒：旧口令校验未通过");
+        return rc;
+    }
+
+    if ((rc = mask_derive(nonce, mask)) != HAL_OK) return rc;
+
+    c = s_cred;
+    memcpy(c.salt, new_salt, sizeof(new_salt));
+    for (i = 0; i < CONSOLE_KEY_LEN; i++) c.key[i] = (uint8_t)(masked[i] ^ mask[i]);
+    /* iter 保持不变：客户端正是按 challenge 下发的 auth_iter()（即当前 s_cred.iter）
+       派生 new_key 的，这里改成别的值会与客户端算出的密钥失配。 */
+    c.must_change = false;
+    secure_wipe(mask, sizeof(mask));
+    secure_wipe(masked, sizeof(masked));
+
+    if ((rc = cred_persist(&c)) != HAL_OK) {
+        secure_wipe(&c, sizeof(c));
+        return rc;
+    }
+    s_cred = c;
+    secure_wipe(&c, sizeof(c));
+    sessions_clear();   /* 改密后全部会话失效，必须以新口令重新登录 */
+    nonces_clear();
+    LOGI(MOD, "本地账号口令已修改（掩码方式，口令未上线），全部会话已失效");
+    return HAL_OK;
+}
+
 /** 从 Cookie 头里取一个 cookie 值；不存在返回 HAL_ENODEV，超长返回 HAL_EINVAL */
 static hal_err_t cookie_get(const char *hdr, const char *name, char *out, size_t cap)
 {
@@ -1095,20 +1156,31 @@ static hal_err_t cookie_clear(char *cookie, size_t cap)
     return fmt_safe(cookie, cap, "token=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0");
 }
 
+/**
+ * 改密：与登录同样"口令不过线"。请求体全部是十六进制串与用户名，没有任何明文口令。
+ * 代价是服务端看不到明文，无法在此校验口令强度（长度/复杂度由前端把关，
+ * `console_auth_set_password` 的 8..63 限制只覆盖本地/测试路径）。
+ */
 static hal_err_t ep_password(const json_t *j, const http_req_t *req,
                              char *out, size_t cap, char *cookie, size_t cookie_cap)
 {
-    char old_pwd[CONSOLE_PWD_MAX + 1], new_pwd[CONSOLE_PWD_MAX + 1];
+    char user[CONSOLE_USER_MAX];
+    char nonce[CONSOLE_HEX_CAP(CONSOLE_NONCE_LEN)];
+    char proof[CONSOLE_HEX_CAP(CONSOLE_KEY_LEN)];
+    char new_salt[CONSOLE_HEX_CAP(CONSOLE_SALT_LEN)];
+    char masked[CONSOLE_HEX_CAP(CONSOLE_KEY_LEN)];
     hal_err_t rc;
 
     /* 需已登录；CONSOLE_AUTH_PREFIX 已从强制改密拦截里豁免，故此处可达 */
     if ((rc = console_auth_check(req)) != HAL_OK) return rc;
 
-    rc = body_str(j, "old", old_pwd, sizeof(old_pwd));
-    if (rc == HAL_OK) rc = body_str(j, "new", new_pwd, sizeof(new_pwd));
-    if (rc == HAL_OK) rc = console_auth_set_password(old_pwd, new_pwd);
-    secure_wipe(old_pwd, sizeof(old_pwd));
-    secure_wipe(new_pwd, sizeof(new_pwd));
+    if ((rc = body_str(j, "user",  user,  sizeof(user)))  != HAL_OK) return rc;
+    if ((rc = body_str(j, "nonce", nonce, sizeof(nonce))) != HAL_OK) return rc;
+    if ((rc = body_str(j, "proof", proof, sizeof(proof))) != HAL_OK) return rc;
+    if ((rc = body_str(j, "new_salt", new_salt, sizeof(new_salt))) != HAL_OK) return rc;
+    if ((rc = body_str(j, "new_key_masked", masked, sizeof(masked))) != HAL_OK) return rc;
+
+    rc = console_auth_set_key_masked(user, nonce, proof, new_salt, masked, req_client_ip(req));
     if (rc != HAL_OK) return rc;
 
     if ((rc = cookie_clear(cookie, cookie_cap)) != HAL_OK) return rc; /* 会话已全部作废，同步清掉浏览器 Cookie */

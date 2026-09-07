@@ -67,7 +67,19 @@ hal_err_t console_auth_verify_from(const char *user, const char *nonce, const ch
 hal_err_t console_auth_make_proof(const char *pwd, const char *salt_hex, const char *nonce,
                                   char *proof, size_t proof_cap);
 bool      console_auth_must_change(void);
+/** 明文改密：供本地/测试路径使用；HTTP 端点走下面的掩码版，口令不上线 */
 hal_err_t console_auth_set_password(const char *old_pwd, const char *new_pwd);
+/**
+ * 掩码改密（口令不出浏览器）：客户端自选 new_salt、本地算
+ * `new_key = PBKDF2(新口令, new_salt, iter)`，以
+ * `masked = new_key XOR HMAC(old_key, "pwdchg|" || nonce)` 上送，服务端用自己持有的
+ * stored_key 解掩码。`proof` 与登录同构，**必须先验通过**才解掩码——否则任何人推一串
+ * 随机字节就能把凭据改成谁都不知道的值（DoS）。
+ * new_salt_hex 为 32 位小写十六进制（16 字节），masked_key_hex 为 64 位（32 字节）。
+ */
+hal_err_t console_auth_set_key_masked(const char *user, const char *nonce, const char *proof,
+                                      const char *new_salt_hex, const char *masked_key_hex,
+                                      const char *client_ip);
 /** 校验请求中的会话 token；未登录返回 HAL_EUNAUTH_，未改密返回 HAL_EPERM_ */
 hal_err_t console_auth_check(const http_req_t *req);
 
