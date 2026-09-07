@@ -155,6 +155,7 @@ static const char *err_to_name(hal_err_t e)
 static const char *status_reason(int status)
 {
     switch (status) {
+        case 101: return "Switching Protocols";
         case 200: return "OK";
         case 201: return "Created";
         case 204: return "No Content";

@@ -491,8 +491,11 @@ static void test_e2e_101_lean_template(void)
             int conn_header_count = 0;
 
             CHECK(n > 0, "收到响应");
-            CHECK(strncmp(resp, "HTTP/1.1 101", strlen("HTTP/1.1 101")) == 0,
-                  "状态行必须是 101，实际响应: %s", resp);
+            CHECK(strncmp(resp, "HTTP/1.1 101 Switching Protocols",
+                          strlen("HTTP/1.1 101 Switching Protocols")) == 0,
+                  "状态行必须是完整的 \"HTTP/1.1 101 Switching Protocols\""
+                  "（reason phrase 也要锁住，防止 status_reason 缺 case 101 退化为"
+                  " Unknown），实际响应: %s", resp);
             CHECK(strstr(resp, "Content-Length:") == NULL,
                   "1xx 响应绝不能带 Content-Length（RFC 7230 §3.3.2 MUST NOT）: %s", resp);
             CHECK(strstr(resp, "Content-Type:") == NULL,
