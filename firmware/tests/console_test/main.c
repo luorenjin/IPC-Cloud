@@ -978,6 +978,536 @@ static void test_reboot_handler_order(void)
     }
 }
 
+/* ========================================================================== */
+/* Task 8：网络状态与 WiFi 配网                                                   */
+/* ========================================================================== */
+
+static void test_net_ap_decision(void)
+{
+    SECTION("AP 启动条件");
+    /* 以太网 up 时绝不开 AP —— 有线场景直接用 IP 访问 */
+    CHECK(console_should_start_ap(true,  false, false) == false, "以太网 up：不开 AP");
+    CHECK(console_should_start_ap(true,  true,  false) == false, "以太网 up 且 WiFi 已配：不开 AP");
+    /* 以太网 down 且 WiFi 未配置：开 AP */
+    CHECK(console_should_start_ap(false, false, false) == true,  "无网且 WiFi 未配：开 AP");
+    /* 以太网 down、WiFi 已配但连接失败：允许回落 AP（重新配网的救济路径） */
+    CHECK(console_should_start_ap(false, true,  false) == true,  "WiFi 已配但未连上：回落 AP");
+    /* WiFi 已连上：不开 AP */
+    CHECK(console_should_start_ap(false, true,  true)  == false, "WiFi 已连上：不开 AP");
+}
+
+static void test_net_ap_ssid(void)
+{
+    char ssid[64];
+    SECTION("AP SSID 生成");
+    CHECK(console_ap_ssid("SN2026090700123456", ssid, sizeof(ssid)) == HAL_OK, "生成 SSID");
+    CHECK(strcmp(ssid, "IPC-123456") == 0, "取序列号后 6 位：%s", ssid);
+    /* 序列号过短时不得越界 */
+    CHECK(console_ap_ssid("AB", ssid, sizeof(ssid)) == HAL_OK, "短序列号不崩");
+    CHECK(strncmp(ssid, "IPC-", 4) == 0, "短序列号仍有前缀：%s", ssid);
+}
+
+static void test_captive_portal(void)
+{
+    SECTION("Captive Portal 探测");
+    /* AP 模式下这些路径应重定向，让手机自动弹出配网页 */
+    CHECK(console_is_captive_probe("/generate_204") == true, "Android 探测");
+    CHECK(console_is_captive_probe("/hotspot-detect.html") == true, "iOS 探测");
+    CHECK(console_is_captive_probe("/api/v1/config") == false, "普通路径不算探测");
+}
+
+/* ---- DHCP：报文解析/构造/租约表 —— 纯函数，用已知/构造字节向量精确核对 ---- */
+
+/** 构造一个真实形状的 DHCPDISCOVER 报文：236 字节定长头 + 4 字节 magic cookie +
+ *  选项 53(DISCOVER)/55(参数请求列表)/255(end)，共 249 字节。 */
+static void dhcp_test_build_discover(uint8_t *buf, size_t cap, size_t *len)
+{
+    (void)cap;
+    memset(buf, 0, 249);
+    buf[0] = 1; buf[1] = 1; buf[2] = 6; buf[3] = 0;                 /* op/htype/hlen/hops */
+    buf[4] = 0x12; buf[5] = 0x34; buf[6] = 0x56; buf[7] = 0x78;     /* xid */
+    buf[10] = 0x80; buf[11] = 0x00;                                 /* flags: broadcast */
+    buf[28] = 0xAA; buf[29] = 0xBB; buf[30] = 0xCC;                 /* chaddr */
+    buf[31] = 0xDD; buf[32] = 0xEE; buf[33] = 0xFF;
+    buf[236] = 0x63; buf[237] = 0x82; buf[238] = 0x53; buf[239] = 0x63;   /* magic cookie */
+    buf[240] = 53; buf[241] = 1; buf[242] = 1;                      /* 选项53=DISCOVER(1) */
+    buf[243] = 55; buf[244] = 3; buf[245] = 1; buf[246] = 3; buf[247] = 6; /* 参数请求列表 */
+    buf[248] = 255;                                                 /* end */
+    *len = 249;
+}
+
+static void test_dhcp_parse_discover(void)
+{
+    uint8_t pkt[300];
+    size_t len;
+    console_dhcp_msg_t msg;
+
+    SECTION("DHCP 报文解析：DISCOVER");
+    dhcp_test_build_discover(pkt, sizeof(pkt), &len);
+    CHECK(console_dhcp_parse(pkt, len, &msg) == HAL_OK, "解析 DISCOVER 成功");
+    CHECK(msg.op == 1, "op=BOOTREQUEST(1)，实际=%u", msg.op);
+    CHECK(msg.htype == 1 && msg.hlen == 6, "htype/hlen 精确匹配");
+    CHECK(msg.xid == 0x12345678u, "xid 精确匹配：0x%08X", (unsigned)msg.xid);
+    CHECK(msg.flags == 0x8000u, "广播标志位保留：0x%04X", (unsigned)msg.flags);
+    CHECK(memcmp(msg.chaddr, "\xAA\xBB\xCC\xDD\xEE\xFF", 6) == 0, "chaddr 精确匹配");
+    CHECK(msg.msg_type == CONSOLE_DHCP_MSG_DISCOVER, "msg_type=DISCOVER，实际=%u", msg.msg_type);
+    CHECK(msg.requested_ip == 0, "DISCOVER 未带选项 50，requested_ip=0");
+}
+
+static void test_dhcp_parse_request_with_options(void)
+{
+    uint8_t pkt[300];
+    console_dhcp_msg_t msg;
+    size_t len = 256;
+
+    SECTION("DHCP 报文解析：REQUEST 带选项 50(requested_ip)/54(server_id)");
+    memset(pkt, 0, sizeof(pkt));
+    pkt[0] = 1; pkt[1] = 1; pkt[2] = 6; pkt[3] = 0;
+    pkt[4] = 0xCA; pkt[5] = 0xFE; pkt[6] = 0xBA; pkt[7] = 0xBE;   /* xid */
+    pkt[28] = 0x02; pkt[29] = 0x00; pkt[30] = 0x00;               /* chaddr */
+    pkt[31] = 0xCA; pkt[32] = 0xFE; pkt[33] = 0x02;
+    pkt[236] = 0x63; pkt[237] = 0x82; pkt[238] = 0x53; pkt[239] = 0x63;
+    pkt[240] = 53; pkt[241] = 1; pkt[242] = 3;                                        /* REQUEST */
+    pkt[243] = 50; pkt[244] = 4; pkt[245] = 192; pkt[246] = 168; pkt[247] = 169; pkt[248] = 101;
+    pkt[249] = 54; pkt[250] = 4; pkt[251] = 192; pkt[252] = 168; pkt[253] = 169; pkt[254] = 1;
+    pkt[255] = 255;
+
+    CHECK(console_dhcp_parse(pkt, len, &msg) == HAL_OK, "解析 REQUEST 成功");
+    CHECK(msg.msg_type == CONSOLE_DHCP_MSG_REQUEST, "msg_type=REQUEST，实际=%u", msg.msg_type);
+    CHECK(msg.requested_ip == 0xC0A8A965u,
+          "requested_ip 精确匹配 192.168.169.101：0x%08X", (unsigned)msg.requested_ip);
+    CHECK(memcmp(msg.chaddr, "\x02\x00\x00\xCA\xFE\x02", 6) == 0, "chaddr 精确匹配");
+}
+
+static void test_dhcp_parse_malformed(void)
+{
+    uint8_t pkt[300];
+    console_dhcp_msg_t msg;
+
+    SECTION("DHCP 报文解析：截断/畸形输入必须安全拒绝，绝不越界读");
+
+    /* 太短：连定长头+cookie都不够 */
+    memset(pkt, 0, sizeof(pkt));
+    CHECK(console_dhcp_parse(pkt, 100, &msg) == HAL_EINVAL, "过短报文被拒");
+
+    /* magic cookie 错误 */
+    memset(pkt, 0, sizeof(pkt));
+    CHECK(console_dhcp_parse(pkt, 240, &msg) == HAL_ECORRUPT, "魔数错误被拒");
+
+    /* 选项声称的长度超出报文剩余字节 */
+    memset(pkt, 0, sizeof(pkt));
+    pkt[236] = 0x63; pkt[237] = 0x82; pkt[238] = 0x53; pkt[239] = 0x63;
+    pkt[240] = 53; pkt[241] = 200;   /* 声称 200 字节的选项体，报文到此只剩 0 字节 */
+    CHECK(console_dhcp_parse(pkt, 242, &msg) == HAL_ECORRUPT, "选项长度越界被拒，不越界读");
+
+    /* 长度字节自身就越界（code 字节后已经没有 length 字节了） */
+    memset(pkt, 0, sizeof(pkt));
+    pkt[236] = 0x63; pkt[237] = 0x82; pkt[238] = 0x53; pkt[239] = 0x63;
+    pkt[240] = 53;
+    CHECK(console_dhcp_parse(pkt, 241, &msg) == HAL_ECORRUPT, "选项长度字节本身越界被拒");
+
+    CHECK(console_dhcp_parse(NULL, 300, &msg) == HAL_EINVAL, "空指针被拒");
+}
+
+static void test_dhcp_build_offer_exact_bytes(void)
+{
+    uint8_t pkt[300], reply[300];
+    size_t len, out_len = 0;
+    console_dhcp_msg_t req;
+
+    SECTION("DHCP 应答构造：OFFER 精确字节");
+    dhcp_test_build_discover(pkt, sizeof(pkt), &len);
+    CHECK(console_dhcp_parse(pkt, len, &req) == HAL_OK, "先解析出请求");
+
+    CHECK(console_dhcp_build_reply(&req, CONSOLE_DHCP_MSG_OFFER,
+                                   0xC0A8A964u /* 192.168.169.100 */,
+                                   0xC0A8A901u /* 192.168.169.1 */,
+                                   CONSOLE_DHCP_LEASE_S, reply, sizeof(reply), &out_len) == HAL_OK,
+          "构造 OFFER 成功");
+    CHECK(out_len == 268, "OFFER 报文长度精确为 268 字节，实际 %zu", out_len);
+    CHECK(reply[0] == 2 && reply[1] == 1 && reply[2] == 6 && reply[3] == 0, "op/htype/hlen/hops 正确");
+    CHECK(memcmp(reply + 4, "\x12\x34\x56\x78", 4) == 0, "xid 回显精确匹配");
+    CHECK(reply[10] == 0x80 && reply[11] == 0x00, "flags 回显");
+    CHECK(memcmp(reply + 16, "\xC0\xA8\xA9\x64", 4) == 0, "yiaddr 精确等于分配的 192.168.169.100");
+    CHECK(memcmp(reply + 28, "\xAA\xBB\xCC\xDD\xEE\xFF", 6) == 0, "chaddr 回显精确匹配");
+    CHECK(memcmp(reply + 236, "\x63\x82\x53\x63", 4) == 0, "magic cookie 正确");
+    CHECK(reply[240] == 53 && reply[241] == 1 && (unsigned char)reply[242] == 2, "选项53=OFFER(2)");
+    CHECK(reply[243] == 51 && reply[244] == 4, "选项51(租期)长度=4");
+    CHECK(memcmp(reply + 245, "\x00\x00\x1c\x20", 4) == 0, "租期精确等于 7200 秒(0x1C20)");
+    CHECK((unsigned char)reply[249] == 54 && reply[250] == 4, "选项54=server id");
+    CHECK(memcmp(reply + 251, "\xC0\xA8\xA9\x01", 4) == 0, "server id 精确等于 192.168.169.1");
+    CHECK(reply[255] == 1 && reply[256] == 4, "选项1=子网掩码");
+    CHECK(memcmp(reply + 257, "\xFF\xFF\xFF\x00", 4) == 0, "子网掩码精确等于 255.255.255.0");
+    CHECK(reply[261] == 3 && reply[262] == 4, "选项3=网关");
+    CHECK(memcmp(reply + 263, "\xC0\xA8\xA9\x01", 4) == 0, "网关精确等于服务端自身地址");
+    CHECK((unsigned char)reply[267] == 0xFF, "报文以 End(0xFF) 结束");
+}
+
+static void test_dhcp_build_nak_exact_bytes(void)
+{
+    uint8_t pkt[300], reply[300];
+    size_t len, out_len = 0;
+    console_dhcp_msg_t req;
+
+    SECTION("DHCP 应答构造：NAK 精确字节（不含租期/地址选项）");
+    dhcp_test_build_discover(pkt, sizeof(pkt), &len);
+    console_dhcp_parse(pkt, len, &req);
+
+    CHECK(console_dhcp_build_reply(&req, CONSOLE_DHCP_MSG_NAK, 0, 0xC0A8A901u, 0,
+                                   reply, sizeof(reply), &out_len) == HAL_OK, "构造 NAK 成功");
+    CHECK(out_len == 250, "NAK 报文长度精确为 250 字节（无 51/1/3 三个选项），实际 %zu", out_len);
+    CHECK(memcmp(reply + 16, "\x00\x00\x00\x00", 4) == 0, "NAK 的 yiaddr 必须是 0.0.0.0，不得分配地址");
+    CHECK(reply[240] == 53 && reply[241] == 1 && (unsigned char)reply[242] == 6, "选项53=NAK(6)");
+    CHECK((unsigned char)reply[243] == 54 && reply[244] == 4, "选项54=server id 紧随其后（无51）");
+    CHECK(memcmp(reply + 245, "\xC0\xA8\xA9\x01", 4) == 0, "server id 精确匹配");
+    CHECK((unsigned char)reply[249] == 0xFF, "NAK 以 End 结束，无子网掩码/网关选项");
+}
+
+static void test_dhcp_build_buffer_too_small(void)
+{
+    uint8_t pkt[300], reply[10];
+    size_t len, out_len = 999;
+    console_dhcp_msg_t req;
+
+    SECTION("DHCP 应答构造：缓冲不足必须拒绝，不写半截报文");
+    dhcp_test_build_discover(pkt, sizeof(pkt), &len);
+    console_dhcp_parse(pkt, len, &req);
+    CHECK(console_dhcp_build_reply(&req, CONSOLE_DHCP_MSG_OFFER, 1, 2, 3, reply, sizeof(reply), &out_len)
+          == HAL_ENOMEM, "10 字节缓冲装不下 268 字节的 OFFER，返回 ENOMEM");
+}
+
+static void test_dhcp_lease_table(void)
+{
+    console_dhcp_lease_table_t t, full, t2;
+    uint8_t mac1[6] = { 0,0,0,0,0,1 };
+    uint8_t mac2[6] = { 0,0,0,0,0,2 };
+    uint32_t host = 0, host1 = 0;
+    uint32_t i;
+
+    SECTION("DHCP 租约表：分配/续租/耗尽/过期回收/释放");
+    console_dhcp_lease_table_init(&t);
+
+    CHECK(console_dhcp_lease_acquire(&t, mac1, 1000, &host) == HAL_OK, "首次分配成功");
+    CHECK(host == CONSOLE_DHCP_POOL_START, "首个地址精确等于池起始 .%u", (unsigned)CONSOLE_DHCP_POOL_START);
+    host1 = host;
+
+    CHECK(console_dhcp_lease_acquire(&t, mac1, 1500, &host) == HAL_OK, "同一 MAC 续租");
+    CHECK(host == host1, "续租必须拿回同一地址，而不是新分配一个");
+
+    CHECK(console_dhcp_lease_acquire(&t, mac2, 1000, &host) == HAL_OK, "第二个 MAC 分配");
+    CHECK(host == CONSOLE_DHCP_POOL_START + 1,
+          "第二个地址精确等于池起始+1（证明真的递增分配，不是巧合）");
+
+    /* 耗尽整个池：CONSOLE_DHCP_POOL_SIZE 个不同 MAC 依次分配 */
+    console_dhcp_lease_table_init(&full);
+    {
+        uint32_t used = 0;
+        uint8_t mac[6] = { 0,0,0,0,1,0 };
+        for (i = 0; i < CONSOLE_DHCP_POOL_SIZE; i++) {
+            mac[5] = (uint8_t)i;
+            if (console_dhcp_lease_acquire(&full, mac, 2000, &host) == HAL_OK) used++;
+        }
+        CHECK(used == CONSOLE_DHCP_POOL_SIZE, "池内 %u 个地址全部分配成功，实际 %u",
+              (unsigned)CONSOLE_DHCP_POOL_SIZE, (unsigned)used);
+
+        mac[5] = (uint8_t)(CONSOLE_DHCP_POOL_SIZE & 0xFF);   /* 第 102 个不同的 MAC，池外新客户端 */
+        CHECK(console_dhcp_lease_acquire(&full, mac, 2000, &host) == HAL_ENOMEM,
+              "池已耗尽时新 MAC 分配失败，返回 ENOMEM（不驱逐活跃租约）");
+        CHECK(console_dhcp_lease_acquire(&full, mac, 9000, &host) == HAL_ENOMEM,
+              "全部租约到期(9200)之前重试仍然失败（9000<9200）");
+        CHECK(console_dhcp_lease_acquire(&full, mac, 9300, &host) == HAL_OK,
+              "全部租约过期后(9300>9200)，新 MAC 分配成功——证明过期回收真的生效");
+    }
+
+    /* 释放测试：新表，填满后释放一个特定 MAC，验证新 MAC 精确复用被释放的那个地址 */
+    console_dhcp_lease_table_init(&t2);
+    {
+        uint8_t victim_mac[6] = { 0,0,0,0,1,5 };
+        uint8_t newcomer[6] = { 9,9,9,9,9,9 };
+        uint32_t victim_host = CONSOLE_DHCP_POOL_START + 5;
+
+        for (i = 0; i < CONSOLE_DHCP_POOL_SIZE; i++) {
+            uint8_t m[6] = { 0,0,0,0,1,0 };
+            m[5] = (uint8_t)i;
+            console_dhcp_lease_acquire(&t2, m, 100, &host);
+        }
+        CHECK(console_dhcp_lease_release(&t2, victim_mac) == HAL_OK, "释放指定 MAC 的租约");
+        CHECK(console_dhcp_lease_acquire(&t2, newcomer, 200, &host) == HAL_OK, "释放后新 MAC 分配成功");
+        CHECK(host == victim_host, "新 MAC 精确复用被释放的那个地址：.%u（预期 .%u）",
+              (unsigned)host, (unsigned)victim_host);
+        CHECK(console_dhcp_lease_release(&t2, victim_mac) == HAL_ENODEV,
+              "重复释放同一 MAC 返回 ENODEV（已不在表中）");
+    }
+}
+
+/* ---- REST 端点：/api/v1/net/{status,wifi/scan,wifi/connect} ---- */
+
+static void test_net_init_and_routes(void)
+{
+    SECTION("网络子模块初始化与路由注册");
+    CHECK(cfg_init(NULL, "console_test_cfg_net_init.json") == HAL_OK, "配置中心就绪");
+    /* 整个测试二进制里唯一一次 console_net_init()：既验证路由注册，也验证
+       net.wifi.ssid 配置规则登记不会崩——其余用例一律走 console_net_test_dispatch，
+       避免 http_route（不去重，ROUTE_MAX=8）被同一前缀反复占槽。 */
+    CHECK(console_net_init() == HAL_OK, "console_net_init 成功");
+    /* 精确核对命中的前缀本身，而不是只判非 NULL——本计划已因"/ 兜底使任何
+       路径恒非 NULL"吃过亏（见 progress.md 的派发注意事项）。此处没有注册
+       兜底路由，但仍按同一更严格的写法统一处理；短路 && 避免 matched 为
+       NULL 时 strcmp 直接崩溃掉整个测试进程。 */
+    {
+        const char *matched = http_route_match("/api/v1/net/status");
+        CHECK(matched != NULL && strcmp(matched, "/api/v1/net/") == 0,
+              "命中的前缀精确等于 /api/v1/net/，实际：%s", matched ? matched : "(NULL)");
+    }
+    cfg_deinit();
+    remove("console_test_cfg_net_init.json");
+}
+
+static void test_net_status_endpoint(void)
+{
+    http_req_t req;
+    char body[2048], cookie[128];
+    bool must_change = false;
+    int http_status = 0;
+
+    SECTION("REST 网络状态端点 GET /api/v1/net/status");
+    console_net_test_reset();
+    console_auth_reset_lockout();
+    CHECK(console_auth_seed("ABCD1234") == HAL_OK, "播种凭据（出厂态）");
+
+    req_make(&req, "GET", "/api/v1/net/status", NULL, NULL);
+    CHECK(console_net_test_dispatch(&req, body, sizeof(body), &http_status) == HAL_EUNAUTH_,
+          "未登录访问 net/status 返回未登录");
+
+    CHECK(do_login("admin", "ABCD1234", "192.168.60.10", cookie, sizeof(cookie), &must_change) == HAL_OK,
+          "登录成功（出厂态）");
+
+    req_make(&req, "GET", "/api/v1/net/status", NULL, cookie);
+    CHECK(console_net_test_dispatch(&req, body, sizeof(body), &http_status) == HAL_EPERM_,
+          "未改密时 net/status 403（未豁免强制改密，与 system/status 同类）");
+
+    CHECK(console_auth_set_password("ABCD1234", "NewPass@123") == HAL_OK, "改密解除强制改密");
+    CHECK(do_login("admin", "NewPass@123", "192.168.60.10", cookie, sizeof(cookie), &must_change) == HAL_OK,
+          "以新口令重新登录");
+
+    /* 默认状态：mock 以太网恒 up、未开 AP、未连 WiFi → mode=eth；
+       ip/ssid/rssi/last_error 均未知/不适用，必须省略而不是硬凑假数据 */
+    req_make(&req, "GET", "/api/v1/net/status", NULL, cookie);
+    CHECK(console_net_test_dispatch(&req, body, sizeof(body), &http_status) == HAL_OK, "net/status 成功");
+    CHECK(http_status == 200, "net/status 状态码 200，实际 %d", http_status);
+    CHECK(strstr(body, "\"code\":0") != NULL, "响应含 code:0");
+    CHECK(strstr(body, "\"mode\":\"eth\"") != NULL, "默认模式为 eth，实际：%s", body);
+    CHECK(strstr(body, "\"mac\":\"02:00:00:CA:FE:01\"") != NULL,
+          "eth 模式下 mac 精确等于 mock 以太网地址，实际：%s", body);
+    CHECK(strstr(body, "\"ip\"") == NULL, "eth 模式下没有 netmgr 可读 IP，字段应省略，实际：%s", body);
+    CHECK(strstr(body, "\"ssid\"") == NULL, "eth 模式下不应出现 ssid 字段，实际：%s", body);
+    CHECK(strstr(body, "\"rssi\"") == NULL, "eth 模式下不应出现 rssi 字段，实际：%s", body);
+    CHECK(strstr(body, "\"last_error\"") == NULL, "未曾配网失败过，不应出现 last_error 字段，实际：%s", body);
+
+    /* AP 模式：测试桩注入（工作线程未启动，无法真的走 wifi_ap_start），
+       验证 ip/ssid 字段的拼装逻辑本身 */
+    console_net_test_seed_ap("IPC-00CAFE");
+    req_make(&req, "GET", "/api/v1/net/status", NULL, cookie);
+    CHECK(console_net_test_dispatch(&req, body, sizeof(body), &http_status) == HAL_OK,
+          "AP 模式 net/status 成功");
+    CHECK(strstr(body, "\"mode\":\"ap\"") != NULL, "模式为 ap，实际：%s", body);
+    CHECK(strstr(body, "\"ip\":\"192.168.169.1\"") != NULL, "AP 网关地址精确匹配，实际：%s", body);
+    CHECK(strstr(body, "\"ssid\":\"IPC-00CAFE\"") != NULL, "回显注入的 AP SSID，实际：%s", body);
+
+    console_net_test_reset();
+}
+
+static void test_net_wifi_scan_endpoint(void)
+{
+    http_req_t req;
+    char body[2048], cookie[128];
+    bool must_change = false;
+    int http_status = 0;
+
+    SECTION("REST WiFi 扫描端点 GET /api/v1/net/wifi/scan");
+    console_net_test_reset();
+    console_auth_reset_lockout();
+    CHECK(console_auth_seed("ABCD1234") == HAL_OK, "播种凭据（出厂态）");
+    CHECK(console_auth_set_password("ABCD1234", "NewPass@123") == HAL_OK, "改密解除强制改密");
+    CHECK(do_login("admin", "NewPass@123", "192.168.60.11", cookie, sizeof(cookie), &must_change) == HAL_OK,
+          "登录成功");
+
+    req_make(&req, "GET", "/api/v1/net/wifi/scan", NULL, NULL);
+    CHECK(console_net_test_dispatch(&req, body, sizeof(body), &http_status) == HAL_EUNAUTH_,
+          "未登录访问 wifi/scan 返回未登录");
+
+    req_make(&req, "POST", "/api/v1/net/wifi/scan", NULL, cookie);
+    CHECK(console_net_test_dispatch(&req, body, sizeof(body), &http_status) == HAL_EINVAL,
+          "非 GET 方法被拒");
+
+    /* 缓存命中：先注入一条结果，验证 200 + JSON 拼装精确 */
+    console_net_test_seed_scan_result("HomeWiFi-5G", -55, 5180, (int)HAL_WIFI_SEC_WPA2);
+    req_make(&req, "GET", "/api/v1/net/wifi/scan", NULL, cookie);
+    CHECK(console_net_test_dispatch(&req, body, sizeof(body), &http_status) == HAL_OK,
+          "缓存命中时 wifi/scan 成功");
+    CHECK(http_status == 200, "缓存命中时状态码 200，实际 %d", http_status);
+    CHECK(strstr(body, "\"ssid\":\"HomeWiFi-5G\"") != NULL, "回显注入的 SSID，实际：%s", body);
+    CHECK(strstr(body, "\"rssi\":-55") != NULL, "回显注入的 rssi，实际：%s", body);
+    CHECK(strstr(body, "\"freq_mhz\":5180") != NULL, "回显注入的频段，实际：%s", body);
+    CHECK(strstr(body, "\"security\":\"wpa2\"") != NULL, "安全类型精确映射为 wpa2，实际：%s", body);
+    CHECK(strstr(body, "\"age_s\":0") != NULL, "刚注入的结果 age_s=0，实际：%s", body);
+
+    /* 缓存未命中（reset 后）：handler 不会同步调用阻塞的 wifi_scan（本测试没有
+       启动工作线程），只会投递任务并回 202，供前端轮询。 */
+    console_net_test_reset();
+    req_make(&req, "GET", "/api/v1/net/wifi/scan", NULL, cookie);
+    CHECK(console_net_test_dispatch(&req, body, sizeof(body), &http_status) == HAL_OK,
+          "缓存未命中时投递扫描任务，dispatch 本身仍返回 HAL_OK");
+    CHECK(http_status == 202, "缓存未命中时状态码 202，实际 %d", http_status);
+    CHECK(strstr(body, "\"code\":0") != NULL, "202 响应体仍是 code:0 的正常 JSON，实际：%s", body);
+
+    console_net_test_reset();
+}
+
+static void test_net_wifi_connect_endpoint(void)
+{
+    http_req_t req;
+    char body[1024], cookie[128];
+    bool must_change = false;
+    int http_status = 0;
+
+    SECTION("REST WiFi 配网提交端点 POST /api/v1/net/wifi/connect：参数校验与 202 立即响应");
+    console_net_test_reset();
+    console_auth_reset_lockout();
+    CHECK(console_auth_seed("ABCD1234") == HAL_OK, "播种凭据（出厂态）");
+    CHECK(console_auth_set_password("ABCD1234", "NewPass@123") == HAL_OK, "改密解除强制改密");
+    CHECK(do_login("admin", "NewPass@123", "192.168.60.13", cookie, sizeof(cookie), &must_change) == HAL_OK,
+          "登录成功");
+
+    req_make(&req, "POST", "/api/v1/net/wifi/connect", "{\"ssid\":\"Home\",\"psk\":\"12345678\"}", NULL);
+    CHECK(console_net_test_dispatch(&req, body, sizeof(body), &http_status) == HAL_EUNAUTH_,
+          "未登录提交配网返回未登录");
+
+    req_make(&req, "GET", "/api/v1/net/wifi/connect", NULL, cookie);
+    CHECK(console_net_test_dispatch(&req, body, sizeof(body), &http_status) == HAL_EINVAL,
+          "非 POST 方法被拒");
+
+    req_make(&req, "POST", "/api/v1/net/wifi/connect", NULL, cookie);
+    CHECK(console_net_test_dispatch(&req, body, sizeof(body), &http_status) == HAL_EINVAL,
+          "空 body 被拒");
+
+    req_make(&req, "POST", "/api/v1/net/wifi/connect", "not-json", cookie);
+    CHECK(console_net_test_dispatch(&req, body, sizeof(body), &http_status) == HAL_EINVAL,
+          "畸形 JSON 被拒");
+
+    req_make(&req, "POST", "/api/v1/net/wifi/connect", "{\"psk\":\"12345678\"}", cookie);
+    CHECK(console_net_test_dispatch(&req, body, sizeof(body), &http_status) == HAL_EINVAL,
+          "缺 ssid 被拒");
+
+    req_make(&req, "POST", "/api/v1/net/wifi/connect", "{\"ssid\":\"Home\",\"psk\":\"123\"}", cookie);
+    CHECK(console_net_test_dispatch(&req, body, sizeof(body), &http_status) == HAL_EINVAL,
+          "psk 短于 8 位被拒");
+
+    {
+        char long_body[128];
+        /* 68 位纯数字口令：超过 WPA2 上限 63 位 */
+        snprintf(long_body, sizeof(long_body), "{\"ssid\":\"Home\",\"psk\":\"%s\"}",
+                 "1234567890123456789012345678901234567890123456789012345678901234567890");
+        req_make(&req, "POST", "/api/v1/net/wifi/connect", long_body, cookie);
+        CHECK(console_net_test_dispatch(&req, body, sizeof(body), &http_status) == HAL_EINVAL,
+              "psk 长于 63 位被拒");
+    }
+
+    req_make(&req, "POST", "/api/v1/net/wifi/connect",
+             "{\"ssid\":\"OpenAP\",\"psk\":\"12345678\",\"sec\":\"open\"}", cookie);
+    CHECK(console_net_test_dispatch(&req, body, sizeof(body), &http_status) == HAL_EINVAL,
+          "开放网络不应带密码，被拒");
+
+    req_make(&req, "POST", "/api/v1/net/wifi/connect", "{\"ssid\":\"OpenAP\",\"sec\":\"open\"}", cookie);
+    CHECK(console_net_test_dispatch(&req, body, sizeof(body), &http_status) == HAL_OK,
+          "开放网络（无密码）参数合法");
+    CHECK(http_status == 202, "配网提交立即返回 202，实际 %d", http_status);
+
+    req_make(&req, "POST", "/api/v1/net/wifi/connect", "{\"ssid\":\"HomeWiFi\",\"psk\":\"12345678\"}", cookie);
+    CHECK(console_net_test_dispatch(&req, body, sizeof(body), &http_status) == HAL_OK,
+          "合法 WPA2 参数提交成功");
+    CHECK(http_status == 202, "状态码 202，实际 %d", http_status);
+    CHECK(strcmp(body, "{\"code\":0,\"msg\":\"正在连接，请将设备连回目标网络后访问新地址\"}") == 0,
+          "响应体逐字匹配 brief 原文措辞，实际：%s", body);
+    CHECK(strstr(body, "HomeWiFi") == NULL, "响应体不得回显提交的 SSID/密码");
+
+    console_net_test_reset();
+}
+
+static void test_net_wifi_no_capability(void)
+{
+    http_req_t req;
+    char body[512], cookie[128];
+    bool must_change = false;
+    int http_status = 0;
+
+    SECTION("无 WiFi 能力时 scan/connect 均返回 ENOTSUP(501)，status 仍可用");
+    console_net_test_reset();
+    console_auth_reset_lockout();
+    CHECK(console_auth_seed("ABCD1234") == HAL_OK, "播种凭据（出厂态）");
+    CHECK(console_auth_set_password("ABCD1234", "NewPass@123") == HAL_OK, "改密");
+    CHECK(do_login("admin", "NewPass@123", "192.168.60.12", cookie, sizeof(cookie), &must_change) == HAL_OK,
+          "登录成功");
+
+    CHECK(hal_deinit() == HAL_OK, "卸载 HAL，模拟设备此刻完全没有网络能力");
+
+    req_make(&req, "GET", "/api/v1/net/wifi/scan", NULL, cookie);
+    CHECK(console_net_test_dispatch(&req, body, sizeof(body), &http_status) == HAL_ENOTSUP,
+          "hal_has(HAL_MOD_NET) 为假时 wifi/scan 返回 ENOTSUP（映射 501），不崩溃");
+
+    req_make(&req, "POST", "/api/v1/net/wifi/connect", "{\"ssid\":\"x\",\"psk\":\"12345678\"}", cookie);
+    CHECK(console_net_test_dispatch(&req, body, sizeof(body), &http_status) == HAL_ENOTSUP,
+          "同样条件下 wifi/connect 也返回 ENOTSUP");
+
+    req_make(&req, "GET", "/api/v1/net/status", NULL, cookie);
+    CHECK(console_net_test_dispatch(&req, body, sizeof(body), &http_status) == HAL_OK,
+          "net/status 不依赖 WiFi 能力，无 HAL 时仍能返回（降级为无 mac 字段），不崩溃");
+
+    CHECK(hal_init(profile_raw_json()) == HAL_OK, "恢复 HAL，避免影响后续测试");
+    console_net_test_reset();
+}
+
+/**
+ * 钉住 console_net_handler 内部"先 http_respond_json(202) 入队、再
+ * http_conn_defer_after_flush 登记"这个调用顺序本身——原理与
+ * test_reboot_handler_order 完全一致：console_net_test_dispatch 绕过了
+ * console_net_handler（只测不碰 conn 的 net_dispatch），颠倒 handler 内部
+ * 那两行调用顺序不会被上面任何一个端点测试发现。
+ */
+static void test_net_connect_handler_order(void)
+{
+    http_req_t req;
+    http_conn_t *conn;
+    char cookie[128];
+    bool must_change = false;
+    unsigned before;
+
+    SECTION("console_net_handler：必须先入队 202 响应、再登记延后动作交给工作线程");
+    console_net_test_reset();
+    console_auth_reset_lockout();
+    CHECK(console_auth_seed("ABCD1234") == HAL_OK, "播种凭据（出厂态）");
+    CHECK(console_auth_set_password("ABCD1234", "NewPass@123") == HAL_OK, "改密解除强制改密");
+    CHECK(do_login("admin", "NewPass@123", "192.168.60.14", cookie, sizeof(cookie), &must_change) == HAL_OK,
+          "登录成功");
+
+    conn = http_ws_test_conn_new(4096);
+    CHECK(conn != NULL, "创建测试连接（不含真实 socket，足够承载 202 响应的入队）");
+    if (conn) {
+        req_make(&req, "POST", "/api/v1/net/wifi/connect", "{\"ssid\":\"HomeWiFi\",\"psk\":\"12345678\"}", cookie);
+        req.conn = conn;   /* 生产路径由 http_server.c 的 dispatch_one 回填，这里手动模拟 */
+
+        before = console_net_test_defer_fail_count();
+        CHECK(console_net_test_full_handler(&req) == 0, "配网请求处理成功（handler 返回 0，已自行响应）");
+        CHECK(console_net_test_defer_fail_count() == before,
+              "延后动作登记不应失败——若 console_net_handler 内部把 http_respond_json 与 "
+              "http_conn_defer_after_flush 两行调用顺序颠倒，登记时发送队列还是空的，"
+              "http_conn_defer_after_flush 会返回 HAL_ESTATE，这里的计数就会增加");
+
+        http_ws_test_conn_free(conn);
+    }
+    console_net_test_reset();
+}
+
 int main(void)
 {
     if (profile_load("profiles/mock-x86.json") != HAL_OK) {
@@ -1005,6 +1535,23 @@ int main(void)
     test_api_config_endpoints();
     test_api_system_endpoints();
     test_reboot_handler_order();
+
+    test_net_ap_decision();
+    test_net_ap_ssid();
+    test_captive_portal();
+    test_dhcp_parse_discover();
+    test_dhcp_parse_request_with_options();
+    test_dhcp_parse_malformed();
+    test_dhcp_build_offer_exact_bytes();
+    test_dhcp_build_nak_exact_bytes();
+    test_dhcp_build_buffer_too_small();
+    test_dhcp_lease_table();
+    test_net_init_and_routes();       /* 唯一一次 console_net_init()，顺带注册路由 */
+    test_net_status_endpoint();
+    test_net_wifi_scan_endpoint();
+    test_net_wifi_connect_endpoint();
+    test_net_wifi_no_capability();
+    test_net_connect_handler_order();
 
     printf("RESULT: console pass=%d fail=%d\n", g_pass, g_fail);
     return g_fail;

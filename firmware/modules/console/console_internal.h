@@ -169,4 +169,134 @@ int console_api_test_full_handler(http_req_t *req);
 unsigned console_api_test_defer_fail_count(void);
 #endif
 
+/* ---- 网络与配网 ---- */
+/**
+ * 是否应启动 AP。
+ * eth_up      以太网链路是否 up
+ * wifi_cfgd   WiFi 是否已配置过（config 中有 SSID）
+ * wifi_up     WiFi 是否已连上
+ * 规则：以太网 up 则绝不开 AP；否则 WiFi 未配置、或已配但未连上（超时后）开 AP。
+ */
+bool console_should_start_ap(bool eth_up, bool wifi_cfgd, bool wifi_up);
+/** 生成 AP SSID：IPC-{序列号后6位} */
+hal_err_t console_ap_ssid(const char *serial, char *buf, size_t cap);
+/** 是否为手机系统的 Captive Portal 探测路径 */
+bool console_is_captive_probe(const char *path);
+/** 当前网络模式："ap" / "sta" / "eth" */
+const char *console_net_mode(void);
+/** 注册 /api/v1/net/ 路由、登记 net.wifi.ssid 配置规则；不得起线程
+ *  （module.h 对 init 的契约），在 console_init 中调用。 */
+hal_err_t console_net_init(void);
+/**
+ * 启动/停止配网工作线程（wifi_scan/wifi_connect 阻塞调用、AP 网段 DHCP 收发、
+ * 配网失败 60 秒后重开 AP 的定时器均在该线程上执行）。在 console_start/
+ * console_stop 中调用，对应 module.h "start 才起线程" 的契约（resolution C）。
+ * 可重复 start（幂等）/ stop（未启动时视为成功）。
+ */
+hal_err_t console_net_start(void);
+hal_err_t console_net_stop(void);
+
+/* ---- DHCP：AP 网段 192.168.169.0/24 的极简服务端 ----
+ * 报文解析/构造与租约表是纯函数，在 x86 上完全可测（见 console_test 的 KAT
+ * 用例）；UDP socket 收发是平台相关的胶水层，在 console_net.c 内单独成段，
+ * 未在任何环境下被执行验证——见任务报告 resolution B。 */
+#define CONSOLE_DHCP_MSG_DISCOVER 1u
+#define CONSOLE_DHCP_MSG_OFFER    2u
+#define CONSOLE_DHCP_MSG_REQUEST  3u
+#define CONSOLE_DHCP_MSG_DECLINE  4u
+#define CONSOLE_DHCP_MSG_ACK      5u
+#define CONSOLE_DHCP_MSG_NAK      6u
+#define CONSOLE_DHCP_MSG_RELEASE  7u
+#define CONSOLE_DHCP_MSG_INFORM   8u
+
+/** 地址池 .100~.200（网关/DHCP 服务端自身固定为 .1），租期 2 小时 */
+#define CONSOLE_DHCP_POOL_START   100u
+#define CONSOLE_DHCP_POOL_END     200u
+#define CONSOLE_DHCP_POOL_SIZE    (CONSOLE_DHCP_POOL_END - CONSOLE_DHCP_POOL_START + 1u)
+#define CONSOLE_DHCP_LEASE_S      (2u * 3600u)
+
+/** 解析/构造所需的最小 BOOTP/DHCP 字段集合（RFC 2131 §2 + RFC 2132 常用选项） */
+typedef struct {
+    uint8_t  op, htype, hlen;
+    uint32_t xid;
+    uint16_t flags;
+    uint32_t ciaddr, yiaddr, giaddr;
+    uint8_t  chaddr[16];
+    uint8_t  msg_type;      /**< 选项 53；0 表示报文中未出现（畸形请求） */
+    uint32_t requested_ip;  /**< 选项 50，主机字节序；0 表示未带该选项 */
+} console_dhcp_msg_t;
+
+/**
+ * 解析一个完整 UDP 载荷（BOOTP 定长头 236 字节 + 4 字节 magic cookie + 选项）。
+ * 截断、魔数不符、选项长度越界均返回错误，不做越界读；buf/out 为 NULL 返回
+ * HAL_EINVAL，长度不足返回 HAL_EINVAL，魔数或选项越界返回 HAL_ECORRUPT。
+ */
+hal_err_t console_dhcp_parse(const uint8_t *buf, size_t len, console_dhcp_msg_t *out);
+/**
+ * 构造应答报文：msg_type 为 OFFER/ACK 时附带选项 51(租期)/1(子网掩码)/3(网关，
+ * 取 server_ip 自身)；NAK 只附带 53/54。your_ip/server_ip 为主机字节序 IPv4。
+ * cap 不足以容纳完整报文时返回 HAL_ENOMEM，不写半截报文。
+ */
+hal_err_t console_dhcp_build_reply(const console_dhcp_msg_t *req, uint8_t msg_type,
+                                   uint32_t your_ip, uint32_t server_ip, uint32_t lease_s,
+                                   uint8_t *out, size_t cap, size_t *out_len);
+
+/** 租约表条目：MAC → 地址池偏移（记录的是完整的最后一个字节，取值范围
+ *  [CONSOLE_DHCP_POOL_START, CONSOLE_DHCP_POOL_END]） */
+typedef struct {
+    bool     used;
+    uint8_t  mac[6];
+    uint32_t expires_s;
+} console_dhcp_lease_t;
+
+typedef struct {
+    console_dhcp_lease_t entries[CONSOLE_DHCP_POOL_SIZE];
+} console_dhcp_lease_table_t;
+
+void console_dhcp_lease_table_init(console_dhcp_lease_table_t *t);
+/**
+ * 取/续租：该 MAC 已持有租约则原样续期返回，否则从空闲地址中分配一个
+ * （过期租约会先被回收）。host_out 是完整的最后一个字节。地址池耗尽返回
+ * HAL_ENOMEM——刻意不驱逐活跃租约（这与鉴权表的 LRU 淘汰语义不同：驱逐会让
+ * 仍在线的设备突然失联）。
+ */
+hal_err_t console_dhcp_lease_acquire(console_dhcp_lease_table_t *t, const uint8_t mac[6],
+                                     uint32_t now_s, uint32_t *host_out);
+/** 主动释放（收到 DHCPRELEASE 时调用）；该 MAC 未持有租约返回 HAL_ENODEV */
+hal_err_t console_dhcp_lease_release(console_dhcp_lease_table_t *t, const uint8_t mac[6]);
+
+#ifdef IPC_TESTING
+/** 测试桩：清空 console_net 内部运行态（扫描缓存/连接请求/last_error/
+ *  AP·STA 记忆 SSID、当前模式）为初始值，不影响已注册的路由表。各测试函数
+ *  之间用它隔离，避免用例顺序耦合（与 console_auth_reset_lockout 同类用途）。 */
+void console_net_test_reset(void);
+/**
+ * 测试桩：不经 http_respond/真实连接直接跑一次 /api/v1/net/ 下的分发。
+ * 返回 HAL_OK 时 body 为响应体、*http_status_out 为该响应本该使用的 HTTP
+ * 状态码（200 或 202）；其他返回值即真实 handler 交给 console_reply_err
+ * 的错误码，语义与 console_api_test_dispatch 一致。不会真的把配网请求交给
+ * 工作线程（工作线程未必在跑），只验证参数校验与响应体/状态码。
+ */
+hal_err_t console_net_test_dispatch(const http_req_t *req, char *body, size_t body_cap,
+                                    int *http_status_out);
+/**
+ * 测试桩：直接跑真正的 console_net_handler（而非绕过它的纯分发），用于钉住
+ * "先入队 202 响应、再登记延后动作把连接请求交给工作线程" 这个调用顺序本身，
+ * 与 console_api_test_full_handler 同一手法。req->conn 必须是真实或测试用
+ * 连接（如 http_ws_test_conn_new 的返回值）。
+ */
+int console_net_test_full_handler(http_req_t *req);
+/** 见 console_net_test_full_handler：延后动作登记失败的次数，正常调用顺序
+ *  下恒为 0。 */
+unsigned console_net_test_defer_fail_count(void);
+/** 测试桩：直接向扫描缓存注入一条"已完成"的结果，绕开需要真实 WiFi 硬件的
+ *  工作线程路径，用于测试 /net/wifi/scan 缓存命中分支的 JSON 拼装是否正确。
+ *  security 取值见 hal_wifi_sec_t。 */
+void console_net_test_seed_scan_result(const char *ssid, int rssi_dbm, uint32_t freq_mhz,
+                                       int security);
+/** 测试桩：直接把内部状态置为"AP 模式下已开启热点 ssid"，绕开需要真实 WiFi
+ *  硬件的工作线程路径，用于测试 /net/status 在 AP 模式下的字段拼装。 */
+void console_net_test_seed_ap(const char *ssid);
+#endif
+
 #endif /* IPC_CONSOLE_INTERNAL_H */
