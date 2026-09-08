@@ -24,6 +24,7 @@ func Router(hub *wshub.Hub) *gin.Engine {
 
 	// 认证
 	v1 := r.Group("/api/v1")
+	v1.Use(AuditMiddleware()) // ACC-08：写操作统一落操作日志
 	{
 		v1.POST("/auth/login", handleLogin)
 		v1.POST("/auth/refresh", handleRefresh)
@@ -44,6 +45,8 @@ func Router(hub *wshub.Hub) *gin.Engine {
 
 		// 设备接入端点（接入规范 §9）
 		v1.POST("/devices/idp/bind", AuthMiddleware(), requireProjectID(), requirePerm("config"), handleIdpBind)
+		v1.POST("/devices/idp/lookup", AuthMiddleware(), requireProjectID(), requirePerm("config"), handleIdpLookup)
+		v1.POST("/devices/batch", AuthMiddleware(), requireProjectID(), requirePerm("config"), handleDeviceBatch)
 		v1.POST("/devices/idp/preadd", AuthMiddleware(), requireProjectID(), requirePerm("config"), handleIdpPreadd)
 		v1.GET("/devices/idp/preadd", AuthMiddleware(), requireProjectID(), requirePerm("view"), handleIdpPreaddList)
 		v1.POST("/devices/idp/preadd/:id/activate", AuthMiddleware(), requireProjectID(), requirePerm("config"), handleIdpPreaddActivate)
@@ -67,6 +70,8 @@ func Router(hub *wshub.Hub) *gin.Engine {
 		v1.POST("/devices/:id/sync", AuthMiddleware(), requireProjectID(), requirePerm("config"), handleSyncDevice)
 		v1.POST("/devices/:id/diag", AuthMiddleware(), requireProjectID(), requirePerm("config"), handleDiagDevice)
 		v1.POST("/devices/:id/reboot", AuthMiddleware(), requireProjectID(), requirePerm("config"), handleRebootDevice)
+		v1.GET("/devices/:id/config", AuthMiddleware(), requireProjectID(), requirePerm("config"), handleDeviceConfigGet)
+		v1.PUT("/devices/:id/config", AuthMiddleware(), requireProjectID(), requirePerm("config"), handleDeviceConfigSet)
 		v1.GET("/devices/:id/channels", AuthMiddleware(), requireProjectID(), requirePerm("view"), handleDeviceChannels)
 		v1.PUT("/channels/:id", AuthMiddleware(), requireProjectID(), requirePerm("config"), handleUpdateChannel)
 		v1.GET("/channels", AuthMiddleware(), requireProjectID(), requirePerm("view"), handleListChannels)
@@ -77,7 +82,13 @@ func Router(hub *wshub.Hub) *gin.Engine {
 		v1.POST("/channels/:id/snapshot", AuthMiddleware(), requireProjectID(), requirePerm("view"), handleSnapshot)
 		v1.POST("/channels/:id/cover", AuthMiddleware(), requireProjectID(), requirePerm("config"), handleRefreshCover)
 		v1.POST("/channels/:id/ptz", AuthMiddleware(), requireProjectID(), requirePerm("ptz"), handlePTZ)
+		v1.GET("/channels/:id/ptz/presets", AuthMiddleware(), requireProjectID(), requirePerm("preview"), handlePTZPresetsList)
+		v1.POST("/channels/:id/ptz/presets", AuthMiddleware(), requireProjectID(), requirePerm("ptz"), handlePTZPresetAdd)
+		v1.POST("/channels/:id/ptz/preset/goto", AuthMiddleware(), requireProjectID(), requirePerm("ptz"), handlePTZPresetGoto)
+		v1.DELETE("/channels/:id/ptz/presets/:pid", AuthMiddleware(), requireProjectID(), requirePerm("ptz"), handlePTZPresetDelete)
 		v1.GET("/channels/:id/records", AuthMiddleware(), requireProjectID(), requirePerm("view"), handleChannelRecords)
+		v1.GET("/channels/:id/records/days", AuthMiddleware(), requireProjectID(), requirePerm("view"), handleRecordDays)
+		v1.POST("/channels/:id/records/download", AuthMiddleware(), requireProjectID(), requirePerm("playback"), handleRecordDownload)
 		v1.POST("/channels/:id/playback", AuthMiddleware(), requireProjectID(), requirePerm("playback"), handleStartPlayback)
 		v1.PUT("/playback/:sid", AuthMiddleware(), requireProjectID(), requirePerm("playback"), handlePlaybackCtrl)
 		v1.DELETE("/playback/:sid", AuthMiddleware(), requireProjectID(), requirePerm("playback"), handleStopPlayback)
@@ -103,6 +114,7 @@ func Router(hub *wshub.Hub) *gin.Engine {
 		// 告警
 		v1.GET("/alarm-templates", AuthMiddleware(), requireProjectID(), requirePerm("view"), handleListAlarmTemplates)
 		v1.POST("/alarm-templates", AuthMiddleware(), requireProjectID(), requirePerm("config"), handleCreateAlarmTemplate)
+		v1.PUT("/alarm-templates/:id", AuthMiddleware(), requireProjectID(), requirePerm("config"), handleUpdateAlarmTemplate)
 		v1.DELETE("/alarm-templates/:id", AuthMiddleware(), requireProjectID(), requirePerm("config"), handleDeleteAlarmTemplate)
 		v1.GET("/alarm-rules", AuthMiddleware(), requireProjectID(), requirePerm("view"), handleListAlarmRules)
 		v1.POST("/alarm-rules", AuthMiddleware(), requireProjectID(), requirePerm("config"), handleCreateAlarmRule)
@@ -118,6 +130,7 @@ func Router(hub *wshub.Hub) *gin.Engine {
 		// 录像设置
 		v1.GET("/record-templates", AuthMiddleware(), requireProjectID(), requirePerm("view"), handleListRecordTemplates)
 		v1.POST("/record-templates", AuthMiddleware(), requireProjectID(), requirePerm("config"), handleCreateRecordTemplate)
+		v1.PUT("/record-templates/:id", AuthMiddleware(), requireProjectID(), requirePerm("config"), handleUpdateRecordTemplate)
 		v1.DELETE("/record-templates/:id", AuthMiddleware(), requireProjectID(), requirePerm("config"), handleDeleteRecordTemplate)
 		v1.GET("/record-plans", AuthMiddleware(), requireProjectID(), requirePerm("view"), handleListRecordPlans)
 		v1.POST("/record-plans", AuthMiddleware(), requireProjectID(), requirePerm("config"), handleCreateRecordPlan)

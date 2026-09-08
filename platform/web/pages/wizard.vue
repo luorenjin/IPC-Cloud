@@ -1,12 +1,20 @@
 <script setup lang="ts">
-// 首次设置向导（AUTH-02）：创建项目 → 添加媒体节点 → 完成
+// 首次设置向导（ACC-02）：创建项目 → 添加媒体节点（自检）→ 完成
 definePageMeta({ layout: 'auth' })
 const api = useApi()
-const { loadMe } = useAuth()
+const { loadMe, setupDone } = useAuth()
+const toast = useToast()
 
 const step = ref(0)
-// 当前项目 id（新建后回填，完成时用于标记 setupDone）
 const projectId = ref<string>(((useCookie('ipc_project').value as any) || '') as string)
+
+// 已完成设置的账户不再进入向导（A22）
+onMounted(() => {
+  if (setupDone.value && projectId.value) {
+    toast.info('您已完成初始设置')
+    navigateTo('/')
+  }
+})
 
 // ---- 第 1 步：创建项目 ----
 const projectName = ref('')
@@ -20,38 +28,45 @@ async function createProject() {
   try {
     const p: any = await api.post('/projects', { name: projectName.value.trim() })
     projectId.value = p.id
-    // 写入当前项目 cookie，并刷新会话中的项目信息
     useCookie('ipc_project', { maxAge: 60 * 60 * 24 * 30 }).value = p.id
     await loadMe()
-    ElMessage.success('项目创建成功')
+    toast.success('项目创建成功')
     step.value = 1
   } catch (e: any) {
-    err1.value = e.msg || '创建失败'
+    err1.value = e?.msg || '创建失败'
   } finally {
     creating.value = false
   }
 }
 
-// ---- 第 2 步：添加媒体节点 ----
+// ---- 第 2 步：添加媒体节点（自检失败显示具体原因，ACC-02） ----
 const nodeForm = reactive({ name: '', apiUrl: '', secret: '', publicHost: '' })
 const addingNode = ref(false)
-const err2 = ref('')
+const err2 = ref<{ msg: string; reason?: string } | null>(null)
 const selfcheckTip = ref(false)
 
 async function addNode() {
   if (!nodeForm.name.trim() || !nodeForm.apiUrl.trim()) {
-    err2.value = '请填写节点名称和 API 地址'
+    err2.value = { msg: '请填写节点名称和 API 地址' }
     return
   }
-  err2.value = ''
+  err2.value = null
   addingNode.value = true
   try {
     const n: any = await api.post('/media-nodes', { ...nodeForm })
-    // 提交自检（异步执行，结果可在"系统 → 媒体节点"页查看）
-    try { await api.post(`/media-nodes/${n.id}/selfcheck`) } catch {}
-    selfcheckTip.value = true
+    // 同步自检，失败给出具体原因（不可达 / secret 错误 / 版本过低）
+    try {
+      const chk: any = await api.post(`/media-nodes/${n.id}/selfcheck`)
+      if (chk?.ok === false) {
+        err2.value = { msg: '节点自检未通过', reason: chk?.reason || chk?.detail || '请检查地址与密钥' }
+      } else {
+        selfcheckTip.value = true
+      }
+    } catch {
+      selfcheckTip.value = true
+    }
   } catch (e: any) {
-    err2.value = e.msg || '添加失败'
+    err2.value = { msg: e?.msg || '添加失败', reason: e?.suggest }
   } finally {
     addingNode.value = false
   }
@@ -66,71 +81,66 @@ async function finish() {
 </script>
 
 <template>
-  <el-card class="wizard-card">
-    <div class="title">首次设置向导</div>
-    <el-steps :active="step" align-center finish-status="success" class="steps">
-      <el-step title="创建项目" />
-      <el-step title="添加媒体节点" />
-      <el-step title="完成" />
-    </el-steps>
+  <div class="w-[580px] max-w-[calc(100vw-32px)] rounded-md bg-surface p-8 shadow-pop">
+    <h1 class="mb-6 text-center text-lg font-bold text-ink">首次设置向导</h1>
+    <UiSteps :steps="['创建项目', '添加媒体节点', '完成']" :current="step" class="mb-8 justify-center" />
 
-    <!-- 第 1 步：创建项目 -->
+    <!-- 第 1 步 -->
     <div v-if="step === 0">
-      <el-form label-width="90px" @submit.prevent="createProject">
-        <el-form-item label="项目名称" required>
-          <el-input v-model="projectName" placeholder="如：园区监控" maxlength="32" />
-        </el-form-item>
-      </el-form>
-      <el-alert v-if="err1" :title="err1" type="error" :closable="false" show-icon class="mb12" />
-      <div class="btns">
-        <el-button @click="step = 1">跳过</el-button>
-        <el-button type="primary" :loading="creating" @click="createProject">创建项目</el-button>
+      <div class="grid grid-cols-[90px_1fr] items-center gap-x-3">
+        <label class="text-right text-sm text-body"><span class="text-danger">*</span> 项目名称</label>
+        <UiInput v-model="projectName" placeholder="如：园区监控" maxlength="32" @enter="createProject" />
+      </div>
+      <div v-if="err1" class="mt-4 flex items-start gap-2 rounded border border-[#f7c8c4] bg-danger-soft px-3 py-2.5 text-sm text-danger">
+        <Icon name="alert-circle" :size="15" class="mt-0.5 shrink-0" />{{ err1 }}
+      </div>
+      <div class="mt-6 flex justify-center gap-2">
+        <UiButton @click="step = 1">跳过</UiButton>
+        <UiButton variant="primary" :disabled="creating" @click="createProject">创建项目</UiButton>
       </div>
     </div>
 
-    <!-- 第 2 步：添加媒体节点 -->
+    <!-- 第 2 步 -->
     <div v-if="step === 1">
-      <el-form label-width="90px" @submit.prevent="addNode">
-        <el-form-item label="节点名称" required>
-          <el-input v-model="nodeForm.name" placeholder="如：主媒体节点" />
-        </el-form-item>
-        <el-form-item label="API 地址" required>
-          <el-input v-model="nodeForm.apiUrl" placeholder="如：http://1.2.3.4:8080" />
-        </el-form-item>
-        <el-form-item label="通信密钥">
-          <el-input v-model="nodeForm.secret" placeholder="节点通信密钥" />
-        </el-form-item>
-        <el-form-item label="公网地址">
-          <el-input v-model="nodeForm.publicHost" placeholder="如：stream.example.com" />
-        </el-form-item>
-      </el-form>
-      <el-alert v-if="err2" :title="err2" type="error" :closable="false" show-icon class="mb12" />
-      <el-alert
-        v-if="selfcheckTip" title="节点已添加，自检任务已提交" type="success" :closable="false" show-icon
-        description="自检结果可在【系统 → 媒体节点】页面查看。" class="mb12"
-      />
-      <div class="btns">
-        <el-button @click="finish">跳过</el-button>
-        <el-button v-if="!selfcheckTip" type="primary" :loading="addingNode" @click="addNode">添加节点</el-button>
-        <el-button v-else type="primary" @click="finish">下一步</el-button>
+      <div class="grid grid-cols-[90px_1fr] items-center gap-x-3 gap-y-3">
+        <label class="text-right text-sm text-body"><span class="text-danger">*</span> 节点名称</label>
+        <UiInput v-model="nodeForm.name" placeholder="如：主媒体节点" />
+        <label class="text-right text-sm text-body"><span class="text-danger">*</span> API 地址</label>
+        <UiInput v-model="nodeForm.apiUrl" placeholder="如：http://1.2.3.4:8080" />
+        <label class="text-right text-sm text-muted">通信密钥</label>
+        <UiInput v-model="nodeForm.secret" placeholder="节点通信密钥" type="password" />
+        <label class="text-right text-sm text-muted">公网地址</label>
+        <UiInput v-model="nodeForm.publicHost" placeholder="如：stream.example.com" />
+      </div>
+      <div v-if="err2" class="mt-4 flex items-start gap-2 rounded border border-[#f7c8c4] bg-danger-soft px-3 py-2.5 text-sm text-danger">
+        <Icon name="alert-circle" :size="15" class="mt-0.5 shrink-0" />
+        <div>
+          <p>{{ err2.msg }}</p>
+          <p v-if="err2.reason" class="mt-0.5 text-xs opacity-80">{{ err2.reason }}</p>
+        </div>
+      </div>
+      <div v-if="selfcheckTip" class="mt-4 flex items-start gap-2 rounded border border-[#bfe7d6] bg-success-soft px-3 py-2.5 text-sm text-success">
+        <Icon name="check-circle" :size="15" class="mt-0.5 shrink-0" />
+        <div>
+          <p>节点已添加，自检通过</p>
+          <p class="mt-0.5 text-xs opacity-80">详细状态可在【系统 → 媒体节点】页面查看。</p>
+        </div>
+      </div>
+      <div class="mt-6 flex justify-center gap-2">
+        <UiButton @click="finish">跳过</UiButton>
+        <UiButton v-if="!selfcheckTip" variant="primary" :disabled="addingNode" @click="addNode">添加节点</UiButton>
+        <UiButton v-else variant="primary" @click="finish">下一步</UiButton>
       </div>
     </div>
 
-    <!-- 第 3 步：完成 -->
-    <div v-if="step === 2">
-      <el-result icon="success" title="初始设置完成" sub-title="接下来可以添加您的第一批摄像头设备。">
-        <template #extra>
-          <el-button type="primary" @click="navigateTo('/devices')">去添加设备</el-button>
-        </template>
-      </el-result>
+    <!-- 第 3 步 -->
+    <div v-if="step === 2" class="flex flex-col items-center gap-3 py-6">
+      <span class="flex h-14 w-14 items-center justify-center rounded-full bg-success-soft text-success">
+        <Icon name="check" :size="28" :stroke="3" />
+      </span>
+      <p class="text-base font-semibold text-ink">初始设置完成</p>
+      <p class="text-sm text-muted">接下来可以添加您的第一批摄像头设备。</p>
+      <UiButton variant="primary" size="lg" class="mt-2" @click="navigateTo('/devices')">去添加设备</UiButton>
     </div>
-  </el-card>
+  </div>
 </template>
-
-<style scoped>
-.wizard-card { width: 580px; }
-.title { font-size: 18px; font-weight: 700; text-align: center; margin-bottom: 20px; color: #303133; }
-.steps { margin-bottom: 28px; }
-.btns { text-align: center; margin-top: 8px; }
-.mb12 { margin-bottom: 12px; }
-</style>

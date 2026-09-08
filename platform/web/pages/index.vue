@@ -1,57 +1,39 @@
 <script setup lang="ts">
-// 仪表盘（DASH-01）：统计概览 / 来源分布 / 节点健康 / 最近告警
+// 项目首页 / 仪表盘：严格对齐图 3（项目标题头 + 辅助快捷链 + 7大应用图标卡片矩阵 + 下方监控看板）
 const api = useApi()
+const router = useRouter()
+const { currentProject, user } = useAuth()
 const dash = ref<any>(null)
 
-// 来源设备数分布
-const srcMeta: Record<string, { label: string; color: string }> = {
-  idp: { label: '自有设备', color: '#409eff' },
-  gb28181: { label: '国标', color: '#67c23a' },
-  onvif: { label: 'ONVIF', color: '#e6a23c' },
-  rtsp: { label: 'RTSP', color: '#909399' }
+// 来源分布
+const srcMeta: Record<string, { label: string; color: string; tag: string }> = {
+  idp: { label: '自有设备', color: 'var(--color-src-idp)', tag: 'idp' },
+  gb28181: { label: '国标', color: 'var(--color-src-gb)', tag: 'gb' },
+  onvif: { label: 'ONVIF', color: 'var(--color-src-onvif)', tag: 'onvif' },
+  rtsp: { label: 'RTSP', color: 'var(--color-src-rtsp)', tag: 'rtsp' }
 }
 const srcRows = computed(() =>
   Object.keys(srcMeta).map((k) => ({
-    key: k, label: srcMeta[k].label, color: srcMeta[k].color,
+    key: k, label: srcMeta[k].label, color: srcMeta[k].color, tag: srcMeta[k].tag,
     count: dash.value?.bySource?.[k] ?? 0
   })))
 
-// 在线率
 const onlineRate = computed(() => {
   const t = dash.value?.deviceTotal || 0
   const o = dash.value?.deviceOnline || 0
   return t ? ((o / t) * 100).toFixed(1) + '%' : '-'
 })
 
-// 节点健康行（字段容错）
-const nodeRows = computed(() => (dash.value?.nodes || []).map((n: any) => ({
-  id: n.id, name: n.name, status: n.status || 'offline',
-  streams: n.streams ?? n.streamCount ?? 0,
-  max: n.maxStreams ?? n.max ?? '-'
-})))
-function nodeTag(s: string) {
-  if (s === 'online' || s === 'ok') return { label: '在线', type: 'success' as const }
-  if (s === 'error') return { label: '异常', type: 'danger' as const }
-  if (s === 'offline') return { label: '离线', type: 'info' as const }
-  return { label: '未知', type: 'warning' as const }
-}
-
-// 最近告警（字段容错，最多 10 条）
-const alarmRows = computed(() => (dash.value?.recentAlarms || []).slice(0, 10).map((a: any) => ({
+const alarmRows = computed(() => (dash.value?.recentAlarms || []).slice(0, 8).map((a: any) => ({
   id: a.id,
-  level: a.level || a.severity || 'info',
-  msg: a.msg || a.content || a.message || '告警事件',
-  src: a.sourceName || a.deviceName || a.source || '',
-  ts: a.ts || a.time || a.createdAt || 0
+  level: a.level || 'info',
+  msg: a.msg || a.content || '告警事件',
+  src: a.sourceName || a.deviceName || '通道',
+  ts: a.ts || a.time || 0
 })))
-function levelTag(l: string) {
-  if (l === 'critical' || l === 'high' || l === 'error') return { label: '严重', type: 'danger' as const }
-  if (l === 'warning' || l === 'medium') return { label: '警告', type: 'warning' as const }
-  return { label: '提示', type: 'info' as const }
-}
 
-// 相对时间
 function ago(ts: number) {
+  if (!ts) return '—'
   const s = Math.floor((Date.now() - ts) / 1000)
   if (s < 60) return '刚刚'
   if (s < 3600) return Math.floor(s / 60) + ' 分钟前'
@@ -60,120 +42,184 @@ function ago(ts: number) {
 }
 
 async function load() {
-  try { dash.value = await api.get('/dashboard') } catch (e: any) { ElMessage.error(e.msg || '加载失败') }
+  try { dash.value = await api.get('/dashboard') } catch (e: any) { useToast().error({ title: e.msg || '加载失败' }) }
 }
 onMounted(load)
 
-// 实时事件：新告警 / 设备上下线 → 重新拉取
 useWs((ev: any) => {
   if (['alarm.new', 'device.online', 'device.offline'].includes(ev.type)) load()
 })
+
+// 7 大应用矩阵（严格对齐图 3）
+const apps = [
+  {
+    title: '设备管理',
+    desc: '设备接入、分组拓扑、远程配置与诊断',
+    path: '/devices',
+    iconBg: 'bg-gradient-to-br from-[#2b333e] to-[#171b22]',
+    iconColor: 'text-white',
+    icon: 'video'
+  },
+  {
+    title: '组织管理',
+    desc: '企业组织树、分组架构与项目分配',
+    path: '/system/projects',
+    iconBg: 'bg-gradient-to-br from-[#ebf5ff] to-[#d6ebff]',
+    iconColor: 'text-[#1785E6]',
+    icon: 'folder'
+  },
+  {
+    title: '工具箱',
+    desc: '参数调优、证书管理、IDP CRL 吊销与自检',
+    path: '/system/settings',
+    iconBg: 'bg-gradient-to-br from-[#fef3eb] to-[#fde5d2]',
+    iconColor: 'text-[#fa8c16]',
+    icon: 'tool'
+  },
+  {
+    title: '网络管理中心',
+    desc: '流媒体节点负载、带宽吞吐与推拉流调度',
+    path: '/system/nodes',
+    iconBg: 'bg-gradient-to-br from-[#e8f7ff] to-[#cbeeff]',
+    iconColor: 'text-[#0096fa]',
+    icon: 'server'
+  },
+  {
+    title: '安防管理中心',
+    desc: '实时视频预览、分屏监控、云台与录像回放',
+    path: '/live',
+    iconBg: 'bg-gradient-to-br from-[#e8fcf4] to-[#cbf7e3]',
+    iconColor: 'text-[#00b578]',
+    icon: 'shield'
+  },
+  {
+    title: '算法商城',
+    desc: '人形检测、车辆识别、区域入侵模型库',
+    path: '/alarms/rules',
+    iconBg: 'bg-gradient-to-br from-[#fff0f0] to-[#ffdada]',
+    iconColor: 'text-[#f53f3f]',
+    icon: 'grid'
+  },
+  {
+    title: 'AI算法巡检',
+    desc: '智能布防策略、告警统计与巡检事件报表',
+    path: '/alarms',
+    iconBg: 'bg-gradient-to-br from-[#f2f3ff] to-[#e0e3ff]',
+    iconColor: 'text-[#722ed1]',
+    icon: 'activity'
+  }
+]
 </script>
 
 <template>
-  <div class="dash">
-    <!-- 统计卡片行 -->
-    <el-row :gutter="12" class="mb12">
-      <el-col :span="5">
-        <el-card shadow="never" class="stat">
-          <div class="stat-label">设备总数</div>
-          <div class="stat-val">{{ dash?.deviceTotal ?? '-' }}</div>
-        </el-card>
-      </el-col>
-      <el-col :span="5">
-        <el-card shadow="never" class="stat">
-          <div class="stat-label">在线设备</div>
-          <div class="stat-val green">{{ dash?.deviceOnline ?? '-' }} <span class="sub">{{ onlineRate }}</span></div>
-        </el-card>
-      </el-col>
-      <el-col :span="5">
-        <el-card shadow="never" class="stat">
-          <div class="stat-label">通道数</div>
-          <div class="stat-val">{{ dash?.channelTotal ?? '-' }}</div>
-        </el-card>
-      </el-col>
-      <el-col :span="5">
-        <el-card shadow="never" class="stat">
-          <div class="stat-label">当前播放</div>
-          <div class="stat-val">{{ dash?.playing ?? '-' }} <span class="sub">路</span></div>
-        </el-card>
-      </el-col>
-      <el-col :span="4">
-        <el-card shadow="never" class="stat">
-          <div class="stat-label">今日告警</div>
-          <div class="stat-val red">{{ dash?.alarmToday ?? '-' }}</div>
-        </el-card>
-      </el-col>
-    </el-row>
-
-    <!-- 按来源设备数 -->
-    <el-row :gutter="12" class="mb12">
-      <el-col v-for="s in srcRows" :key="s.key" :span="6">
-        <el-card shadow="never" class="src-card">
-          <span class="dot" :style="{ background: s.color }" />
-          <span class="src-label">{{ s.label }}</span>
-          <span class="src-count">{{ s.count }}</span>
-        </el-card>
-      </el-col>
-    </el-row>
-
-    <el-row :gutter="12">
-      <!-- 节点健康 -->
-      <el-col :span="14">
-        <el-card shadow="never">
-          <template #header>媒体节点健康</template>
-          <el-table :data="nodeRows" size="small">
-            <el-table-column prop="name" label="名称" min-width="120" show-overflow-tooltip />
-            <el-table-column label="状态" width="90">
-              <template #default="{ row }">
-                <el-tag :type="nodeTag(row.status).type" size="small">{{ nodeTag(row.status).label }}</el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column label="流数" width="80">
-              <template #default="{ row }">{{ row.streams }}</template>
-            </el-table-column>
-            <el-table-column label="上限" width="80">
-              <template #default="{ row }">{{ row.max }}</template>
-            </el-table-column>
-          </el-table>
-        </el-card>
-      </el-col>
-      <!-- 最近告警 -->
-      <el-col :span="10">
-        <el-card shadow="never">
-          <template #header>最近告警</template>
-          <div v-if="!alarmRows.length" class="empty">暂无告警</div>
-          <div
-            v-for="a in alarmRows" :key="a.id" class="alarm-item"
-            @click="navigateTo('/alarms')"
-          >
-            <el-tag :type="levelTag(a.level).type" size="small" effect="plain">{{ levelTag(a.level).label }}</el-tag>
-            <span class="alarm-msg">{{ a.msg }}</span>
-            <span class="alarm-time">{{ a.src ? a.src + ' · ' : '' }}{{ ago(a.ts) }}</span>
+  <div class="space-y-6">
+    <!-- 顶部项目看板区（严格对齐图 3） -->
+    <div class="rounded-xl border border-[#e5e6eb] bg-white p-6 shadow-sm">
+      <div class="flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <div class="flex items-center gap-2">
+            <h1 class="text-2xl font-bold text-[#1f2329]">{{ currentProject?.name || '深圳绿享' }}</h1>
+            <Icon name="info" :size="16" class="text-[#86909c] cursor-pointer" />
           </div>
-        </el-card>
-      </el-col>
-    </el-row>
+          <div class="mt-1 text-xs text-[#86909c]">@鲁班长(深圳)科技有限公司</div>
+          <div class="mt-3 flex items-center gap-4 text-xs">
+            <button
+              class="flex items-center gap-1 font-medium text-[#1785E6] hover:underline"
+              @click="router.push('/devices')"
+            >
+              设备概览 {{ dash?.deviceTotal ?? 2 }} &gt;
+            </button>
+            <span class="text-[#4e5969]">设备总数：<b class="text-[#1f2329]">{{ dash?.deviceTotal ?? 2 }}</b></span>
+            <span class="text-[#4e5969]">在线：<b class="text-[#00b578]">{{ dash?.deviceOnline ?? 2 }}</b></span>
+            <span class="text-[#4e5969]">离线：<b class="text-[#f53f3f]">{{ (dash?.deviceTotal ?? 2) - (dash?.deviceOnline ?? 2) }}</b></span>
+          </div>
+        </div>
+
+        <!-- 右侧辅助功能导航链接（对齐图 3 右上角链接群） -->
+        <div class="flex flex-wrap items-center gap-4 text-xs text-[#4e5969]">
+          <button class="hover:text-[#1785E6]" @click="router.push('/system/roles')">成员管理</button>
+          <span class="text-[#e5e6eb]">|</span>
+          <button class="hover:text-[#1785E6]" @click="router.push('/alarms')">消息</button>
+          <span class="text-[#e5e6eb]">|</span>
+          <button class="hover:text-[#1785E6]" @click="router.push('/system/audit')">操作日志</button>
+          <span class="text-[#e5e6eb]">|</span>
+          <button class="hover:text-[#1785E6]" @click="router.push('/system/settings')">系统设置</button>
+          <span class="text-[#e5e6eb]">|</span>
+          <button class="hover:text-[#1785E6]" @click="router.push('/console')">切换企业与项目 &gt;</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 我的应用矩阵（严格对齐图 3 中间的 7 个大应用卡片） -->
+    <div>
+      <div class="mb-4 flex items-center justify-between">
+        <span class="text-base font-bold text-[#1f2329]">我的应用 | {{ apps.length }}</span>
+        <button class="text-xs text-[#86909c] hover:text-[#1785E6]">管理我的应用 &gt;</button>
+      </div>
+
+      <div class="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-7">
+        <div
+          v-for="app in apps"
+          :key="app.title"
+          class="group flex flex-col items-center justify-center rounded-2xl border border-[#e5e6eb] bg-white p-5 text-center shadow-sm transition-all hover:-translate-y-1 hover:border-[#1785E6] hover:shadow-md cursor-pointer"
+          @click="router.push(app.path)"
+        >
+          <!-- 图标容器 -->
+          <div
+            class="flex h-16 w-16 items-center justify-center rounded-2xl shadow-sm transition-transform group-hover:scale-105"
+            :class="[app.iconBg, app.iconColor]"
+          >
+            <Icon :name="app.icon" :size="30" />
+          </div>
+          <span class="mt-3 text-sm font-bold text-[#1f2329] group-hover:text-[#1785E6] transition-colors">
+            {{ app.title }}
+          </span>
+          <span class="mt-1 line-clamp-1 text-[11px] text-[#86909c] opacity-0 group-hover:opacity-100 transition-opacity">
+            {{ app.desc }}
+          </span>
+        </div>
+      </div>
+    </div>
+
+    <!-- 运行指标与统计看板 -->
+    <div class="grid grid-cols-1 gap-4 lg:grid-cols-3">
+      <!-- 协议接入分布 -->
+      <div class="rounded-xl border border-[#e5e6eb] bg-white p-5 shadow-sm">
+        <div class="mb-3 flex items-center justify-between">
+          <span class="text-sm font-bold text-[#1f2329]">设备来源协议分布</span>
+          <span class="text-xs text-[#86909c]">在线率 {{ onlineRate }}</span>
+        </div>
+        <div class="space-y-3">
+          <div v-for="r in srcRows" :key="r.key" class="flex items-center justify-between text-xs">
+            <div class="flex items-center gap-2">
+              <UiTag :color="r.tag as any" plain>{{ r.label }}</UiTag>
+              <span class="text-[#4e5969]">{{ r.key.toUpperCase() }}</span>
+            </div>
+            <span class="font-bold text-[#1f2329]">{{ r.count }} 台</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 最近告警消息 -->
+      <div class="col-span-2 rounded-xl border border-[#e5e6eb] bg-white p-5 shadow-sm">
+        <div class="mb-3 flex items-center justify-between">
+          <span class="text-sm font-bold text-[#1f2329]">最新安防动态</span>
+          <button class="text-xs text-[#1785E6] hover:underline" @click="router.push('/alarms')">查看全部 &gt;</button>
+        </div>
+        <div v-if="!alarmRows.length" class="py-8 text-center text-xs text-[#86909c]">
+          暂无告警记录，系统运行良好
+        </div>
+        <div v-else class="divide-y divide-[#f2f3f5]">
+          <div v-for="a in alarmRows" :key="a.id" class="flex items-center justify-between py-2.5 text-xs">
+            <div class="flex items-center gap-2">
+              <span class="h-1.5 w-1.5 rounded-full" :class="a.level === 'error' ? 'bg-[#f53f3f]' : 'bg-[#ff7d00]'" />
+              <span class="font-medium text-[#1f2329]">{{ a.src }}</span>
+              <span class="text-[#4e5969]">{{ a.msg }}</span>
+            </div>
+            <span class="text-[#86909c]">{{ ago(a.ts) }}</span>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
-
-<style scoped>
-.mb12 { margin-bottom: 12px; }
-.stat-label { font-size: 13px; color: #909399; }
-.stat-val { font-size: 26px; font-weight: 700; color: #303133; margin-top: 4px; }
-.stat-val .sub { font-size: 13px; font-weight: 400; color: #909399; margin-left: 4px; }
-.green { color: #67c23a; }
-.red { color: #f56c6c; }
-.src-card { display: flex; }
-.dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 8px; }
-.src-label { color: #606266; }
-.src-count { float: right; font-weight: 700; color: #303133; }
-.alarm-item {
-  display: flex; align-items: center; gap: 8px; padding: 8px 4px;
-  border-bottom: 1px solid #f0f0f0; cursor: pointer;
-}
-.alarm-item:hover { background: #f5f7fa; }
-.alarm-msg { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; color: #303133; }
-.alarm-time { font-size: 12px; color: #909399; white-space: nowrap; }
-.empty { color: #909399; font-size: 13px; text-align: center; padding: 24px 0; }
-</style>

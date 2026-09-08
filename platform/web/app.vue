@@ -2,6 +2,8 @@
   <NuxtLayout>
     <NuxtPage />
   </NuxtLayout>
+  <UiToaster />
+  <UiConfirmDialog />
 </template>
 
 <style>

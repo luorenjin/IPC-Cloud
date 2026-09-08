@@ -1,6 +1,8 @@
 <script setup lang="ts">
-// 项目与分组管理（ACC-03/04）：左侧项目列表与切换，右侧当前项目的分组树
+// 项目与分组管理（ACC-03/04）：左侧项目列表与启停/重命名，右侧当前项目分组树（≤4 级、同级唯一、拖拽同级排序）
 const api = useApi()
+const toast = useToast()
+const confirm = useConfirm()
 const { currentProject, switchProject, loadMe } = useAuth()
 
 /* ---------------- 项目列表 ---------------- */
@@ -13,7 +15,7 @@ async function loadProjects() {
     const res: any = await api.get('/projects')
     projects.value = res?.items || []
   } catch (e: any) {
-    ElMessage.error(e?.msg || '加载项目列表失败')
+    toastApiError(e, '加载项目列表失败')
   } finally {
     projLoading.value = false
   }
@@ -25,6 +27,7 @@ const projDlg = reactive({
   mode: 'create' as 'create' | 'edit',
   id: null as any,
   name: '',
+  tz: 'Asia/Shanghai',
   saving: false
 })
 
@@ -32,38 +35,40 @@ function openProjDlg(mode: 'create' | 'edit', row?: any) {
   projDlg.mode = mode
   projDlg.id = row?.id ?? null
   projDlg.name = row?.name || ''
+  projDlg.tz = row?.tz || 'Asia/Shanghai'
   projDlg.visible = true
 }
 
 async function saveProj() {
-  if (!projDlg.name.trim()) return ElMessage.warning('请输入项目名称')
+  if (!projDlg.name.trim()) return toast.warning('请输入项目名称')
   projDlg.saving = true
   try {
     if (projDlg.mode === 'create') {
-      await api.post('/projects', { name: projDlg.name.trim() })
-      ElMessage.success('项目已创建')
+      await api.post('/projects', { name: projDlg.name.trim(), tz: projDlg.tz.trim() || undefined })
+      toast.success('项目已创建')
     } else {
-      await api.put('/projects/' + projDlg.id, { name: projDlg.name.trim() })
-      ElMessage.success('已重命名')
+      await api.put('/projects/' + projDlg.id, { name: projDlg.name.trim(), tz: projDlg.tz.trim() || undefined })
+      toast.success('已重命名')
     }
     projDlg.visible = false
     await loadProjects()
     loadMe() // 同步顶栏项目选择器
   } catch (e: any) {
-    ElMessage.error(e?.msg || '保存失败')
+    toastApiError(e, '保存失败')
   } finally {
     projDlg.saving = false
   }
 }
 
 /* 启用/停用项目 */
-async function toggleProject(row: any) {
+async function toggleProject(row: any, v: boolean) {
   try {
-    await api.put('/projects/' + row.id, { enabled: row.enabled })
-    ElMessage.success(row.enabled ? '已启用' : '已停用')
+    await api.put('/projects/' + row.id, { enabled: v })
+    row.enabled = v
+    toast.success(v ? '已启用' : '已停用')
     loadMe()
   } catch (e: any) {
-    ElMessage.error(e?.msg || '操作失败')
+    toastApiError(e, '操作失败')
     await loadProjects() // 失败回显真实状态
   }
 }
@@ -71,7 +76,7 @@ async function toggleProject(row: any) {
 /* 切换当前项目 */
 function useProject(row: any) {
   switchProject(row)
-  ElMessage.success('已切换到项目「' + row.name + '」')
+  toast.success('已切换到项目「' + row.name + '」')
 }
 
 /* ---------------- 分组树 ---------------- */
@@ -85,7 +90,7 @@ async function loadGroups() {
     const res: any = await api.get('/groups', { projectId: currentProject.value.id })
     groups.value = res?.items || []
   } catch (e: any) {
-    ElMessage.error(e?.msg || '加载分组失败')
+    toastApiError(e, '加载分组失败')
   } finally {
     treeLoading.value = false
   }
@@ -111,6 +116,24 @@ function buildTree(items: any[]) {
 }
 const treeData = computed(() => buildTree(groups.value))
 
+// UiTree 节点映射（meta 携带原始分组数据）
+function toTreeNodes(arr: any[]): any[] {
+  return arr.map((n) => ({ label: n.name, value: String(n.id), meta: n, children: toTreeNodes(n.children || []) }))
+}
+const treeNodes = computed(() => toTreeNodes(treeData.value))
+
+function depthOf(node: any): number {
+  let d = 1
+  let p = node.parentId
+  while (p) {
+    const g = groups.value.find((x) => x.id === p)
+    if (!g) break
+    d++
+    p = g.parentId
+  }
+  return d
+}
+
 function groupName(id: any) {
   const g = groups.value.find((x) => x.id === id)
   return g?.name || String(id)
@@ -128,6 +151,9 @@ const grpDlg = reactive({
 
 // create：传 node 则为"新增子分组"（父节点为 node），否则为"新增根分组"
 function openGrpDlg(mode: 'create' | 'edit', node?: any) {
+  if (mode === 'create' && node && depthOf(node) >= 4) {
+    return toast.warning('分组层级最多 4 级，不能在末级分组下继续新增')
+  }
   grpDlg.mode = mode
   if (mode === 'edit') {
     grpDlg.id = node.id
@@ -142,42 +168,92 @@ function openGrpDlg(mode: 'create' | 'edit', node?: any) {
 }
 
 async function saveGrp() {
-  if (!grpDlg.name.trim()) return ElMessage.warning('请输入分组名称')
+  const name = grpDlg.name.trim()
+  if (!name) return toast.warning('请输入分组名称')
+  // 同级唯一（前端预检，后端同样校验）
+  const dup = groups.value.some(
+    (g) => (g.parentId || '') === (grpDlg.parentId || '') && g.name === name && g.id !== grpDlg.id
+  )
+  if (dup) return toast.warning('同级分组名已存在，请更换名称')
   grpDlg.saving = true
   try {
     if (grpDlg.mode === 'edit') {
-      await api.put('/groups/' + grpDlg.id, { name: grpDlg.name.trim() })
+      await api.put('/groups/' + grpDlg.id, { name })
     } else {
-      await api.post('/groups', { name: grpDlg.name.trim(), parentId: grpDlg.parentId })
+      await api.post('/groups', { name, parentId: grpDlg.parentId })
     }
-    ElMessage.success('已保存')
+    toast.success('已保存')
     grpDlg.visible = false
     await loadGroups()
   } catch (e: any) {
-    ElMessage.error(e?.msg || '保存失败')
+    toastApiError(e, '保存失败')
   } finally {
     grpDlg.saving = false
   }
 }
 
-/* 删除分组（失败时提示后端 msg，如"分组下存在设备"） */
+/* 删除分组（含设备的分组后端拦截："分组下存在设备，请先转移"） */
 async function removeGroup(node: any) {
-  try {
-    await ElMessageBox.confirm('确定删除分组「' + node.name + '」？', '删除分组', {
-      type: 'warning',
-      confirmButtonText: '删除',
-      cancelButtonText: '取消'
-    })
-  } catch {
-    return
-  }
+  const ok = await confirm.ask({
+    title: '删除分组',
+    message: '确定删除分组「' + node.name + '」？',
+    detail: '分组下存在设备或子分组时无法删除，请先转移。',
+    danger: true,
+    confirmText: '删除'
+  })
+  if (!ok) return
   try {
     await api.del('/groups/' + node.id)
-    ElMessage.success('已删除')
+    toast.success('已删除')
     await loadGroups()
   } catch (e: any) {
-    ElMessage.error(e?.msg || '删除失败')
+    toastApiError(e, '删除失败')
   }
+}
+
+/* ---------------- 拖拽同级排序 ---------------- */
+const dragId = ref<string | null>(null)
+const dropOverId = ref<string | null>(null)
+
+function onNodeDragStart(id: string, e: DragEvent) {
+  dragId.value = id
+  if (e.dataTransfer) {
+    e.dataTransfer.effectAllowed = 'move'
+    e.dataTransfer.setData('text/plain', id)
+  }
+}
+function onNodeDragOver(id: string, e: DragEvent) {
+  if (!dragId.value || dragId.value === id) return
+  e.preventDefault()
+  dropOverId.value = id
+}
+async function onNodeDrop(targetId: string) {
+  const src = dragId.value
+  dragId.value = null
+  dropOverId.value = null
+  if (!src || src === targetId) return
+  const g1 = groups.value.find((g) => String(g.id) === String(src))
+  const g2 = groups.value.find((g) => String(g.id) === String(targetId))
+  if (!g1 || !g2) return
+  if ((g1.parentId || '') !== (g2.parentId || '')) {
+    toast.warning('分组暂不支持跨级移动，仅支持同级拖拽排序')
+    return
+  }
+  const parentId = g1.parentId || ''
+  const sibs = groups.value
+    .filter((g) => (g.parentId || '') === parentId)
+    .sort((a, b) => (a.sort ?? 0) - (b.sort ?? 0))
+  const from = sibs.findIndex((g) => g.id === g1.id)
+  const to = sibs.findIndex((g) => g.id === g2.id)
+  if (from < 0 || to < 0) return
+  sibs.splice(to, 0, ...sibs.splice(from, 1))
+  sibs.forEach((g, i) => {
+    if (g.sort !== i) {
+      g.sort = i
+      api.put('/groups/' + g.id, { sort: i }).catch(() => {})
+    }
+  })
+  toast.success('分组顺序已更新')
 }
 
 /* 切换项目后刷新分组树 */
@@ -194,137 +270,119 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="page">
+  <div class="flex items-start gap-3">
     <!-- 左侧：项目列表 -->
-    <el-card class="left" shadow="never">
-      <template #header>
-        <div class="card-head">
-          <span>项目列表</span>
-          <el-button type="primary" size="small" @click="openProjDlg('create')">新建项目</el-button>
-        </div>
+    <UiCard title="项目列表" class="w-[400px] shrink-0 self-start">
+      <template #extra>
+        <UiButton variant="primary" size="sm" @click="openProjDlg('create')">
+          <UiIcon name="plus" :size="14" />新建项目
+        </UiButton>
       </template>
-      <div v-loading="projLoading" class="proj-list">
-        <div
-          v-for="p in projects"
-          :key="p.id"
-          class="proj-item"
-          :class="{ active: p.id === currentProject?.id }"
-        >
-          <div class="proj-name">
-            {{ p.name }}
-            <el-tag v-if="!p.enabled" size="small" type="info">已停用</el-tag>
-          </div>
-          <div class="proj-meta">时区 {{ p.tz || '-' }} · {{ fmtTime(p.createdAt) }}</div>
-          <div class="proj-ops">
-            <el-switch
-              v-model="p.enabled"
-              size="small"
-              :active-value="true"
-              :inactive-value="false"
-              @change="toggleProject(p)"
-            />
-            <el-button link type="primary" size="small" @click="openProjDlg('edit', p)">重命名</el-button>
-            <el-button
-              v-if="p.id !== currentProject?.id"
-              link
-              type="success"
-              size="small"
-              @click="useProject(p)"
-            >切换到此项目</el-button>
-            <el-tag v-else size="small" type="success">当前项目</el-tag>
+      <UiLoading :loading="projLoading">
+        <div v-if="projects.length" class="space-y-2.5">
+          <div
+            v-for="p in projects" :key="p.id"
+            class="rounded border p-3 transition-colors"
+            :class="p.id === currentProject?.id ? 'border-primary bg-primary-soft' : 'border-line bg-surface'"
+          >
+            <div class="flex items-center gap-2">
+              <span class="truncate text-sm font-semibold text-ink">{{ p.name }}</span>
+              <UiTag v-if="!p.enabled" color="info">已停用</UiTag>
+              <UiTag v-else-if="p.id === currentProject?.id" color="success" dot>当前项目</UiTag>
+            </div>
+            <div class="mt-1.5 text-xs text-placeholder">
+              时区 {{ p.tz || '-' }} · 默认停流 {{ p.settings?.streamIdleSec ?? '-' }} 秒 · {{ fmtTime(p.createdAt) }}
+            </div>
+            <div class="mt-2 flex flex-wrap items-center gap-2">
+              <UiSwitch :model-value="!!p.enabled" size="sm" @update:model-value="(v: boolean) => toggleProject(p, v)" />
+              <span class="text-xs text-muted">{{ p.enabled ? '启用中' : '已停用' }}</span>
+              <UiButton variant="text" size="sm" class="ml-auto" @click="openProjDlg('edit', p)">重命名</UiButton>
+              <UiButton v-if="p.id !== currentProject?.id" variant="text" size="sm" @click="useProject(p)">切换到此项目</UiButton>
+            </div>
           </div>
         </div>
-        <el-empty v-if="!projLoading && !projects.length" description="暂无项目" :image-size="60" />
-      </div>
-    </el-card>
+        <UiEmptyState v-else-if="!projLoading" text="暂无项目">
+          <template #action>
+            <UiButton variant="primary" @click="openProjDlg('create')">新建项目</UiButton>
+          </template>
+        </UiEmptyState>
+      </UiLoading>
+    </UiCard>
 
     <!-- 右侧：当前项目的分组树 -->
-    <el-card class="right" shadow="never">
-      <template #header>
-        <div class="card-head">
-          <span>分组管理{{ currentProject ? ' - ' + currentProject.name : '' }}</span>
-          <el-button type="primary" size="small" @click="openGrpDlg('create')">新增根分组</el-button>
-        </div>
+    <UiCard :title="'分组管理' + (currentProject ? ' - ' + currentProject.name : '')" class="min-w-0 flex-1 self-start">
+      <template #extra>
+        <UiButton variant="primary" size="sm" @click="openGrpDlg('create')">
+          <UiIcon name="plus" :size="14" />新增根分组
+        </UiButton>
       </template>
-      <el-tree
-        v-loading="treeLoading"
-        :data="treeData"
-        node-key="id"
-        default-expand-all
-        :expand-on-click-node="false"
-        :props="{ label: 'name', children: 'children' }"
-      >
-        <template #default="{ data }">
-          <div class="grp-node">
-            <span class="grp-name">{{ data.name }}</span>
-            <span class="grp-ops" @click.stop>
-              <el-button link type="primary" size="small" @click="openGrpDlg('create', data)">新增子分组</el-button>
-              <el-button link type="primary" size="small" @click="openGrpDlg('edit', data)">重命名</el-button>
-              <el-button link type="danger" size="small" @click="removeGroup(data)">删除</el-button>
-            </span>
-          </div>
+      <UiLoading :loading="treeLoading">
+        <template v-if="treeNodes.length">
+          <UiTree :nodes="treeNodes">
+            <template #node="{ node }">
+              <span
+                draggable="true"
+                class="min-w-0 flex-1 cursor-grab truncate active:cursor-grabbing"
+                :class="dropOverId === node.value ? 'border-t-2 border-primary' : ''"
+                @dragstart="onNodeDragStart(node.value, $event)"
+                @dragover="onNodeDragOver(node.value, $event)"
+                @dragleave="dropOverId === node.value && (dropOverId = null)"
+                @drop="onNodeDrop(node.value)"
+                @dragend="dragId = null; dropOverId = null"
+              >
+                <UiIcon name="folder" :size="13" class="mr-1 inline-block align-[-2px] text-placeholder" />{{ node.label }}
+              </span>
+            </template>
+            <template #node-extra="{ node }">
+              <span class="ml-auto hidden shrink-0 items-center gap-1 group-hover/node:flex" @click.stop>
+                <UiButton variant="text" size="sm" :disabled="depthOf(node.meta) >= 4" @click="openGrpDlg('create', node.meta)">子分组</UiButton>
+                <UiButton variant="text" size="sm" @click="openGrpDlg('edit', node.meta)">重命名</UiButton>
+                <UiButton variant="dangerText" size="sm" @click="removeGroup(node.meta)">删除</UiButton>
+              </span>
+            </template>
+          </UiTree>
+          <p class="mt-3 border-t border-line-soft pt-2 text-xs text-placeholder">
+            提示：按住分组名称拖拽到同级其他分组上可调整顺序；层级最多 4 级，同级名称需唯一。
+          </p>
         </template>
-      </el-tree>
-      <el-empty v-if="!treeLoading && !treeData.length" description="当前项目暂无分组" :image-size="60" />
-    </el-card>
+        <UiEmptyState v-else-if="!treeLoading" text="当前项目暂无分组">
+          <template #action>
+            <UiButton variant="primary" @click="openGrpDlg('create')">新增根分组</UiButton>
+          </template>
+        </UiEmptyState>
+      </UiLoading>
+    </UiCard>
 
     <!-- 项目新建/重命名对话框 -->
-    <el-dialog
-      v-model="projDlg.visible"
-      :title="projDlg.mode === 'create' ? '新建项目' : '重命名项目'"
-      width="420px"
-    >
-      <el-form label-width="80px" @submit.prevent>
-        <el-form-item label="项目名称">
-          <el-input v-model="projDlg.name" placeholder="请输入项目名称" maxlength="50" @keyup.enter="saveProj" />
-        </el-form-item>
-      </el-form>
+    <UiDialog v-model:open="projDlg.visible" :title="projDlg.mode === 'create' ? '新建项目' : '重命名项目'" width="max-w-md">
+      <div class="grid grid-cols-[100px_1fr] items-center gap-x-3 gap-y-3">
+        <span class="text-right text-sm text-body"><span class="text-danger">*</span>项目名称</span>
+        <UiInput v-model="projDlg.name" placeholder="请输入项目名称" :maxlength="50" @enter="saveProj" />
+        <span class="text-right text-sm text-body">时区</span>
+        <UiInput v-model="projDlg.tz" placeholder="Asia/Shanghai" :maxlength="64" />
+      </div>
       <template #footer>
-        <el-button @click="projDlg.visible = false">取消</el-button>
-        <el-button type="primary" :loading="projDlg.saving" @click="saveProj">确定</el-button>
+        <UiButton @click="projDlg.visible = false">取消</UiButton>
+        <UiButton variant="primary" :disabled="projDlg.saving" @click="saveProj">{{ projDlg.saving ? '保存中…' : '确定' }}</UiButton>
       </template>
-    </el-dialog>
+    </UiDialog>
 
     <!-- 分组新增/重命名对话框 -->
-    <el-dialog
-      v-model="grpDlg.visible"
+    <UiDialog
+      v-model:open="grpDlg.visible"
       :title="grpDlg.mode === 'create' ? (grpDlg.parentId ? '新增子分组' : '新增根分组') : '重命名分组'"
-      width="420px"
+      width="max-w-md"
     >
-      <el-form label-width="80px" @submit.prevent>
-        <el-form-item label="上级分组">
-          <el-input :model-value="grpDlg.parentId ? groupName(grpDlg.parentId) : '（根分组）'" disabled />
-        </el-form-item>
-        <el-form-item label="分组名称">
-          <el-input v-model="grpDlg.name" placeholder="请输入分组名称" maxlength="50" @keyup.enter="saveGrp" />
-        </el-form-item>
-      </el-form>
+      <div class="grid grid-cols-[100px_1fr] items-center gap-x-3 gap-y-3">
+        <span class="text-right text-sm text-body">上级分组</span>
+        <UiInput :model-value="grpDlg.parentId ? groupName(grpDlg.parentId) : '（根分组）'" disabled />
+        <span class="text-right text-sm text-body"><span class="text-danger">*</span>分组名称</span>
+        <UiInput v-model="grpDlg.name" placeholder="请输入分组名称" :maxlength="50" @enter="saveGrp" />
+      </div>
       <template #footer>
-        <el-button @click="grpDlg.visible = false">取消</el-button>
-        <el-button type="primary" :loading="grpDlg.saving" @click="saveGrp">确定</el-button>
+        <UiButton @click="grpDlg.visible = false">取消</UiButton>
+        <UiButton variant="primary" :disabled="grpDlg.saving" @click="saveGrp">{{ grpDlg.saving ? '保存中…' : '确定' }}</UiButton>
       </template>
-    </el-dialog>
+    </UiDialog>
   </div>
 </template>
-
-<style scoped>
-.page { display: flex; gap: 16px; align-items: flex-start; }
-.left { width: 380px; flex-shrink: 0; }
-.right { flex: 1; min-width: 0; }
-.card-head { display: flex; justify-content: space-between; align-items: center; }
-.proj-item {
-  border: 1px solid #e4e7ed; border-radius: 6px;
-  padding: 10px 12px; margin-bottom: 10px;
-}
-.proj-item.active { border-color: #409eff; background: #ecf5ff; }
-.proj-name { font-weight: 600; display: flex; align-items: center; gap: 8px; }
-.proj-meta { color: #909399; font-size: 12px; margin-top: 4px; }
-.proj-ops { display: flex; align-items: center; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
-.grp-node {
-  display: flex; align-items: center; justify-content: space-between;
-  flex: 1; min-width: 0; padding-right: 8px;
-}
-.grp-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.grp-ops { visibility: hidden; flex-shrink: 0; }
-.grp-node:hover .grp-ops { visibility: visible; }
-</style>

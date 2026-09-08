@@ -6,12 +6,24 @@ import httpProxy from 'http-proxy'
 
 const upstream = process.env.WS_UPSTREAM || 'http://localhost:8080'
 
+// 捕获开发/生产环境中因上游后端未启动或连接断开触发的常见网络重置异常，防止抛出未处理拒绝 (unhandledRejection)
+process.on('unhandledRejection', (err: any) => {
+  const code = err?.code || err?.cause?.code
+  if (code === 'ECONNRESET' || code === 'ECONNREFUSED' || code === 'EPIPE' || String(err?.message || '').includes('ECONNRESET')) {
+    return // 忽略上游连接未就绪或浏览器切页重置引起的偶发网络抖动
+  }
+  console.error('[unhandledRejection]', err)
+})
+
 export default defineNitroPlugin(() => {
   if (import.meta.dev) return // dev 走 devProxy（ws: true）
 
   const proxy = httpProxy.createProxyServer({ target: upstream, ws: true })
   proxy.on('error', (err, _req, socket) => {
-    console.error('[ws-proxy]', err.message)
+    const code = (err as any)?.code
+    if (code !== 'ECONNRESET' && code !== 'ECONNREFUSED') {
+      console.warn('[ws-proxy]', err.message)
+    }
     try { (socket as any)?.destroy?.() } catch { /* ignore */ }
   })
 

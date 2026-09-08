@@ -1,4 +1,4 @@
-﻿package api
+package api
 
 import (
 	"encoding/json"
@@ -74,12 +74,55 @@ func handleIdpCRLAdd(c *gin.Context) {
 		fail(c, errs.EBadRequest)
 		return
 	}
-	_ = store.KVSet("idp:crl:"+req.DeviceID, "1", 365*24*time.Hour)
+	_ = store.KVSet(crlKey(req.DeviceID), "1", 365*24*time.Hour)
+	// 维护索引（列表展示用）
+	id := strings.ToUpper(strings.TrimSpace(req.DeviceID))
+	idx, _ := store.KVGet("idp:crl:index")
+	if idx == "" {
+		_ = store.KVSet("idp:crl:index", id, 365*24*time.Hour)
+	} else {
+		found := false
+		for _, s := range strings.Split(idx, ",") {
+			if s == id {
+				found = true
+				break
+			}
+		}
+		if !found {
+			_ = store.KVSet("idp:crl:index", idx+","+id, 365*24*time.Hour)
+		}
+	}
 	ok(c, nil)
 }
 
+// crlKey CRL 条目键（按设备 ID）。
+func crlKey(deviceID string) string { return "idp:crl:" + strings.ToUpper(strings.TrimSpace(deviceID)) }
+
+// crlQuery 查询设备是否在 CRL（吊销列表）中；适配器在 hello/bind 时调用。
+func crlQuery(deviceID string) bool {
+	_, err := store.KVGet(crlKey(deviceID))
+	return err == nil
+}
+
+// handleIdpCRLList SET-02：CRL 条目列表。Redis 无扫描接口（KV 抽象），
+// 以 KV 维护索引键 idp:crl:index（逗号分隔设备 ID）。
 func handleIdpCRLList(c *gin.Context) {
-	ok(c, gin.H{"items": []any{}})
+	items := []gin.H{}
+	if q := c.Query("deviceId"); q != "" {
+		if crlQuery(q) {
+			items = append(items, gin.H{"deviceId": strings.ToUpper(strings.TrimSpace(q))})
+		}
+		ok(c, gin.H{"items": items})
+		return
+	}
+	if v, err := store.KVGet("idp:crl:index"); err == nil && v != "" {
+		for _, id := range strings.Split(v, ",") {
+			if id != "" {
+				items = append(items, gin.H{"deviceId": id})
+			}
+		}
+	}
+	ok(c, gin.H{"items": items})
 }
 
 // ---------- 操作日志 ACC-08 ----------

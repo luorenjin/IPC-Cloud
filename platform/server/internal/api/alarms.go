@@ -36,6 +36,37 @@ func handleCreateAlarmTemplate(c *gin.Context) {
 	ok(c, t)
 }
 
+// handleUpdateAlarmTemplate ALM-01：修改布防模板（内置模板不可改；级联提示由前端负责）。
+func handleUpdateAlarmTemplate(c *gin.Context) {
+	var t models.AlarmTemplate
+	if store.DB.First(&t, "id = ?", c.Param("id")).Error != nil {
+		fail(c, errs.ENotFound)
+		return
+	}
+	if t.Builtin {
+		fail(c, errs.EForbid.WithMsg("内置模板不可修改"))
+		return
+	}
+	var req struct {
+		Name     string       `json:"name"`
+		Schedule models.JSONB `json:"schedule"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		fail(c, errs.EBadRequest)
+		return
+	}
+	updates := map[string]any{"updated_at": models.NowMilli()}
+	if req.Name != "" {
+		updates["name"] = req.Name
+	}
+	if req.Schedule != nil {
+		updates["schedule"] = req.Schedule
+	}
+	store.DB.Model(&t).Updates(updates)
+	store.DB.First(&t, "id = ?", c.Param("id"))
+	ok(c, t)
+}
+
 func handleDeleteAlarmTemplate(c *gin.Context) {
 	var t models.AlarmTemplate
 	if store.DB.First(&t, "id = ?", c.Param("id")).Error != nil {

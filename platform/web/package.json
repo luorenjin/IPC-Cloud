@@ -9,14 +9,18 @@
     "preview": "nuxt preview"
   },
   "dependencies": {
-    "@element-plus/nuxt": "^1.0.10",
-    "element-plus": "^2.8.6",
     "http-proxy": "^1.18.1",
     "nuxt": "^3.13.2",
+    "reka-ui": "^2.10.4",
     "vue": "^3.5.12"
   },
   "devDependencies": {
-    "@element-plus/icons-vue": "^2.3.1",
-    "@types/http-proxy": "^1.17.17"
+    "@tailwindcss/vite": "^4.3.3",
+    "@types/http-proxy": "^1.17.17",
+    "tailwindcss": "^4.3.3"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true,
+    "vue-demi@0.14.10": true
   }
 }

@@ -35,6 +35,12 @@ func (a *Adapter) markOnline(deviceID string) {
 	_ = store.KVSet("idp:online:"+deviceID, "1", offlineAfter+time.Minute)
 }
 
+// isRevoked SET-02：设备是否在 CRL 吊销列表中（吊销的设备拒绝 hello/绑定）。
+func isRevoked(deviceID string) bool {
+	_, err := store.KVGet("idp:crl:" + strings.ToUpper(strings.TrimSpace(deviceID)))
+	return err == nil
+}
+
 func (a *Adapter) markOffline(deviceID string) {
 	_ = store.KVDel("idp:online:" + deviceID)
 	var dev models.Device
@@ -161,6 +167,9 @@ func (a *Adapter) tryPreadd(dev *models.Device, channels []devsvc.HelloChannel, 
 
 // Bind 绑定（§5.5.3，供 API 层调用）。
 func (a *Adapter) Bind(projectID, groupID, name, deviceID, verifyCode string) error {
+	if isRevoked(deviceID) {
+		return errs.EForbid.WithMsg("设备已被吊销（CRL），拒绝绑定")
+	}
 	if !a.isOnline(deviceID) {
 		return errs.EDeviceNotOnline
 	}

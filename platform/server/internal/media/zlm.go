@@ -171,6 +171,32 @@ func (z *ZLM) KickSession(id string) error {
 	return err
 }
 
+// CloseStreams 强制关闭媒体源（SYS-02 踢流：断开推流并释放收流资源）。
+func (z *ZLM) CloseStreams(app, stream string) error {
+	_, err := z.Call(context.Background(), "close_streams",
+		url.Values{"vhost": {"__defaultVhost__"}, "app": {app}, "stream": {stream}, "force": {"1"}})
+	return err
+}
+
+// Version 读取 ZLM 版本（HTTP 响应 Server 头，无独立 getVersion API）。
+func (z *ZLM) Version(ctx context.Context) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, z.apiURL+"/index/api/getServerConfig?secret="+url.QueryEscape(z.secret), nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := z.hc.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<10))
+	srv := resp.Header.Get("Server")
+	if i := strings.Index(srv, "("); i >= 0 && strings.HasSuffix(srv, ")") {
+		return srv[i+1 : len(srv)-1], nil
+	}
+	return srv, nil
+}
+
 // ForNode 取节点客户端。
 func ForNode(n *models.MediaNode) *ZLM { return NewZLM(n.APIURL, NodeSecret(n)) }
 

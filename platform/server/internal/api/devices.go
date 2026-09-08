@@ -300,6 +300,162 @@ func handleUpdateChannel(c *gin.Context) {
 	ok(c, ch)
 }
 
+// ---------- 远程配置 MGR-09（IDP cfg.get/cfg.set；其余来源不支持） ----------
+
+// cfgKeys 平台可管理的配置键（与固件配置键命名一致）。
+var cfgKeys = []string{
+	"video.main.resolution", "video.main.fps", "video.main.bitrate", "video.main.gop", "video.main.encode",
+	"image.brightness", "image.contrast", "image.saturation", "image.sharpness", "image.mirror", "image.wdr",
+	"osd.enable", "osd.text", "record.mode", "alarm.motion.sensitivity", "time.ntp",
+}
+
+func handleDeviceConfigGet(c *gin.Context) {
+	id := c.Param("id")
+	var d models.Device
+	if store.DB.First(&d, "id = ? AND deleted_at = 0", id).Error != nil {
+		fail(c, errs.ENotFound)
+		return
+	}
+	if d.Source != "idp" {
+		fail(c, errs.EForbid.WithMsg("该设备不支持远程配置"))
+		return
+	}
+	a, okk := adapter.Get("idp").(interface {
+		ConfigGet(deviceID string, keys []string) (map[string]any, error)
+	})
+	if !okk {
+		fail(c, errs.EForbid.WithMsg("IDP 适配器未就绪"))
+		return
+	}
+	data, err := a.ConfigGet(id, cfgKeys)
+	if err != nil {
+		fail(c, toAppErr(err))
+		return
+	}
+	values, _ := data["values"].(map[string]any)
+	if values == nil {
+		values = map[string]any{}
+	}
+	ok(c, gin.H{"config": values, "supported": cfgKeys})
+}
+
+func handleDeviceConfigSet(c *gin.Context) {
+	id := c.Param("id")
+	var d models.Device
+	if store.DB.First(&d, "id = ? AND deleted_at = 0", id).Error != nil {
+		fail(c, errs.ENotFound)
+		return
+	}
+	if d.Source != "idp" {
+		fail(c, errs.EForbid.WithMsg("该设备不支持远程配置"))
+		return
+	}
+	var req struct {
+		Values map[string]any `json:"values" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		fail(c, errs.EBadRequest)
+		return
+	}
+	a, okk := adapter.Get("idp").(interface {
+		ConfigSet(deviceID string, values map[string]any) ([]string, error)
+	})
+	if !okk {
+		fail(c, errs.EForbid.WithMsg("IDP 适配器未就绪"))
+		return
+	}
+	rejected, err := a.ConfigSet(id, req.Values)
+	if err != nil {
+		fail(c, toAppErr(err))
+		return
+	}
+	ok(c, gin.H{"rejected": rejected})
+}
+
+// ---------- 批量操作（MGR-01 工具栏） ----------
+
+func handleDeviceBatch(c *gin.Context) {
+	ctx := getCtx(c)
+	var req struct {
+		Action  string   `json:"action" binding:"required"` // move|reboot|delete
+		IDs     []string `json:"ids" binding:"required"`
+		GroupID string   `json:"groupId"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		fail(c, errs.EBadRequest)
+		return
+	}
+	if len(req.IDs) > 200 {
+		fail(c, errs.EBadRequest.WithMsg("单次批量上限 200 台"))
+		return
+	}
+	results := make([]gin.H, 0, len(req.IDs))
+	for _, id := range req.IDs {
+		var d models.Device
+		if store.DB.First(&d, "id = ? AND project_id = ? AND deleted_at = 0", id, ctx.ProjectID).Error != nil {
+			results = append(results, gin.H{"id": id, "ok": false, "msg": "设备不存在或无权限"})
+			continue
+		}
+		switch req.Action {
+		case "move":
+			if err := store.DB.Model(&d).Update("group_id", req.GroupID).Error; err != nil {
+				results = append(results, gin.H{"id": id, "ok": false, "msg": err.Error()})
+			} else {
+				results = append(results, gin.H{"id": id, "ok": true})
+			}
+		case "reboot":
+			a := adapter.Get(d.Source)
+			if a == nil {
+				results = append(results, gin.H{"id": id, "ok": false, "msg": "来源不支持重启"})
+				continue
+			}
+			if err := a.Reboot(c.Request.Context(), id); err != nil {
+				results = append(results, gin.H{"id": id, "ok": false, "msg": err.Error()})
+			} else {
+				results = append(results, gin.H{"id": id, "ok": true})
+			}
+		case "delete":
+			if err := store.DB.Model(&d).Update("deleted_at", models.NowMilli()).Error; err != nil {
+				results = append(results, gin.H{"id": id, "ok": false, "msg": err.Error()})
+			} else {
+				results = append(results, gin.H{"id": id, "ok": true})
+			}
+		default:
+			fail(c, errs.EBadRequest.WithMsg("未知批量动作"))
+			return
+		}
+	}
+	ok(c, gin.H{"results": results})
+}
+
+// handleIdpLookup ADD-01 两段式第一步：查找设备（型号/在线状态）。
+func handleIdpLookup(c *gin.Context) {
+	var req struct {
+		DeviceID string `json:"deviceId" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		fail(c, errs.EBadRequest)
+		return
+	}
+	id := strings.ToUpper(strings.TrimSpace(req.DeviceID))
+	var d models.Device
+	if store.DB.First(&d, "id = ?", id).Error != nil {
+		// 未建档：可能从未 hello 过；在线状态经 MQTT KV 判断
+		online := false
+		if a, okk := adapter.Get("idp").(interface{ DeviceOnline(string) bool }); okk {
+			online = a.DeviceOnline(id)
+		}
+		if !online {
+			fail(c, errs.EDeviceNotOnline)
+			return
+		}
+		ok(c, gin.H{"deviceId": id, "model": "未知型号", "status": "online", "bound": false})
+		return
+	}
+	bound := d.ProjectID != "" && d.ProjectID != getCtx(c).ProjectID
+	ok(c, gin.H{"deviceId": id, "model": d.Model, "vendor": d.Vendor, "status": d.Status, "bound": bound})
+}
+
 // ---------- IDP 接入 ADD-01/03 ----------
 
 type bindReq struct {
