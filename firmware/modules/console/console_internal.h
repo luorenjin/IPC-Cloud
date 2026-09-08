@@ -193,9 +193,19 @@ hal_err_t console_ap_ssid(const char *serial, char *buf, size_t cap);
  * 确认（不在本次改动范围），这里只保证派生函数本身的规则清楚、稳定。
  *
  * 规则：`"IPC" + 验证码`；若拼接结果仍不足 8 位（验证码短于文档口径的
- * 异常情况），追加固定的 '0' 字符补满 8 位，不引入随机性。code 为空、
- * out/cap 非法，或派生结果仍不满足 8~63 位（防御性兜底，正常不会触发）
- * 均返回 HAL_EINVAL；失败时 out 会被清零，不留半截结果。
+ * 异常情况），追加固定的 '0' 字符补满 8 位，不引入随机性。
+ *
+ * 错误码（评审 fix round 3 订正，此前文档与实现不一致）：`code` 为空、
+ * `out` 为 NULL 或 `cap` 为 0 时返回 `HAL_EINVAL`；派生结果仍不满足
+ * 8~63 位这条防御性兜底（正常不会触发）同样返回 `HAL_EINVAL`；`out`/`cap`
+ * 不足以容纳派生结果（含内部固定 65 字节暂存区被异常长的 `code` 撑爆，
+ * 同样只在防御性场景下才会触发）时返回 `HAL_ENOMEM`。调用方目前只关心
+ * `!= HAL_OK`，不区分具体错误码。
+ *
+ * 失败时 `out` 保证不含半截派生结果，但清空方式因失败原因而不同：`cap`
+ * 不足导致的 `HAL_ENOMEM` 只保证 `out` 是空字符串（`out[0]=='\0'`）；
+ * 最终防御性下界/上界检查失败的 `HAL_EINVAL` 会把整个 `cap` 字节清零。
+ * 调用方不应依赖某种具体的清空方式，只应依据返回值判断成功与否。
  */
 hal_err_t console_ap_psk_derive(const char *code, char *out, size_t cap);
 
@@ -220,15 +230,23 @@ typedef enum {
  * 最终把"要不要有 AP"与 cur_is_ap（调用前的实际模式是否为 AP）比较，
  * 得到应该采取的动作。
  *
- * `*grace_started_us`（IN/OUT）：0 表示当前不在宽限期内；本函数在"从其他
- * 状态进入宽限期条件"时把它设为 now_us（只设一次，同一状态里的后续调用
- * 不会重置计时起点），在"宽限期条件不再成立"（已经 up，或从未配置过）时
- * 把它清零。调用方（工作线程）只需要持有这个状态、原样传引用，不需要
- * 理解其含义。
+ * `*grace_active`/`*grace_started_us`（均为 IN/OUT，成对使用）：
+ * `*grace_active` 为 false 表示当前不在宽限期内，此时 `*grace_started_us`
+ * 的值没有意义。本函数在"从其他状态进入宽限期条件"时把 `*grace_active`
+ * 置 true 并把 `*grace_started_us` 设为 now_us（只设一次，同一状态里的
+ * 后续调用不会重置计时起点），在"宽限期条件不再成立"（已经 up，或从未
+ * 配置过）时把 `*grace_active` 置回 false（`*grace_started_us` 的旧值不
+ * 再重要，不强制清零）。调用方（工作线程）只需要持有这两个状态、原样
+ * 传引用，不需要理解其含义。
+ * **刻意不用"`*grace_started_us==0` 表示未激活"这种魔法值哨兵**——
+ * `os_monotonic_us()` 理论上可能在某次调用里恰好返回 0，届时哨兵与合法
+ * 时间戳撞车，是本文件已经栽过一次的坑（`http_server.c` 的 `epfd` 静态
+ * 零初始化与"未运行"判断同用 0 曾经互相打架）。两个独立字段没有这个
+ * 歧义。
  */
 console_net_ap_action_t console_net_ap_decide(bool eth_up, bool wifi_cfgd, bool wifi_up,
                                               bool cur_is_ap, uint64_t now_us,
-                                              uint64_t *grace_started_us);
+                                              bool *grace_active, uint64_t *grace_started_us);
 /**
  * 周期复查纯函数：距离上次判定（last_check_us）是否已经过了
  * recheck_interval_ms 毫秒，到了才需要重新调用 console_net_ap_decide。

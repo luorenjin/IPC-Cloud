@@ -1055,83 +1055,113 @@ static void test_ap_psk_derive(void)
  */
 static void test_net_ap_decide_grace_period(void)
 {
-    uint64_t grace;
+    bool grace_active;
+    uint64_t grace_started_us;
     console_net_ap_action_t action;
 
     SECTION("AP 决策纯函数：宽限期状态机（console_net_ap_decide）");
 
-    /* 以太网 up：不管其余条件、也不管宽限期是否正在计时，直接给出"不该有
-       AP"的结论，且宽限期计时被清零（伪造一个"正在计时"的状态验证会被
-       清零，而不是巧合本来就是 0）。 */
-    grace = 12345;
-    action = console_net_ap_decide(true, true, false, false, 1000000, &grace);
-    CHECK(action == CONSOLE_NET_AP_ACTION_NONE, "eth up 且当前不是 AP：无动作，实际=%d", (int)action);
-    CHECK(grace == 0, "eth up 时宽限期计时被清零");
+    /*
+     * 评审 fix round 3（Minor 3，宽限期哨兵撞车）：*grace_started_us==0
+     * 曾经被当作"未在宽限期"的哨兵，但 os_monotonic_us() 理论上可能恰好
+     * 返回 0，与合法时间戳撞车——这是本文件已经栽过一次的坑（http_server.c
+     * 的 epfd 静态零初始化）。改成独立的 grace_active 布尔位后，
+     * grace_started_us 的旧值在"未激活"状态下没有意义，也不强制清零，
+     * 所以下面的断言只认 grace_active，不再断言 grace_started_us 变成 0。
+     */
 
-    grace = 12345;
-    action = console_net_ap_decide(true, true, false, true, 1000000, &grace);
+    /* 以太网 up：不管其余条件、也不管宽限期是否正在计时，直接给出"不该有
+       AP"的结论，且宽限期状态被清除（伪造一个"正在计时"的状态验证会被
+       清除，而不是巧合本来就是未激活）。 */
+    grace_active = true;
+    grace_started_us = 12345;
+    action = console_net_ap_decide(true, true, false, false, 1000000, &grace_active, &grace_started_us);
+    CHECK(action == CONSOLE_NET_AP_ACTION_NONE, "eth up 且当前不是 AP：无动作，实际=%d", (int)action);
+    CHECK(grace_active == false, "eth up 时宽限期状态被清除（grace_active=false）");
+
+    grace_active = true;
+    grace_started_us = 12345;
+    action = console_net_ap_decide(true, true, false, true, 1000000, &grace_active, &grace_started_us);
     CHECK(action == CONSOLE_NET_AP_ACTION_STOP, "eth up 且当前是 AP：应该关闭，实际=%d", (int)action);
-    CHECK(grace == 0, "eth up 时宽限期计时被清零");
+    CHECK(grace_active == false, "eth up 时宽限期状态被清除（grace_active=false）");
 
     /* WiFi 已连上：同理不该有 AP */
-    grace = 999;
-    action = console_net_ap_decide(false, true, true, true, 1000000, &grace);
+    grace_active = true;
+    grace_started_us = 999;
+    action = console_net_ap_decide(false, true, true, true, 1000000, &grace_active, &grace_started_us);
     CHECK(action == CONSOLE_NET_AP_ACTION_STOP, "wifi 已连上且当前是 AP：应该关闭");
-    CHECK(grace == 0, "wifi 已连上时宽限期计时被清零");
+    CHECK(grace_active == false, "wifi 已连上时宽限期状态被清除");
 
     /* 从未配置过 WiFi：没有什么好等的，没有宽限期，立即开 */
-    grace = 0;
-    action = console_net_ap_decide(false, false, false, false, 1000000, &grace);
+    grace_active = false;
+    grace_started_us = 0;
+    action = console_net_ap_decide(false, false, false, false, 1000000, &grace_active, &grace_started_us);
     CHECK(action == CONSOLE_NET_AP_ACTION_START, "从未配置 WiFi：立即开 AP，没有宽限期");
-    CHECK(grace == 0, "从未配置过时不应该进入宽限期状态");
+    CHECK(grace_active == false, "从未配置过时不应该进入宽限期状态");
 
     /* 已配置但未连上：宽限期生效，首次进入时记录计时起点 */
-    grace = 0;
-    action = console_net_ap_decide(false, true, false, false, 1000000, &grace);
+    grace_active = false;
+    grace_started_us = 0;
+    action = console_net_ap_decide(false, true, false, false, 1000000, &grace_active, &grace_started_us);
     CHECK(action == CONSOLE_NET_AP_ACTION_NONE, "已配置但未连上：宽限期内不开 AP");
-    CHECK(grace == 1000000, "宽限期计时起点精确等于首次进入该状态的时刻，实际=%llu",
-          (unsigned long long)grace);
+    CHECK(grace_active == true, "首次进入宽限期，状态应被置为激活");
+    CHECK(grace_started_us == 1000000, "宽限期计时起点精确等于首次进入该状态的时刻，实际=%llu",
+          (unsigned long long)grace_started_us);
 
     /* 宽限期内再次调用（差 1 微秒到 15 秒）：计时起点不变，仍不开——
        若实现没有正确记住起点、每次调用都重新起算，这条会一直是 NONE 测不出
        区别；真正的证伪点在下面"恰好到期"那一条。 */
-    action = console_net_ap_decide(false, true, false, false, 1000000 + 14999999, &grace);
+    action = console_net_ap_decide(false, true, false, false, 1000000 + 14999999, &grace_active, &grace_started_us);
     CHECK(action == CONSOLE_NET_AP_ACTION_NONE, "宽限期即将结束但还没到：仍不开 AP");
-    CHECK(grace == 1000000, "宽限期计时起点不会被后续调用重置，实际=%llu", (unsigned long long)grace);
+    CHECK(grace_active == true && grace_started_us == 1000000,
+          "宽限期计时起点不会被后续调用重置，实际 active=%d started=%llu",
+          (int)grace_active, (unsigned long long)grace_started_us);
 
     /* 宽限期恰好结束（15 秒整）：开 AP——如果边界判断写成 <= 而不是 <
        （或反过来该开的时候没开），这条会直接证伪 */
-    action = console_net_ap_decide(false, true, false, false, 1000000 + 15000000, &grace);
+    action = console_net_ap_decide(false, true, false, false, 1000000 + 15000000, &grace_active, &grace_started_us);
     CHECK(action == CONSOLE_NET_AP_ACTION_START, "宽限期恰好结束（15 秒整）：开 AP");
 
     /* 宽限期结束后，如果已经是 AP 模式，不应该重复"开"（返回 NONE） */
-    action = console_net_ap_decide(false, true, false, true, 1000000 + 20000000, &grace);
+    action = console_net_ap_decide(false, true, false, true, 1000000 + 20000000, &grace_active, &grace_started_us);
     CHECK(action == CONSOLE_NET_AP_ACTION_NONE, "已经是 AP 模式时不重复开启");
 
     /* 宽限期重新计时：先进入宽限期 → wifi 连上重置 → 断开后重新进入，
        计时起点必须是新的时刻，不是旧的——证明"离开状态即重置"真的生效，
        而不是巧合还没到期。 */
     {
-        uint64_t g2 = 0;
-        action = console_net_ap_decide(false, true, false, false, 5000000, &g2);
+        bool g2_active = false;
+        uint64_t g2_started = 0;
+
+        action = console_net_ap_decide(false, true, false, false, 5000000, &g2_active, &g2_started);
         CHECK(action == CONSOLE_NET_AP_ACTION_NONE, "第一次进入宽限期");
-        CHECK(g2 == 5000000, "计时起点为 5000000");
+        CHECK(g2_active == true && g2_started == 5000000,
+              "计时起点为 5000000，实际 active=%d started=%llu",
+              (int)g2_active, (unsigned long long)g2_started);
 
-        action = console_net_ap_decide(false, true, true, false, 6000000, &g2);
+        action = console_net_ap_decide(false, true, true, false, 6000000, &g2_active, &g2_started);
         CHECK(action == CONSOLE_NET_AP_ACTION_NONE, "wifi 连上，不该开 AP（本来就没在 AP 模式）");
-        CHECK(g2 == 0, "wifi 连上后宽限期计时被重置为 0");
+        CHECK(g2_active == false, "wifi 连上后宽限期状态被重置为未激活");
 
-        action = console_net_ap_decide(false, true, false, false, 7000000, &g2);
+        action = console_net_ap_decide(false, true, false, false, 7000000, &g2_active, &g2_started);
         CHECK(action == CONSOLE_NET_AP_ACTION_NONE, "重新进入宽限期");
-        CHECK(g2 == 7000000,
+        CHECK(g2_active == true && g2_started == 7000000,
               "重新进入宽限期后计时起点是新的时刻(7000000)而不是旧的(5000000)——"
-              "证明 wifi 连上那次真的重置了计时，而不是巧合还没到期，实际=%llu",
-              (unsigned long long)g2);
+              "证明 wifi 连上那次真的重置了计时，而不是巧合还没到期，实际 active=%d started=%llu",
+              (int)g2_active, (unsigned long long)g2_started);
     }
 
-    /* 非法输入：grace_started_us 为 NULL 时安全返回 NONE，不崩溃 */
-    CHECK(console_net_ap_decide(false, true, false, false, 1000000, NULL) == CONSOLE_NET_AP_ACTION_NONE,
-          "grace_started_us 为 NULL 时安全返回 NONE");
+    /* 非法输入：grace_active/grace_started_us 任一为 NULL 时安全返回 NONE，
+       不崩溃——两个指针各自单独测，确认函数是"任一为 NULL 就短路"而不是
+       只检查了其中一个。 */
+    {
+        bool dummy_active = false;
+        uint64_t dummy_started = 1000000;
+        CHECK(console_net_ap_decide(false, true, false, false, 1000000, NULL, &dummy_started) ==
+              CONSOLE_NET_AP_ACTION_NONE, "grace_active 为 NULL 时安全返回 NONE");
+        CHECK(console_net_ap_decide(false, true, false, false, 1000000, &dummy_active, NULL) ==
+              CONSOLE_NET_AP_ACTION_NONE, "grace_started_us 为 NULL 时安全返回 NONE");
+    }
 }
 
 static void test_net_ap_recheck_due(void)
@@ -1483,17 +1513,59 @@ static void test_dhcp_decide_discover_and_request(void)
     CHECK(type == CONSOLE_DHCP_MSG_ACK, "应答类型是 ACK，实际=%u", type);
     CHECK(ip == 0xC0A8A964u, "ACK 分配的地址与 OFFER 一致");
 
-    /* REQUEST 里带一个跟服务端记录不一致的 requested_ip → NAK */
+    /*
+     * REQUEST 里带一个跟服务端记录不一致的 requested_ip → NAK。
+     * 评审 fix round 3：这条测的是"表里已有这个 MAC 的记录，但 requested_ip
+     * 对不上"分支，因此必须先让该 MAC 走一次 DISCOVER 在表里落地一条记录，
+     * 再发不一致的 REQUEST——如果跳过 DISCOVER 直接发 REQUEST，命中的其实是
+     * 下面"裸 REQUEST、未知 MAC"分支（同样回 NAK，但成因完全不同：一个是
+     * "有记录但地址不匹配"，一个是"根本没有记录"），会把两件事测混、且在
+     * Issue 4 修复后这条本该测的分支反而没被覆盖到。
+     */
     {
         console_dhcp_msg_t req2;
+        uint32_t offered_ip = 0;
+
         memset(&req2, 0, sizeof(req2));
         memcpy(req2.chaddr, "\x01\x02\x03\x04\x05\x06", 6);
+        req2.msg_type = CONSOLE_DHCP_MSG_DISCOVER;
+        replied = console_dhcp_decide(&t, &req2, 1010, 30, CONSOLE_DHCP_LEASE_S, 0xC0A8A901u, &type, &offered_ip);
+        CHECK(replied == true && type == CONSOLE_DHCP_MSG_OFFER,
+              "先用 DISCOVER 让该 MAC 在租约表里留下一条记录，为下面的 REQUEST 铺垫");
+
         req2.msg_type = CONSOLE_DHCP_MSG_REQUEST;
-        req2.requested_ip = 0xC0A8A9C8u;   /* 192.168.169.200，与实际会分配的不一致 */
-        replied = console_dhcp_decide(&t, &req2, 1010, 30, CONSOLE_DHCP_LEASE_S, 0xC0A8A901u, &type, &ip);
+        req2.requested_ip = 0xC0A8A9C8u;   /* 192.168.169.200，与实际分配的 offered_ip 不一致 */
+        replied = console_dhcp_decide(&t, &req2, 1011, 30, CONSOLE_DHCP_LEASE_S, 0xC0A8A901u, &type, &ip);
         CHECK(replied == true, "requested_ip 不匹配时仍应回复（NAK）");
         CHECK(type == CONSOLE_DHCP_MSG_NAK, "应答类型是 NAK，实际=%u", type);
         CHECK(ip == 0, "NAK 的 your_ip 必须是 0，不得暗示一个地址");
+
+        console_dhcp_lease_release(&t, req2.chaddr);   /* 清理，避免占用下面地址池耗尽用例的槽位 */
+    }
+
+    /*
+     * 评审 fix round 3 Issue 4：裸 REQUEST（没经过 DISCOVER，表里也没有这个
+     * MAC 的既有记录）不应该凭空获得完整租约，应直接 NAK 且不得在租约表里
+     * 留下任何新记录——这正是本轮要关闭的攻击面：伪造一批 MAC 跳过
+     * DISCOVER、直接群发 REQUEST 抢占地址池。只看返回的 NAK 不足以证明
+     * 没有分配，必须额外用 console_dhcp_lease_release 返回 HAL_ENODEV 来
+     * 证明表里确实没有这个 MAC 的记录——如果 Issue 4 的修复被回退，这里会
+     * 变成 HAL_OK（意外释放到了一条被凭空创建的租约），直接证伪。
+     */
+    {
+        console_dhcp_msg_t req4;
+        memset(&req4, 0, sizeof(req4));
+        memcpy(req4.chaddr, "\x11\x22\x33\x44\x55\x66", 6);
+        req4.msg_type = CONSOLE_DHCP_MSG_REQUEST;
+        req4.requested_ip = 0;
+        replied = console_dhcp_decide(&t, &req4, 1012, 30, CONSOLE_DHCP_LEASE_S, 0xC0A8A901u, &type, &ip);
+        CHECK(replied == true, "裸 REQUEST（无既有记录）仍应回复（NAK）");
+        CHECK(type == CONSOLE_DHCP_MSG_NAK, "裸 REQUEST、未知 MAC：应答类型必须是 NAK，实际=%u", type);
+        CHECK(ip == 0, "NAK 的 your_ip 必须是 0");
+        CHECK(console_dhcp_lease_release(&t, req4.chaddr) == HAL_ENODEV,
+              "裸 REQUEST 不应该在租约表里留下任何记录：释放一个从未被分配过的 MAC 必须是 "
+              "HAL_ENODEV；若这里意外拿到 HAL_OK 说明裸 REQUEST 仍然凭空创建了租约（回归到"
+              "修复前的地址池耗尽漏洞）");
     }
 
     /* RELEASE：不回复，且租约确实被释放 */

@@ -275,6 +275,27 @@ static hal_err_t dhcp_lease_reserve(console_dhcp_lease_table_t *t, const uint8_t
     return HAL_OK;
 }
 
+/**
+ * 评审 fix round 3（堵住"裸 REQUEST 凭空占地址池"）：只读查找——MAC 是否
+ * 已在表里有记录（无论是 DISCOVER 留下的短时预留还是已确认的正式租约），
+ * 有就返回其地址，**不分配新槽位**。调用前先 sweep 一次，过期未回收的
+ * 记录不算"存在"。
+ */
+static hal_err_t dhcp_lease_lookup(console_dhcp_lease_table_t *t, const uint8_t mac[6],
+                                   uint32_t now_s, uint32_t *host_out)
+{
+    uint32_t i;
+    if (!t || !mac || !host_out) return HAL_EINVAL;
+    dhcp_lease_sweep(t, now_s);
+    for (i = 0; i < CONSOLE_DHCP_POOL_SIZE; i++) {
+        if (t->entries[i].used && memcmp(t->entries[i].mac, mac, 6) == 0) {
+            *host_out = CONSOLE_DHCP_POOL_START + i;
+            return HAL_OK;
+        }
+    }
+    return HAL_ENODEV;
+}
+
 hal_err_t console_dhcp_lease_acquire(console_dhcp_lease_table_t *t, const uint8_t mac[6],
                                      uint32_t now_s, uint32_t *host_out)
 {
@@ -324,10 +345,26 @@ bool console_dhcp_decide(console_dhcp_lease_table_t *t, const console_dhcp_msg_t
         *your_ip_out = (server_ip & 0xFFFFFF00u) | host;
         return true;
     case CONSOLE_DHCP_MSG_REQUEST:
+        /* 评审 fix round 3：裸 REQUEST（没有经过 DISCOVER/OFFER）不应该
+           凭空获得完整租约——Minor #4 已经把 DISCOVER 改成短时预留
+           （offer_ttl_s），但如果 REQUEST 分支对"表里完全没有记录的 MAC"
+           仍然直接分配，攻击者只要跳过 DISCOVER、直接对一批伪造 MAC 猛发
+           REQUEST，照样能在 dhcp_lease_reserve 的"未找到→新分配"分支里
+           一次性拿到 101 个完整 2 小时租约，Minor #4 想关掉的攻击面只是
+           换了条路重新打开。用 dhcp_lease_lookup 先确认表里已经有这个
+           MAC 的记录（不论是短时预留还是正式租约）才允许续成完整租期；
+           完全没有记录时直接 NAK、不新分配——逼迫任何客户端（含攻击者）
+           必须先真的走一次 DISCOVER，只能拿到 offer_ttl_s 秒的短时预留，
+           成本高得多、到期还会被自动回收。 */
+        if (dhcp_lease_lookup(t, req->chaddr, now_s, &host) != HAL_OK) {
+            *msg_type_out = (uint8_t)CONSOLE_DHCP_MSG_NAK;   /* your_ip_out 保持 0 */
+            return true;
+        }
         /* 走 dhcp_lease_reserve 而不是 console_dhcp_lease_acquire，好让调用方
            传入的 lease_s 真正生效——console_dhcp_lease_acquire 对外的公开
            契约是固定 CONSOLE_DHCP_LEASE_S，这里需要的是"调用方指定的租期"，
-           两者在 lease_s==CONSOLE_DHCP_LEASE_S 时行为完全一致。 */
+           两者在 lease_s==CONSOLE_DHCP_LEASE_S 时行为完全一致。上面的
+           lookup 已经确认记录存在，这里必然走"找到→续期"分支，不会新分配。 */
         rc = dhcp_lease_reserve(t, req->chaddr, now_s, lease_s, &host);
         want_ip = (server_ip & 0xFFFFFF00u) | host;
         if (rc == HAL_OK && (req->requested_ip == 0 || req->requested_ip == want_ip)) {
@@ -506,19 +543,19 @@ hal_err_t console_ap_psk_derive(const char *code, char *out, size_t cap)
  */
 console_net_ap_action_t console_net_ap_decide(bool eth_up, bool wifi_cfgd, bool wifi_up,
                                               bool cur_is_ap, uint64_t now_us,
-                                              uint64_t *grace_started_us)
+                                              bool *grace_active, uint64_t *grace_started_us)
 {
     bool want_ap;
 
-    if (!grace_started_us) return CONSOLE_NET_AP_ACTION_NONE;
+    if (!grace_active || !grace_started_us) return CONSOLE_NET_AP_ACTION_NONE;
     want_ap = console_should_start_ap(eth_up, wifi_cfgd, wifi_up);
 
     if (want_ap && !eth_up && !wifi_up && wifi_cfgd) {
-        if (*grace_started_us == 0) *grace_started_us = now_us;
+        if (!*grace_active) { *grace_active = true; *grace_started_us = now_us; }
         if (now_us - *grace_started_us < (uint64_t)NET_WIFI_ASSOC_GRACE_MS * 1000ull)
             want_ap = false;   /* 宽限期内先不开 AP，等下一次周期复查 */
     } else {
-        *grace_started_us = 0;   /* 条件不再成立（已经 up，或从未配置过），重置计时 */
+        *grace_active = false;   /* 条件不再成立（已经 up，或从未配置过），退出宽限期 */
     }
 
     if (want_ap && !cur_is_ap) return CONSOLE_NET_AP_ACTION_START;
@@ -536,11 +573,15 @@ bool console_net_ap_recheck_due(uint64_t last_check_us, uint64_t now_us, uint32_
  * 执行动作）。调用点：工作线程启动时、周期复查时（评审 Important 1，见
  * net_worker_thread 的 NET_AP_RECHECK_MS）、配网失败回落时。
  *
- * 只会被工作线程调用（三处调用点都在同一个线程上），`s_wifi_grace_
- * started_us` 因此不需要加锁——它是 console_net_ap_decide 的 IN/OUT
- * 状态，调用方（这里）只负责持有并原样传引用。
+ * 只会被工作线程调用（三处调用点都在同一个线程上），`s_wifi_grace_active`/
+ * `s_wifi_grace_started_us` 因此不需要加锁——它们是 console_net_ap_decide
+ * 的 IN/OUT 状态，调用方（这里）只负责持有并原样传引用。
  */
-static uint64_t s_wifi_grace_started_us;   /* 0 表示当前不在"已配置但未连上"的宽限期内 */
+static bool     s_wifi_grace_active;       /* 是否正处于"已配置但未连上"的宽限期内（评审
+                                               fix round 3：独立标志位，不用 0 值当哨兵，
+                                               避免与 os_monotonic_us() 理论上可能返回的
+                                               合法 0 撞车） */
+static uint64_t s_wifi_grace_started_us;   /* 仅在 s_wifi_grace_active 为真时有意义 */
 
 static void net_apply_ap_decision(void)
 {
@@ -548,21 +589,45 @@ static void net_apply_ap_decision(void)
     bool eth_up = false, wifi_up = false, wifi_cfgd;
     net_mode_t cur;
     console_net_ap_action_t action;
+    char target_ssid[HAL_SSID_MAX];
 
+    /* 评审 fix round 3：调用前必须 memset——hal_net.h 没有规定 get_status
+       返回 HAL_OK 时一定填满每个字段，直接读 st.link/st.ssid 有读到未
+       初始化栈内存的风险，本分支已出现过同类问题（Task 7 的
+       cfg_reject_t、http_query 用法），这次顺手清干净。 */
+    memset(&st, 0, sizeof(st));
     if (hal_has(HAL_MOD_NET) && hal()->net->get_status &&
         hal()->net->get_status(HAL_NETIF_ETH, &st) == HAL_OK)
         eth_up = (st.link == HAL_LINK_UP);
-    if (hal_has(HAL_MOD_NET) && hal()->net->get_status &&
-        hal()->net->get_status(HAL_NETIF_WIFI, &st) == HAL_OK)
-        wifi_up = (st.link == HAL_LINK_UP);
 
     os_mutex_lock(s_netst_mu);
     wifi_cfgd = s_netst.wifi_cfgd;
     cur = s_netst.mode;
     os_mutex_unlock(s_netst_mu);
 
+    memset(&st, 0, sizeof(st));
+    if (hal_has(HAL_MOD_NET) && hal()->net->get_status &&
+        hal()->net->get_status(HAL_NETIF_WIFI, &st) == HAL_OK) {
+        if (cur == NET_MODE_AP) {
+            /* 评审 fix round 3（AP 抖动）：hal_net.h 从没规定 AP 模式下
+               WiFi 接口的 get_status 必须报 link down——如果目标平台在
+               自己广播热点时也把这个接口报成 link UP，单看 link 会被
+               误判成"已关联到目标网络"，导致每次周期复查都 STOP，下一轮
+               又重新判定该 START，热点循环起停（在 Important 1 加了周期
+               复查之后才会暴露，之前只判一次不会抖）。用 SSID 比对堵住：
+               只有 link UP 且平台报的 ssid 与配置里的目标网络名一致，
+               才算真的连上了目标网络而不是 AP 自己的热点名。 */
+            target_ssid[0] = '\0';
+            cfg_get_str("net.wifi.ssid", target_ssid, sizeof(target_ssid));
+            wifi_up = (st.link == HAL_LINK_UP) && target_ssid[0] &&
+                      strcmp(st.ssid, target_ssid) == 0;
+        } else {
+            wifi_up = (st.link == HAL_LINK_UP);
+        }
+    }
+
     action = console_net_ap_decide(eth_up, wifi_cfgd, wifi_up, cur == NET_MODE_AP,
-                                   os_monotonic_us(), &s_wifi_grace_started_us);
+                                   os_monotonic_us(), &s_wifi_grace_active, &s_wifi_grace_started_us);
 
     if (action == CONSOLE_NET_AP_ACTION_START) {
         char serial[HAL_NAME_MAX] = "";
@@ -934,9 +999,14 @@ static void net_dhcp_socket_ensure_open(void)
 
     /* 接口限制（管得住）：取 AP 所在的 WiFi 接口名。mock 平台
        get_status(WIFI) 恒 ENOTSUP，ifname 会保持空串，net_dhcp_bind_to_ap_
-       interface 对此有专门的兜底日志，不会崩。 */
+       interface 对此有专门的兜底日志，不会崩。
+       评审 fix round 3：调用前必须 memset——若某平台实现返回 HAL_OK 却没
+       填 ifname（hal_net.h 没有强制这一点），直接读 st.ifname[0] 就是读
+       未初始化的栈内存，本分支已出现过同类问题（Task 7 的
+       cfg_reject_t、http_query 用法），这次顺手清干净。 */
     if (hal_has(HAL_MOD_NET) && hal()->net->get_status) {
         hal_netif_status_t st;
+        memset(&st, 0, sizeof(st));
         if (hal()->net->get_status(HAL_NETIF_WIFI, &st) == HAL_OK && st.ifname[0])
             snprintf(ifname, sizeof(ifname), "%s", st.ifname);
     }
@@ -1354,6 +1424,15 @@ static int console_net_handler(http_req_t *req, void *user)
         s_netst.connect_req = job;
         os_mutex_unlock(s_netst_mu);
         if (http_conn_defer_after_flush(req->conn, dfn, NULL) != HAL_OK) {
+            /* 评审 fix round 3：登记失败意味着 net_connect_handoff 永远
+               不会被触发，pending 会永远停在 false，没有任何消费者会去
+               碰、更不会去擦 s_netst.connect_req——里面还留着明文 psk。
+               既然已经确定这次不会被消费，就在这里立刻清掉，不要等下一次
+               配网请求"顺便"把它覆盖掉（旧的堆实现在这条分支上是
+               wipe+free 的，这里补回等价的清理）。 */
+            os_mutex_lock(s_netst_mu);
+            secure_wipe_local(&s_netst.connect_req, sizeof(s_netst.connect_req));
+            os_mutex_unlock(s_netst_mu);
 #ifdef IPC_TESTING
             s_netst_defer_fail_count++;
 #endif
