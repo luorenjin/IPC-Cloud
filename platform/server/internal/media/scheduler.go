@@ -22,7 +22,8 @@ func stickyKey(channelID, profile string) string { return fmt.Sprintf("channel:%
 func (s *Scheduler) Pick(channelID, profile string) (*models.MediaNode, error) {
 	ctx := context.Background()
 	var nodes []models.MediaNode
-	if err := store.DB.Where("status = ?", "online").Find(&nodes).Error; err != nil {
+	// 禁用节点（disabled 或 weight<=0）不参与调度
+	if err := store.DB.Where("status = ? AND disabled = ? AND weight > ?", "online", false, 0).Find(&nodes).Error; err != nil {
 		return nil, err
 	}
 	byID := map[string]models.MediaNode{}

@@ -2,32 +2,43 @@
 export function useWs(onEvent: (ev: any) => void) {
   let ws: WebSocket | null = null
   let closed = false
-  let retryMs = 2000
+  let retryMs = 3000
+  let failCount = 0
 
   function connect() {
     const token = useCookie('ipc_token').value
     const projectId = useCookie('ipc_project').value || ''
     if (!token || closed) return
     const proto = location.protocol === 'https:' ? 'wss' : 'ws'
-    ws = new WebSocket(`${proto}://${location.host}/ws/v1/events?token=${token}&projectId=${projectId}`)
-    ws.onmessage = (m) => {
-      try {
-        const ev = JSON.parse(m.data)
-        if (ev.type !== 'connected') onEvent(ev)
-      } catch {}
-    }
-    ws.onclose = () => {
-      if (!closed) {
-        setTimeout(connect, retryMs)
-        retryMs = Math.min(retryMs * 1.5, 15000)
+    try {
+      ws = new WebSocket(`${proto}://${location.host}/ws/v1/events?token=${token}&projectId=${projectId}`)
+      ws.onmessage = (m) => {
+        try {
+          const ev = JSON.parse(m.data)
+          if (ev.type !== 'connected') onEvent(ev)
+        } catch {}
       }
-    }
-    ws.onopen = () => { retryMs = 2000 }
+      ws.onerror = () => {
+        // 静默捕获避免打扰控制台
+      }
+      ws.onclose = () => {
+        if (!closed) {
+          failCount++
+          const delay = failCount > 2 ? 30000 : retryMs
+          setTimeout(connect, delay)
+          retryMs = Math.min(retryMs * 1.5, 15000)
+        }
+      }
+      ws.onopen = () => {
+        retryMs = 3000
+        failCount = 0
+      }
+    } catch {}
   }
 
   onMounted(connect)
   onBeforeUnmount(() => {
     closed = true
-    ws?.close()
+    try { ws?.close() } catch {}
   })
 }

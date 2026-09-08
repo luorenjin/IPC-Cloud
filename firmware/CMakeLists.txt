@@ -37,8 +37,8 @@ add_subdirectory(platform/${IPC_PLATFORM})
 # L2 核心服务
 add_subdirectory(core)
 
-# L3 功能模块（按实现进度逐个 add_subdirectory）：
-# add_subdirectory(modules)
+# L3 功能模块与共享部件
+add_subdirectory(modules)
 
 # 门禁：core/ 与 modules/ 禁止包含 platform 头与平台宏（存在源码时启用）
 file(GLOB_RECURSE IPC_GENERIC_SOURCES CONFIGURE_DEPENDS core/*.c core/*.h modules/*.c modules/*.h)
@@ -52,5 +52,7 @@ endforeach()
 enable_testing()
 add_subdirectory(tests/hal_conformance)
 add_subdirectory(tests/core_test)
+add_subdirectory(tests/http_server_test)
+add_subdirectory(tests/console_test)
 
 message(STATUS "IPC_PLATFORM=${IPC_PLATFORM}  IPC_PROFILE=${IPC_PROFILE}")

@@ -24,7 +24,7 @@ extern "C" {
 
 /** HAL 接口版本：主版本不兼容变更，次版本向后兼容扩展 */
 #define HAL_API_VERSION_MAJOR 1
-#define HAL_API_VERSION_MINOR 0
+#define HAL_API_VERSION_MINOR 2 /* v1.2：hal_net 的 netif_status 增加 IP 地址字段（向后兼容扩展） */
 #define HAL_API_VERSION ((HAL_API_VERSION_MAJOR << 16) | HAL_API_VERSION_MINOR)
 
 /* ---------------------------------------------------------------------- */

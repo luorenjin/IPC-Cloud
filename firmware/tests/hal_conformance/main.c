@@ -276,6 +276,13 @@ static void test_gpio_net_storage(void)
 
     CHECK(n->get_mac(HAL_NETIF_ETH, mac) == HAL_OK, "eth mac");
     CHECK(n->get_status(HAL_NETIF_ETH, &ns) == HAL_OK && ns.ifname[0], "eth status");
+    /* ip 是尽力而为字段（hal_net.h 的字段注释：未获取到地址时约定为空串），
+       不强制要求非空——不同平台的以太网在 HAL 查询这一刻是否已经拿到地址
+       是运行期状态，不是 HAL 契约能保证的东西。这里只核对缓冲区语义本身：
+       必须是 HAL_IP_MAX 缓冲区内 NUL 结尾的字符串，不能是未终止的溢出写入
+       （否则 console 侧的 "%s" 格式化会读出界）。 */
+    CHECK(memchr(ns.ip, '\0', sizeof(ns.ip)) != NULL,
+          "eth status.ip 必须是缓冲区内 NUL 结尾的字符串（空串合法，表示尚未获取地址）");
     rc = n->poll_event(&ne, 20);
     CHECK(rc == HAL_OK || rc == HAL_EAGAIN, "net poll_event");
 
@@ -288,6 +295,25 @@ static void test_gpio_net_storage(void)
     }
     rc = st->poll_event(&se, 20);
     CHECK(rc == HAL_OK || rc == HAL_EAGAIN, "storage poll_event");
+
+    /* AP 模式（可选能力：不支持须返回 HAL_ENOTSUP，且 caps.wifi_ap 为 false） */
+    {
+        hal_net_caps_t caps;
+        bool has_ap = (hal()->net->wifi_ap_start != NULL);
+        CHECK(hal()->net->get_caps(&caps) == HAL_OK, "net get_caps");
+        if (has_ap) {
+            CHECK(caps.wifi_ap == true, "声明了 wifi_ap_start 则 caps.wifi_ap 必须为 true");
+            CHECK(hal()->net->wifi_ap_start("IPC-TEST", "12345678", 6) == HAL_OK, "wifi_ap_start");
+            CHECK(hal()->net->wifi_ap_start("IPC-TEST", "12345678", 6) == HAL_EBUSY,
+                  "重复 start 返回 EBUSY");
+            CHECK(hal()->net->wifi_ap_stop() == HAL_OK, "wifi_ap_stop");
+            CHECK(hal()->net->wifi_ap_stop() == HAL_ESTATE, "未启动时 stop 返回 ESTATE");
+            /* PSK 过短须拒绝：WPA2 要求 8~63 字符 */
+            CHECK(hal()->net->wifi_ap_start("IPC-TEST", "123", 6) == HAL_EINVAL, "PSK 过短");
+        } else {
+            CHECK(caps.wifi_ap == false, "未实现 AP 则 caps.wifi_ap 必须为 false");
+        }
+    }
 }
 
 /* ---------------- HAL-08 crypto（可选） ---------------- */

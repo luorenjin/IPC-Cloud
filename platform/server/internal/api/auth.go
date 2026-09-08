@@ -25,14 +25,23 @@ func handleLogin(c *gin.Context) {
 		fail(c, errs.EBadRequest)
 		return
 	}
+	auditLogin := func(result string) {
+		store.DB.Create(&models.AuditLog{
+			ID: "lg_" + models.NewID(), UserID: req.Username, Username: req.Username,
+			Action: "login", Target: "session:" + req.Username, Result: result,
+			IP: c.ClientIP(), Detail: models.JSONB{"path": "/auth/login"}, Ts: models.NowMilli(),
+		})
+	}
 	if left := auth.CheckLocked(req.Username); left > 0 {
 		e := errs.EAccountLocked.WithMsg("账号已锁定，请 " + itoa(left) + " 秒后重试")
+		auditLogin("fail")
 		fail(c, e)
 		return
 	}
 	var u models.User
 	if err := store.DB.First(&u, "username = ?", req.Username).Error; err != nil ||
 		!crypto.VerifyPassword(req.Password, u.PwdHash) {
+		auditLogin("fail")
 		if auth.RecordFail(req.Username) {
 			fail(c, errs.EAccountLocked.WithMsg("连续 5 次登录失败，账号锁定 15 分钟"))
 			return
@@ -51,6 +60,7 @@ func handleLogin(c *gin.Context) {
 		fail(c, errs.EServerInternal)
 		return
 	}
+	auditLogin("success")
 	ok(c, gin.H{"accessToken": access, "refreshToken": refresh,
 		"user": gin.H{"id": u.ID, "username": u.Username, "name": u.Name}})
 }

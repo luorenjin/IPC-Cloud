@@ -1,8 +1,13 @@
 package api
 
 import (
+	"fmt"
+	"strings"
+	"time"
+
 	"github.com/gin-gonic/gin"
 
+	"github.com/jetscam/ipccloud/server/internal/bus"
 	"github.com/jetscam/ipccloud/server/internal/errs"
 	"github.com/jetscam/ipccloud/server/internal/models"
 	"github.com/jetscam/ipccloud/server/internal/store"
@@ -35,6 +40,41 @@ func handleCreateRecordTemplate(c *gin.Context) {
 		Name: req.Name, Kind: req.Kind, Schedule: req.Schedule,
 		CreatedAt: models.NowMilli(), UpdatedAt: models.NowMilli()}
 	store.DB.Create(&t)
+	ok(c, t)
+}
+
+// handleUpdateRecordTemplate REC-05：修改录像计划模板（内置不可改；自定义 ≤7 个）。
+func handleUpdateRecordTemplate(c *gin.Context) {
+	var t models.RecordTemplate
+	if store.DB.First(&t, "id = ?", c.Param("id")).Error != nil {
+		fail(c, errs.ENotFound)
+		return
+	}
+	if t.Builtin {
+		fail(c, errs.EForbid.WithMsg("内置模板不可修改"))
+		return
+	}
+	var req struct {
+		Name     string       `json:"name"`
+		Kind     string       `json:"kind"`
+		Schedule models.JSONB `json:"schedule"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		fail(c, errs.EBadRequest)
+		return
+	}
+	updates := map[string]any{"updated_at": models.NowMilli()}
+	if req.Name != "" {
+		updates["name"] = req.Name
+	}
+	if req.Kind == "timer" || req.Kind == "event" {
+		updates["kind"] = req.Kind
+	}
+	if req.Schedule != nil {
+		updates["schedule"] = req.Schedule
+	}
+	store.DB.Model(&t).Updates(updates)
+	store.DB.First(&t, "id = ?", c.Param("id"))
 	ok(c, t)
 }
 
@@ -126,6 +166,97 @@ func handleUpdateRecordPlan(c *gin.Context) {
 func handleDeleteRecordPlan(c *gin.Context) {
 	store.DB.Delete(&models.RecordPlan{}, "id = ?", c.Param("id"))
 	ok(c, nil)
+}
+
+// handleRecordDays REC-02：日期选择器高亮——返回区间内有录像的日期列表（本地时区）。
+func handleRecordDays(c *gin.Context) {
+	var q struct {
+		Start  int64  `form:"start" binding:"required"`
+		End    int64  `form:"end" binding:"required"`
+		Source string `form:"source"`
+	}
+	if err := c.ShouldBindQuery(&q); err != nil {
+		fail(c, errs.EBadRequest)
+		return
+	}
+	chID := c.Param("id")
+	type row struct {
+		StartTs int64
+		EndTs   int64
+	}
+	var rows []row
+	dq := store.DB.Model(&models.RecordIndex{}).Select("start_ts, end_ts").
+		Where("channel_id = ? AND start_ts < ? AND end_ts > ?", chID, q.End, q.Start)
+	if q.Source == "device" || q.Source == "platform" {
+		dq = dq.Where("source = ?", q.Source)
+	}
+	dq.Find(&rows)
+	// 按天展开（段可能跨天）
+	seen := map[string]bool{}
+	days := []string{}
+	for _, r := range rows {
+		d := r.StartTs
+		for d < r.EndTs {
+			key := time.UnixMilli(d).Format("2006-01-02")
+			if !seen[key] {
+				seen[key] = true
+				days = append(days, key)
+			}
+			d += 86400_000
+		}
+	}
+	ok(c, gin.H{"days": days})
+}
+
+// handleRecordDownload REC-08：时间轴框选下载——建任务（任务中心），返回覆盖区间的录像文件。
+// MVP：平台录像按段返回原始 MP4 文件 URL（同源 /media 代理可下载）；合并为单文件为后续增强。
+func handleRecordDownload(c *gin.Context) {
+	ctx := getCtx(c)
+	var req struct {
+		Start  float64 `json:"start" binding:"required"`
+		End    float64 `json:"end" binding:"required"`
+		Source string  `json:"source"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		fail(c, errs.EBadRequest)
+		return
+	}
+	if req.End <= req.Start {
+		fail(c, errs.EBadRequest.WithMsg("结束时间需晚于开始时间"))
+		return
+	}
+	chID := c.Param("id")
+	var recs []models.RecordIndex
+	dq := store.DB.Where("channel_id = ? AND start_ts < ? AND end_ts > ?", chID, int64(req.End), int64(req.Start))
+	if req.Source == "device" || req.Source == "platform" {
+		dq = dq.Where("source = ?", req.Source)
+	}
+	dq.Order("start_ts ASC").Find(&recs)
+	if len(recs) == 0 {
+		fail(c, errs.ENotFound.WithMsg("所选时间范围内无平台录像"))
+		return
+	}
+	// 节点公网地址（文件经 ZLM HTTP 静态服务）
+	var node models.MediaNode
+	store.DB.Where("status = ?", "online").Order("weight DESC").First(&node)
+	files := make([]gin.H, 0, len(recs))
+	for _, r := range recs {
+		rel := strings.TrimPrefix(r.Path, "/")
+		url := "/media/" + rel // 前端同源代理路径
+		if node.ID != "" {
+			url = fmt.Sprintf("http://%s:%d/%s", node.PublicHost, node.HTTPPort, rel)
+		}
+		files = append(files, gin.H{"start": r.StartTs, "end": r.EndTs, "size": r.Size, "url": url})
+	}
+	t := models.Task{ID: "tk_" + models.NewID(), Type: "download", Status: "success", Progress: 100,
+		Result: models.JSONB{"projectId": ctx.ProjectID, "channelId": chID, "files": files,
+			"count": len(files), "note": "MVP：按段返回 MP4 文件，合并下载后续提供"},
+		CreatedBy: ctx.UserID, CreatedAt: models.NowMilli(), UpdatedAt: models.NowMilli()}
+	store.DB.Create(&t)
+	bus.Default.Publish(bus.Event{Type: "task.progress", ProjectID: ctx.ProjectID,
+		Data: map[string]any{"taskId": t.ID, "status": "success", "progress": 100,
+			"title": "录像片段下载", "detail": fmt.Sprintf("%d 个文件", len(files))}})
+	ok(c, gin.H{"taskId": t.ID, "files": files})
 }
 
 // handleStorageOverview REC-07 存储概览。

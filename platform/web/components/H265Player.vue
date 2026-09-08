@@ -170,19 +170,22 @@ watch(state, (s) => {
     }, 30000)
   }
 })
+
+// 错误码解析（MGR-15：E4xxx 流媒体错误单独展示）
+const errCode = computed(() => (/E\d{4}/.exec(errMsg.value || '') || [''])[0])
+const errText = computed(() => (errMsg.value || '播放失败').replace(/E\d{4}\s*/, '') || '播放失败')
 </script>
 
 <template>
-  <div class="player-box" ref="container">
-    <div v-if="state === 'idle'" class="overlay">未播放</div>
-    <div v-else-if="state === 'loading'" class="overlay">
-      <el-icon class="is-loading"><Loading /></el-icon> 正在连接…
+  <div ref="container" class="player-box">
+    <div v-if="state === 'idle'" class="absolute inset-0 z-10 flex items-center justify-center text-sm text-placeholder">未播放</div>
+    <div v-else-if="state === 'loading'" class="absolute inset-0 z-10 flex items-center justify-center gap-2 text-sm text-placeholder">
+      <Icon name="refresh" :size="16" class="ipc-spin" />正在连接…
     </div>
-    <div v-else-if="state === 'error'" class="overlay error">
-      <div>{{ errMsg || '播放失败' }}</div>
-      <el-button size="small" style="margin-top: 8px" @click="emit('retry')">重试</el-button>
+    <div v-else-if="state === 'error'" class="absolute inset-0 z-10 flex items-center justify-center p-4">
+      <UiErrorCard :code="errCode" :msg="errText" :suggest="'可点击重试重新起流；持续失败请在设备列表发起诊断'" @retry="emit('retry')" @diagnose="emit('retry')" />
     </div>
-    <div v-if="title && state === 'playing'" class="title">{{ title }}</div>
+    <div v-if="title && state === 'playing'" class="absolute inset-x-0 top-0 bg-black/45 px-2 py-1 text-xs text-white">{{ title }}</div>
   </div>
 </template>
 
@@ -196,11 +199,5 @@ watch(state, (s) => {
 .player-box :deep(canvas) {
   width: auto !important; height: auto !important;
   max-width: 100%; max-height: 100%;
-}
-.overlay { color: #909399; text-align: center; }
-.overlay.error { color: #f56c6c; display: flex; flex-direction: column; align-items: center; }
-.title {
-  position: absolute; top: 0; left: 0; right: 0; padding: 4px 8px;
-  background: rgba(0,0,0,.45); color: #fff; font-size: 12px;
 }
 </style>

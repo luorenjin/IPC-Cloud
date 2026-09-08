@@ -1,11 +1,25 @@
 // 生产代理目标：构建时由 API_ORIGIN 指定（本地默认 8080，compose 内为 server:8080）
+import tailwindcss from '@tailwindcss/vite'
+
 const apiOrigin = process.env.API_ORIGIN || 'http://localhost:8080'
 
 export default defineNuxtConfig({
+  compatibilityDate: '2026-09-07',
   ssr: false,
+  experimental: {
+    appManifest: false
+  },
   devtools: { enabled: false },
-  modules: ['@element-plus/nuxt'],
-  elementPlus: { importStyle: 'css' },
+  modules: [],
+  components: [
+    { path: '~/components/ui', prefix: 'ui' },
+    { path: '~/components/ui', pathPrefix: false },
+    '~/components'
+  ],
+  css: ['~/assets/css/main.css'],
+  vite: {
+    plugins: [tailwindcss()]
+  },
   app: {
     head: {
       title: 'IpcCloud 视频管理平台',
@@ -19,7 +33,7 @@ export default defineNuxtConfig({
       ]
     }
   },
-  // COOP/COEP：多线程 WASM 解码要求（PRD §6.4）
+  // COOP/COEP：多线程 WASM 解码要求（PRD §6.4），不可删除
   nitro: {
     routeRules: {
       '/**': {

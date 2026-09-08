@@ -82,7 +82,7 @@ function onMouseUpHandler() {
 <template>
   <div class="sched">
     <div class="head" />
-    <div v-for="i in 24" :key="i" class="head">{{ i - 1 }}</div>
+    <div v-for="i in 48" :key="i" class="head">{{ (i - 1) % 2 === 0 ? Math.floor((i - 1) / 2) : '' }}</div>
 
     <template v-for="(d, di) in days" :key="d">
       <div class="day">{{ d }}</div>
@@ -98,11 +98,13 @@ function onMouseUpHandler() {
 <style scoped>
 .sched {
   display: grid;
-  grid-template-columns: 48px repeat(48, 8px);
+  grid-template-columns: 48px repeat(48, 1fr);
   gap: 1px; user-select: none; overflow-x: auto;
+  min-width: 432px;
 }
-.head { font-size: 10px; color: #909399; text-align: center; height: 18px; }
-.day { font-size: 12px; color: #606266; height: 14px; line-height: 14px; }
-.cell { height: 14px; background: #f0f2f5; cursor: pointer; }
-.cell.on { background: #409eff; }
+.head { font-size: 9px; color: var(--color-placeholder); text-align: center; height: 16px; }
+.day { font-size: 12px; color: var(--color-muted); height: 16px; line-height: 16px; }
+.cell { height: 16px; background: var(--color-zone); cursor: pointer; }
+.cell:hover { outline: 1px solid var(--color-primary); outline-offset: -1px; }
+.cell.on { background: var(--color-rec-timer); }
 </style>

@@ -1,0 +1,127 @@
+/* IpcCloud 设计令牌（对齐 PRD/TP-LINK 商云视觉基线，见 Docs/UI审计_PRD前端差异报告_v1.0.md §4） */
+@import 'tailwindcss';
+
+@theme {
+  /* 品牌色：主色 #1785E6，深档 #0A6BCC（截图实测） */
+  --color-primary: #1785e6;
+  --color-primary-deep: #0a6bcc;
+  --color-primary-soft: #e8f3fc;
+  --color-primary-softer: #f2f8fd;
+
+  /* 侧栏：近黑 #101113（PRD 基线），文字 #a3a6ad */
+  --color-sidebar: #101113;
+  --color-sidebar-deep: #000000;
+  --color-sidebar-text: #9aa0a8;
+  --color-sidebar-hover: #1b1d21;
+
+  /* 中性 */
+  --color-ink: #1f2329;       /* 标题近黑 */
+  --color-body: #333333;      /* 正文 */
+  --color-muted: #666666;     /* 次要 */
+  --color-placeholder: #999999; /* 占位/说明 */
+  --color-line: #e5e6eb;      /* 边框 */
+  --color-line-soft: #f0f0f0; /* 分隔线 */
+  --color-surface: #ffffff;   /* 卡片 */
+  --color-canvas: #f5f6f7;    /* 页面底（浅灰，替代 Element 灰蓝 #f5f7fa） */
+  --color-zone: #f2f2f2;      /* 分区/悬停浅灰 */
+
+  /* 状态 */
+  --color-success: #2ba471;
+  --color-success-soft: #e8f7f0;
+  --color-warning: #e6a23c;
+  --color-warning-soft: #fdf3e3;
+  --color-danger: #e54d42;
+  --color-danger-soft: #fdecea;
+  --color-info: #909399;
+
+  /* 录像时间轴三色（REC-02：定时蓝/事件绿/手动琥珀） */
+  --color-rec-timer: #1785e6;
+  --color-rec-event: #2ba471;
+  --color-rec-manual: #e6a23c;
+
+  /* 设备来源标签固定色（PRD §9.1：自有蓝/国标绿/ONVIF橙/RTSP灰） */
+  --color-src-idp: #1785e6;
+  --color-src-gb: #2ba471;
+  --color-src-onvif: #e6883c;
+  --color-src-rtsp: #8a8f99;
+
+  --font-sans: 'PingFang SC', 'Microsoft YaHei', 'Noto Sans SC', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+
+  --radius-card: 4px;
+  --shadow-card: 0 1px 2px rgba(15, 23, 42, 0.04);
+  --shadow-pop: 0 6px 24px rgba(15, 23, 42, 0.12);
+}
+
+html,
+body,
+#__nuxt {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: var(--font-sans);
+  color: var(--color-body);
+  background: var(--color-canvas);
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 细滚动条（现代 UI 基线） */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #c9cdd4 transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: #c9cdd4;
+  border-radius: 4px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* 动画（Reka 弹出层） */
+@keyframes ipc-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes ipc-fade-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+@keyframes ipc-pop-in {
+  from { opacity: 0; transform: translateY(4px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes ipc-pop-out {
+  from { opacity: 1; transform: translateY(0) scale(1); }
+  to { opacity: 0; transform: translateY(4px) scale(0.98); }
+}
+@keyframes ipc-slide-right {
+  from { transform: translateX(100%); }
+  to { transform: translateX(0); }
+}
+@keyframes ipc-slide-right-out {
+  from { transform: translateX(0); }
+  to { transform: translateX(100%); }
+}
+@keyframes ipc-toast-in {
+  from { opacity: 0; transform: translateY(-12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes ipc-spin {
+  to { transform: rotate(360deg); }
+}
+
+.ipc-anim-fade-in { animation: ipc-fade-in 0.15s ease-out; }
+.ipc-anim-fade-out { animation: ipc-fade-out 0.12s ease-in both; }
+.ipc-anim-pop-in { animation: ipc-pop-in 0.16s ease-out; }
+.ipc-anim-pop-out { animation: ipc-pop-out 0.12s ease-in both; }
+.ipc-anim-slide-right { animation: ipc-slide-right 0.22s cubic-bezier(0.32, 0.72, 0, 1); }
+.ipc-anim-slide-right-out { animation: ipc-slide-right-out 0.18s ease-in both; }
+.ipc-anim-toast-in { animation: ipc-toast-in 0.18s ease-out; }
+.ipc-spin { animation: ipc-spin 0.8s linear infinite; }

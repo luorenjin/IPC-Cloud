@@ -1,11 +1,18 @@
 <script setup lang="ts">
-// 操作日志（ACC-08）：查询、筛选、分页与导出
+// 操作日志（ACC-08）：筛选（时间范围/操作者/对象类型/动作）、分页与导出 CSV
 const api = useApi()
+const toast = useToast()
 const { currentProject, loadMe } = useAuth()
 
-const filters = reactive({ action: '', username: '' })
+const filters = reactive({
+  action: '',
+  username: '',
+  targetType: '',
+  dateFrom: '',
+  dateTo: ''
+})
 const page = ref(1)
-const pageSize = 20
+const pageSize = ref(20)
 const total = ref(0)
 const items = ref<any[]>([])
 const loading = ref(false)
@@ -13,24 +20,72 @@ const loading = ref(false)
 /* 动作中文映射（未匹配的动作原样展示） */
 const ACTION_MAP: Record<string, string> = {
   'device.add': '添加设备',
+  'device.delete': '删除设备',
+  'device.transfer': '转移设备',
   'user.create': '创建成员',
-  'login': '登录'
+  'user.delete': '删除成员',
+  'role.create': '创建角色',
+  'role.update': '修改角色',
+  'role.delete': '删除角色',
+  'group.create': '创建分组',
+  'group.delete': '删除分组',
+  'node.create': '创建节点',
+  'node.delete': '删除节点',
+  'settings.update': '修改设置',
+  'login': '登录',
+  'logout': '退出登录'
 }
 const actionLabel = (a: string) => ACTION_MAP[a] || a || '-'
+
+/* 对象类型（由动作前缀推断） */
+const TARGET_TYPES = [
+  { label: '全部', value: '' },
+  { label: '设备', value: 'device' },
+  { label: '成员', value: 'user' },
+  { label: '角色', value: 'role' },
+  { label: '分组', value: 'group' },
+  { label: '节点', value: 'node' },
+  { label: '设置', value: 'settings' },
+  { label: '会话', value: 'login' }
+]
+function targetTypeOf(action: string): string {
+  const a = String(action || '')
+  if (a.startsWith('device.')) return '设备'
+  if (a.startsWith('user.')) return '成员'
+  if (a.startsWith('role.')) return '角色'
+  if (a.startsWith('group.')) return '分组'
+  if (a.startsWith('node.') || a.startsWith('media-node')) return '节点'
+  if (a.startsWith('settings.') || a.startsWith('alarm.') || a.startsWith('record.')) return '设置'
+  if (a === 'login' || a === 'logout') return '会话'
+  return '其他'
+}
 
 async function loadLogs() {
   loading.value = true
   try {
-    const res: any = await api.get('/audit-logs', {
+    const params: any = {
       page: page.value,
-      pageSize,
+      pageSize: pageSize.value,
       action: filters.action.trim() || undefined,
       username: filters.username.trim() || undefined
-    })
-    items.value = res?.items || []
+    }
+    // 时间范围 -> 后端 ts 过滤（以毫秒时间戳传递，未支持时由后端忽略）
+    if (filters.dateFrom) params.start = Date.parse(filters.dateFrom + 'T00:00:00')
+    if (filters.dateTo) params.end = Date.parse(filters.dateTo + 'T23:59:59')
+    const res: any = await api.get('/audit-logs', params)
+    let list = res?.items || []
+    // 对象类型为前端派生字段，做客户端过滤
+    if (filters.targetType) {
+      list = list.filter((r: any) => {
+        const t = r.targetType || targetTypeOf(r.action)
+        const label = TARGET_TYPES.find((x) => x.value === filters.targetType)?.label
+        return t === label || String(r.action || '').startsWith(filters.targetType + '.')
+      })
+    }
+    items.value = list
     total.value = res?.total || 0
   } catch (e: any) {
-    ElMessage.error(e?.msg || '加载操作日志失败')
+    toastApiError(e, '加载操作日志失败')
   } finally {
     loading.value = false
   }
@@ -44,12 +99,21 @@ function search() {
 function resetFilters() {
   filters.action = ''
   filters.username = ''
+  filters.targetType = ''
+  filters.dateFrom = ''
+  filters.dateTo = ''
   search()
 }
 
-/* 导出操作日志 */
+/* 导出 CSV（带当前筛选条件；后端 /audit-logs/export 输出 CSV） */
 function exportLogs() {
-  window.open('/api/v1/audit-logs/export')
+  const qs = new URLSearchParams()
+  if (filters.action.trim()) qs.set('action', filters.action.trim())
+  if (filters.username.trim()) qs.set('username', filters.username.trim())
+  if (filters.dateFrom) qs.set('start', String(Date.parse(filters.dateFrom + 'T00:00:00')))
+  if (filters.dateTo) qs.set('end', String(Date.parse(filters.dateTo + 'T23:59:59')))
+  window.open('/api/v1/audit-logs/export' + (qs.toString() ? '?' + qs.toString() : ''))
+  toast.success('已开始导出（最多 10000 条）')
 }
 
 const fmtTime = (ts: any) =>
@@ -57,10 +121,20 @@ const fmtTime = (ts: any) =>
 
 /* 结果标签：success 绿 / fail 红 */
 function resultTag(r: string) {
-  if (r === 'success') return { text: '成功', type: 'success' as const }
-  if (r === 'fail') return { text: '失败', type: 'danger' as const }
-  return { text: r || '-', type: 'info' as const }
+  if (r === 'success') return { text: '成功', color: 'success' as const }
+  if (r === 'fail') return { text: '失败', color: 'danger' as const }
+  return { text: r || '-', color: 'info' as const }
 }
+
+const cols = [
+  { key: 'ts', label: '时间', width: '170px' },
+  { key: 'username', label: '操作者', width: '120px' },
+  { key: 'targetType', label: '对象类型', width: '90px', align: 'center' as const },
+  { key: 'target', label: '对象', width: '200px' },
+  { key: 'action', label: '动作', width: '140px' },
+  { key: 'result', label: '结果', width: '80px', align: 'center' as const },
+  { key: 'ip', label: 'IP', width: '140px' }
+]
 
 onMounted(async () => {
   // 布局可能尚未完成会话加载，兜底拉取一次
@@ -70,81 +144,55 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="page">
-    <el-card shadow="never">
-      <template #header>
-        <div class="head">
-          <span>操作日志</span>
-          <el-button type="primary" @click="exportLogs">导出</el-button>
-        </div>
+  <div class="space-y-3">
+    <UiCard title="操作日志" flat>
+      <template #extra>
+        <UiButton variant="primary" size="sm" @click="exportLogs">
+          <UiIcon name="download" :size="14" />导出 CSV
+        </UiButton>
       </template>
 
       <!-- 筛选条件 -->
-      <el-form inline @submit.prevent>
-        <el-form-item label="动作">
-          <el-input
-            v-model="filters.action"
-            placeholder="如 device.add"
-            clearable
-            style="width: 180px"
-            @keyup.enter="search"
-            @clear="search"
-          />
-        </el-form-item>
-        <el-form-item label="操作者">
-          <el-input
-            v-model="filters.username"
-            placeholder="用户名"
-            clearable
-            style="width: 160px"
-            @keyup.enter="search"
-            @clear="search"
-          />
-        </el-form-item>
-        <el-form-item>
-          <el-button type="primary" @click="search">查询</el-button>
-          <el-button @click="resetFilters">重置</el-button>
-        </el-form-item>
-      </el-form>
+      <div class="mb-3 flex flex-wrap items-center gap-2">
+        <span class="text-sm text-muted">时间</span>
+        <UiInput v-model="filters.dateFrom" type="date" size="sm" width="w-40" @enter="search" />
+        <span class="text-placeholder">至</span>
+        <UiInput v-model="filters.dateTo" type="date" size="sm" width="w-40" @enter="search" />
+        <UiInput
+          v-model="filters.username" placeholder="操作者" clearable
+          size="sm" width="w-36" @enter="search" @clear="search"
+        />
+        <UiSelect v-model="filters.targetType" :options="TARGET_TYPES" size="sm" width="w-32" placeholder="对象类型" />
+        <UiInput
+          v-model="filters.action" placeholder="动作，如 device.add" clearable
+          size="sm" width="w-45" @enter="search" @clear="search"
+        />
+        <UiButton variant="primary" size="sm" @click="search">
+          <UiIcon name="search" :size="13" />查询
+        </UiButton>
+        <UiButton size="sm" @click="resetFilters">重置</UiButton>
+      </div>
 
-      <el-table v-loading="loading" :data="items" border>
-        <el-table-column label="时间" width="180">
-          <template #default="{ row }">{{ fmtTime(row.ts) }}</template>
-        </el-table-column>
-        <el-table-column label="操作者" width="120">
-          <template #default="{ row }">{{ row.username || '-' }}</template>
-        </el-table-column>
-        <el-table-column label="动作" min-width="140">
-          <template #default="{ row }">{{ actionLabel(row.action) }}</template>
-        </el-table-column>
-        <el-table-column label="对象" min-width="180" show-overflow-tooltip>
-          <template #default="{ row }">{{ row.target || '-' }}</template>
-        </el-table-column>
-        <el-table-column label="结果" width="90" align="center">
-          <template #default="{ row }">
-            <el-tag :type="resultTag(row.result).type" size="small">{{ resultTag(row.result).text }}</el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="IP" width="150">
-          <template #default="{ row }">{{ row.ip || '-' }}</template>
-        </el-table-column>
-      </el-table>
+      <UiEmptyState v-if="!loading && !items.length" text="暂无操作日志" icon="history" />
+      <UiTable v-else :columns="cols" :rows="items" :loading="loading">
+        <template #ts="{ row }">{{ fmtTime(row.ts) }}</template>
+        <template #username="{ row }">{{ row.username || '-' }}</template>
+        <template #targetType="{ row }">{{ row.targetType || targetTypeOf(row.action) }}</template>
+        <template #target="{ row }">
+          <span class="block truncate" :title="row.target">{{ row.target || '-' }}</span>
+        </template>
+        <template #action="{ row }">{{ actionLabel(row.action) }}</template>
+        <template #result="{ row }">
+          <UiTag :color="resultTag(row.result).color">{{ resultTag(row.result).text }}</UiTag>
+        </template>
+        <template #ip="{ row }">{{ row.ip || '-' }}</template>
+      </UiTable>
 
       <!-- 分页 -->
-      <div class="pager">
-        <el-pagination
-          layout="total, prev, pager, next"
-          :total="total"
-          :page-size="pageSize"
-          :current-page="page"
-          @current-change="(p: number) => { page = p; loadLogs() }"
-        />
-      </div>
-    </el-card>
+      <UiPagination
+        v-model:page="page" v-model:page-size="pageSize" :total="total"
+        @update:page="loadLogs" @update:page-size="search"
+      />
+    </UiCard>
   </div>
 </template>
-
-<style scoped>
-.head { display: flex; justify-content: space-between; align-items: center; }
-.pager { display: flex; justify-content: flex-end; margin-top: 12px; }
-</style>

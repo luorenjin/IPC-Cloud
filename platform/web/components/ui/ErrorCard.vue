@@ -1,0 +1,19 @@
+<script setup lang="ts">
+// 错误卡片（MGR-15：错误码 + 原因 + 建议 + [重试][诊断]）
+const props = defineProps<{ code?: string; msg?: string; suggest?: string }>()
+const emit = defineEmits<{ retry: []; diagnose: [] }>()
+</script>
+
+<template>
+  <div class="flex flex-col items-center justify-center gap-2 rounded bg-black/70 px-6 py-5 text-center backdrop-blur-sm">
+    <span class="text-danger"><Icon name="alert-circle" :size="26" /></span>
+    <p class="text-sm font-medium text-white">
+      <span v-if="code" class="mr-1 font-mono text-danger">{{ code }}</span>{{ msg || '播放失败' }}
+    </p>
+    <p v-if="suggest" class="max-w-sm text-xs leading-5 text-[#c9cdd4]">{{ suggest }}</p>
+    <div class="mt-1 flex items-center gap-2">
+      <button class="h-7 rounded border border-[#4e5969] px-3 text-xs text-white transition-colors hover:border-primary hover:text-primary" @click="emit('retry')">重试</button>
+      <button class="h-7 rounded border border-[#4e5969] px-3 text-xs text-white transition-colors hover:border-primary hover:text-primary" @click="emit('diagnose')">诊断</button>
+    </div>
+  </div>
+</template>

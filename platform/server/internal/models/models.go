@@ -256,6 +256,11 @@ type MediaNode struct {
 	RTPRange      string `gorm:"size:64;default:30000-30100" json:"rtpRange"`
 	MaxStreams    int    `gorm:"default:200" json:"maxStreams"`
 	Streams       int    `gorm:"default:0" json:"streams"`
+	Playing       int    `gorm:"default:0" json:"playing"`   // SYS-01 当前播放路数
+	BwIn          int64  `gorm:"default:0" json:"bwIn"`      // SYS-01 入带宽 B/s
+	BwOut         int64  `gorm:"default:0" json:"bwOut"`     // SYS-01 出带宽 B/s
+	Version       string `gorm:"size:128" json:"version"`    // SYS-01 ZLM 版本（Server 头）
+	Disabled      bool   `gorm:"default:false" json:"disabled"` // 禁用（不参与调度）
 	Weight        int    `gorm:"default:100" json:"weight"`
 	Status        string `gorm:"size:16;default:offline" json:"status"`
 	LastKeepalive int64  `json:"lastKeepalive"`

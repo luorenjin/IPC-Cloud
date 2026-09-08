@@ -18,6 +18,10 @@ extern "C" {
 #define HAL_SSID_MAX 33
 #define HAL_PSK_MAX  65
 #define HAL_IFNAME_MAX 16
+/** IPv4 点分十进制或 IPv6 冒号十六进制文本形式的缓冲宽度（INET6_ADDRSTRLEN=46，
+ *  含 NUL），与 modules/common/http_server 的 CONN_PEER_IP_MAX 取值一致，
+ *  为将来的 IPv6 预留空间。 */
+#define HAL_IP_MAX 46
 
 typedef enum {
     HAL_NETIF_ETH = 0,
@@ -51,6 +55,11 @@ typedef struct {
     char             ifname[HAL_IFNAME_MAX];
     hal_link_state_t link;
     uint8_t          mac[6];
+    /** 当前 IPv4/IPv6 地址的文本形式。**未获取到地址时（未启用 DHCP、
+     *  链路未 up、DHCP 尚未完成等）约定为空串**——调用方据此判断"是否已知"，
+     *  不应对空串做任何进一步解析。不保证地址仍然有效（可能已过期），
+     *  只反映平台实现最近一次查询到的值。 */
+    char             ip[HAL_IP_MAX];
     /* WiFi 专用 */
     char             ssid[HAL_SSID_MAX];
     int              rssi_dbm;
@@ -70,6 +79,7 @@ typedef struct {
     bool wifi;
     bool wifi_5g;
     uint32_t wifi_sec_mask;   /**< bit(HAL_WIFI_SEC_x) */
+    bool wifi_ap;             /**< 是否支持 AP（热点）模式，供本地配网使用 */
 } hal_net_caps_t;
 
 typedef struct hal_net_ops {
@@ -82,6 +92,18 @@ typedef struct hal_net_ops {
     hal_err_t (*wifi_scan)(hal_wifi_ap_t *aps, uint32_t max, uint32_t *count, uint32_t timeout_ms);
     hal_err_t (*wifi_connect)(const char *ssid, const char *psk, hal_wifi_sec_t sec);
     hal_err_t (*wifi_disconnect)(void);
+
+    /**
+     * 启动 AP（热点）模式，供未配网时的本地 Web 配网使用。
+     * 可选能力：不支持的平台将本指针置 NULL，并在 get_caps 中置 wifi_ap=false。
+     * ssid    热点名，不超过 HAL_SSID_MAX-1
+     * psk     WPA2 密码，8~63 字符；短于 8 返回 HAL_EINVAL
+     * channel 2.4G 信道 1~13；0 表示由实现自选
+     * 已启动时重复调用返回 HAL_EBUSY。
+     */
+    hal_err_t (*wifi_ap_start)(const char *ssid, const char *psk, uint8_t channel);
+    /** 停止 AP；未启动时返回 HAL_ESTATE */
+    hal_err_t (*wifi_ap_stop)(void);
 
     /** 链路事件轮询；HAL_EAGAIN 表示无事件 */
     hal_err_t (*poll_event)(hal_net_event_t *evt, uint32_t timeout_ms);

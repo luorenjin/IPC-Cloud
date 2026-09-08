@@ -58,6 +58,7 @@ func handleUpdateNode(c *gin.Context) {
 		PublicHost string `json:"publicHost"`
 		MaxStreams *int   `json:"maxStreams"`
 		Weight     *int   `json:"weight"`
+		Disabled   *bool  `json:"disabled"` // SYS-01 禁用（不参与调度）
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		fail(c, errs.EBadRequest)
@@ -81,6 +82,9 @@ func handleUpdateNode(c *gin.Context) {
 	}
 	if req.Weight != nil {
 		updates["weight"] = *req.Weight
+	}
+	if req.Disabled != nil {
+		updates["disabled"] = *req.Disabled
 	}
 	store.DB.Model(&models.MediaNode{}).Where("id = ?", id).Updates(updates)
 	var n models.MediaNode
@@ -110,7 +114,8 @@ func handleSelfCheckNode(c *gin.Context) {
 	ok(c, gin.H{"started": true})
 }
 
-// handleNodeStreams SYS-02 节点当前流列表。
+// handleNodeStreams SYS-02 节点当前流列表：实时拉取 ZLM getMediaList，
+// 关联 DB 会话补充来源通道；id 为流名（kick 端点以流名定位）。
 func handleNodeStreams(c *gin.Context) {
 	id := c.Param("id")
 	var n models.MediaNode
@@ -120,22 +125,71 @@ func handleNodeStreams(c *gin.Context) {
 	}
 	var sessions []models.StreamSession
 	store.DB.Where("node_id = ? AND ended_at = 0", id).Find(&sessions)
-	ok(c, gin.H{"items": sessions})
+	byStream := map[string]models.StreamSession{}
+	for _, s := range sessions {
+		byStream[s.App+"/"+s.Stream] = s
+	}
+	items := []gin.H{}
+	list, err := mediaForNode(&n).GetMediaList(context.Background())
+	if err != nil {
+		// 节点不可达：退化为 DB 会话视图
+		for _, s := range sessions {
+			items = append(items, gin.H{"id": s.Stream, "app": s.App, "stream": s.Stream,
+				"channel": s.ChannelID, "viewers": 0, "bitrate": 0, "stale": true})
+		}
+		ok(c, gin.H{"items": items})
+		return
+	}
+	for _, m := range list {
+		app, _ := m["app"].(string)
+		stream, _ := m["stream"].(string)
+		viewers := int(zf(m["readerCount"]))
+		bitrate := int64(zf(m["bytesSpeed"])) * 8 // B/s → bit/s
+		ch := ""
+		if s, okk := byStream[app+"/"+stream]; okk {
+			ch = s.ChannelID
+		}
+		items = append(items, gin.H{"id": stream, "app": app, "stream": stream,
+			"channel": ch, "viewers": viewers, "bitrate": bitrate,
+			"originType": m["originTypeStr"], "aliveSecond": m["aliveSecond"]})
+	}
+	ok(c, gin.H{"items": items})
 }
 
-// handleKickStream 踢流。
+// handleKickStream 踢流：以流名定位（:sid=stream），经 ZLM close_streams 强制断源，
+// 并结束对应 DB 会话。
 func handleKickStream(c *gin.Context) {
+	nid := c.Param("id")
 	sid := c.Param("sid")
-	var ss models.StreamSession
-	if store.DB.First(&ss, "id = ?", sid).Error != nil {
+	var n models.MediaNode
+	if store.DB.First(&n, "id = ?", nid).Error != nil {
 		fail(c, errs.ENotFound)
 		return
 	}
-	if node, err := devsvc_NodeByID(ss.NodeID); err == nil {
-		_ = node
+	var sessions []models.StreamSession
+	store.DB.Where("node_id = ? AND stream = ? AND ended_at = 0", nid, sid).Find(&sessions)
+	app := ""
+	if len(sessions) > 0 {
+		app = sessions[0].App
+	} else {
+		app = "live" // 无会话记录时按常见 app 尝试；close_streams 对不存在的流幂等成功
 	}
-	store.DB.Model(&ss).Update("ended_at", models.NowMilli())
+	if err := mediaForNode(&n).CloseStreams(app, sid); err != nil {
+		fail(c, errs.EUnreachable.WithMsg("踢流失败: "+err.Error()))
+		return
+	}
+	now := models.NowMilli()
+	for _, s := range sessions {
+		store.DB.Model(&s).Update("ended_at", now)
+	}
 	ok(c, nil)
+}
+
+func zf(v any) float64 {
+	if f, ok := v.(float64); ok {
+		return f
+	}
+	return 0
 }
 
 func intOr(v, def int) int {

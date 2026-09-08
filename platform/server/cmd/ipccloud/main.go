@@ -46,6 +46,7 @@ func main() {
 	api.SetEngine(eng)
 	eng.SubscribeEvents()
 	eng.StartRecordRunner()
+	eng.StartNodeStatsRunner()
 
 	// 适配器
 	ctx, cancel := context.WithCancel(context.Background())

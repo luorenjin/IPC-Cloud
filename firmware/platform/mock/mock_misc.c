@@ -149,7 +149,7 @@ const hal_gpio_ops_t mock_gpio_ops = { g_mask, g_set, g_get, g_pwm, g_adc, g_wai
 
 /* ======================= 网络 ======================= */
 
-static hal_err_t n_caps(hal_net_caps_t *c) { if (!c) return HAL_EINVAL; memset(c, 0, sizeof(*c)); c->eth = true; c->wifi = false; return HAL_OK; }
+static hal_err_t n_caps(hal_net_caps_t *c) { if (!c) return HAL_EINVAL; memset(c, 0, sizeof(*c)); c->eth = true; c->wifi = false; c->wifi_ap = true; return HAL_OK; }
 static hal_err_t n_status(hal_netif_t t, hal_netif_status_t *s)
 {
     if (!s) return HAL_EINVAL;
@@ -157,6 +157,10 @@ static hal_err_t n_status(hal_netif_t t, hal_netif_status_t *s)
     memset(s, 0, sizeof(*s));
     s->type = t; strncpy(s->ifname, "eth0", HAL_IFNAME_MAX - 1); s->link = HAL_LINK_UP; s->speed_mbps = 100;
     s->mac[0] = 0x02; s->mac[1] = 0x00; s->mac[2] = 0x00; s->mac[3] = 0xCA; s->mac[4] = 0xFE; s->mac[5] = 0x01;
+    /* mock 里以太网恒 up，因此恒有一个固定地址；真实平台在 DHCP 完成前应
+       把该字段留空（HAL_IP_MAX 缓冲区语义见 hal_net.h 的字段注释），不是
+       必须模拟"尚未拿到地址"这一瞬态。 */
+    strncpy(s->ip, "192.168.1.100", HAL_IP_MAX - 1);
     return HAL_OK;
 }
 static hal_err_t n_mac(hal_netif_t t, uint8_t m[6]) { hal_netif_status_t s; hal_err_t rc = n_status(t, &s); if (rc) return rc; memcpy(m, s.mac, 6); return HAL_OK; }
@@ -164,9 +168,32 @@ static hal_err_t n_wpower(bool on) { (void)on; return HAL_ENOTSUP; }
 static hal_err_t n_wscan(hal_wifi_ap_t *a, uint32_t mx, uint32_t *c, uint32_t to) { (void)a; (void)mx; (void)to; if (c) *c = 0; return HAL_ENOTSUP; }
 static hal_err_t n_wconn(const char *s, const char *p, hal_wifi_sec_t sec) { (void)s; (void)p; (void)sec; return HAL_ENOTSUP; }
 static hal_err_t n_wdisc(void) { return HAL_ENOTSUP; }
+
+static bool s_ap_running;
+
+static hal_err_t mock_wifi_ap_start(const char *ssid, const char *psk, uint8_t channel)
+{
+    size_t psk_len;
+    if (!ssid || !psk) return HAL_EINVAL;
+    if (ssid[0] == '\0') return HAL_EINVAL;
+    psk_len = strlen(psk);
+    if (psk_len < 8 || psk_len > 63) return HAL_EINVAL;   /* WPA2 约束 */
+    if (channel > 13) return HAL_EINVAL;
+    if (s_ap_running) return HAL_EBUSY;
+    s_ap_running = true;
+    return HAL_OK;
+}
+
+static hal_err_t mock_wifi_ap_stop(void)
+{
+    if (!s_ap_running) return HAL_ESTATE;
+    s_ap_running = false;
+    return HAL_OK;
+}
+
 static hal_err_t n_poll(hal_net_event_t *e, uint32_t to) { if (!e) return HAL_EINVAL; mock_os_sleep_ms(to > 50 ? 50 : to); return HAL_EAGAIN; }
 
-const hal_net_ops_t mock_net_ops = { n_caps, n_status, n_mac, n_wpower, n_wscan, n_wconn, n_wdisc, n_poll };
+const hal_net_ops_t mock_net_ops = { n_caps, n_status, n_mac, n_wpower, n_wscan, n_wconn, n_wdisc, mock_wifi_ap_start, mock_wifi_ap_stop, n_poll };
 
 /* ======================= 存储 ======================= */
 

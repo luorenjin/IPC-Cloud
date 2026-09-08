@@ -1,6 +1,9 @@
 package api
 
 import (
+	"encoding/json"
+	"strconv"
+
 	"github.com/gin-gonic/gin"
 
 	"github.com/jetscam/ipccloud/server/internal/adapter"
@@ -160,6 +163,159 @@ func handleStopPlayback(c *gin.Context) {
 	_ = appEngine.StopPlayback(c.Param("sid"))
 	ok(c, nil)
 }
+
+// handlePTZPresetsList LIVE-07：预置位列表（平台侧注册表：编号+名称；
+// 设备侧 preset 由 cmd.ptz preset_set/goto/del 驱动）。
+func handlePTZPresetsList(c *gin.Context) {
+	chID := c.Param("id")
+	var ch models.Channel
+	if store.DB.First(&ch, "id = ?", chID).Error != nil {
+		fail(c, errs.ENotFound)
+		return
+	}
+	items := []gin.H{}
+	for id, raw := range loadPresets(chID) {
+		if r, okk := raw.(map[string]any); okk {
+			items = append(items, gin.H{"id": id,
+				"index": r["index"], "name": r["name"]})
+		}
+	}
+	ok(c, gin.H{"items": items})
+}
+
+// handlePTZPresetAdd 新增预置位（cmd.ptz preset_set）。
+func handlePTZPresetAdd(c *gin.Context) {
+	chID := c.Param("id")
+	var req struct {
+		Name   string `json:"name"`
+		Preset int    `json:"preset"`
+	}
+	_ = c.ShouldBindJSON(&req)
+	if req.Preset <= 0 || req.Preset > 255 {
+		// 自动分配下一个可用编号
+		req.Preset = nextPresetIndex(chID)
+	}
+	if err := appPTZ(chID, "preset_set", 0, 0, 0, 50, req.Preset); err != nil {
+		fail(c, toAppErr(err))
+		return
+	}
+	savePresetName(c, chID, req.Preset, req.Name)
+	ok(c, gin.H{"preset": req.Preset, "name": req.Name})
+}
+
+// handlePTZPresetGoto 调用预置位。
+func handlePTZPresetGoto(c *gin.Context) {
+	var req struct {
+		ID     string `json:"id"`
+		Preset int    `json:"preset"`
+	}
+	_ = c.ShouldBindJSON(&req)
+	idx := req.Preset
+	if idx <= 0 {
+		idx = presetIndexOf(c.Param("id"), req.ID)
+	}
+	if idx <= 0 {
+		fail(c, errs.EBadRequest.WithMsg("预置位不存在"))
+		return
+	}
+	if err := appPTZ(c.Param("id"), "preset_goto", 0, 0, 0, 50, idx); err != nil {
+		fail(c, toAppErr(err))
+		return
+	}
+	ok(c, nil)
+}
+
+// handlePTZPresetDelete 删除预置位。
+func handlePTZPresetDelete(c *gin.Context) {
+	chID := c.Param("id")
+	pid := c.Param("pid")
+	idx := presetIndexOf(chID, pid)
+	if idx > 0 {
+		_ = appPTZ(chID, "preset_del", 0, 0, 0, 50, idx)
+	}
+	removePresetName(c, chID, pid, idx)
+	ok(c, nil)
+}
+
+// ---------- 预置位名称存储（KV：preset:<channelId> → {id:{index,name}}） ----------
+
+func presetKey(chID string) string { return "preset:" + chID }
+
+func loadPresets(chID string) map[string]any {
+	v, err := store.KVGet(presetKey(chID))
+	if err != nil || v == "" {
+		return map[string]any{}
+	}
+	m := map[string]any{}
+	_ = json.Unmarshal([]byte(v), &m)
+	return m
+}
+
+func savePresets(chID string, m map[string]any) {
+	b, _ := json.Marshal(m)
+	_ = store.KVSet(presetKey(chID), string(b), 0)
+}
+
+func savePresetName(c *gin.Context, chID string, idx int, name string) {
+	if name == "" {
+		return
+	}
+	m := loadPresets(chID)
+	id := "ps_" + models.NewID()
+	m[id] = map[string]any{"index": idx, "name": name}
+	savePresets(chID, m)
+	c.Set("presetId", id)
+}
+
+func presetIndexOf(chID, pid string) int {
+	m := loadPresets(chID)
+	if raw, okk := m[pid].(map[string]any); okk {
+		if f, okf := raw["index"].(float64); okf {
+			return int(f)
+		}
+	}
+	// 前端可能直接传编号（p.id ?? p.index）
+	if n, err := strconv.Atoi(pid); err == nil {
+		return n
+	}
+	return 0
+}
+
+func removePresetName(c *gin.Context, chID, pid string, idx int) {
+	m := loadPresets(chID)
+	if _, has := m[pid]; has {
+		delete(m, pid)
+	} else if idx > 0 {
+		for k, raw := range m {
+			if r, okk := raw.(map[string]any); okk {
+				if f, okf := r["index"].(float64); okf && int(f) == idx {
+					delete(m, k)
+				}
+			}
+		}
+	}
+	savePresets(chID, m)
+}
+
+func nextPresetIndex(chID string) int {
+	m := loadPresets(chID)
+	used := map[int]bool{}
+	for _, raw := range m {
+		if r, okk := raw.(map[string]any); okk {
+			if f, okf := r["index"].(float64); okf {
+				used[int(f)] = true
+			}
+		}
+	}
+	for i := 1; i <= 255; i++ {
+		if !used[i] {
+			return i
+		}
+	}
+	return 1
+}
+
+// ---------- 通道列表 ----------
 
 // handleListChannels 通道列表（预览树用）。
 func handleListChannels(c *gin.Context) {
