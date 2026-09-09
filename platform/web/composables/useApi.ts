@@ -36,6 +36,26 @@ export function useApi() {
     return refreshing
   }
 
+  // 401 统一兜底：刷新成功则由调用方 retry() 重试原请求；刷新失败则清 token 并跳转登录（带并发去重）。
+  // 返回 true 表示已重试且拿到结果（写入 outResult.value），false 表示未处理（调用方按原样抛出原错误）。
+  async function handleUnauthorized<T>(
+    e: any,
+    retry: () => Promise<T>,
+    outResult: { value?: T }
+  ): Promise<boolean> {
+    if (!((e?.status === 401 || e?.response?.status === 401) && !redirecting)) return false
+    if (await doRefresh()) {
+      outResult.value = await retry()
+      return true
+    }
+    if (import.meta.client) {
+      redirecting = true
+      navigateTo('/login?redirect=' + encodeURIComponent(useRoute().fullPath))
+      setTimeout(() => { redirecting = false }, 3000)
+    }
+    return false
+  }
+
   async function request<T = any>(url: string, opts: any = {}): Promise<T> {
     const headers: Record<string, string> = { ...(opts.headers || {}) }
     if (token().value) headers.Authorization = `Bearer ${token().value}`
@@ -43,14 +63,8 @@ export function useApi() {
     try {
       return await $fetch<T>('/api/v1' + url, { ...opts, headers, retry: 0 })
     } catch (e: any) {
-      if ((e?.status === 401 || e?.response?.status === 401) && !redirecting) {
-        if (await doRefresh()) return request<T>(url, opts)
-        if (import.meta.client) {
-          redirecting = true
-          navigateTo('/login?redirect=' + encodeURIComponent(useRoute().fullPath))
-          setTimeout(() => { redirecting = false }, 3000)
-        }
-      }
+      const out: { value?: T } = {}
+      if (await handleUnauthorized(e, () => request<T>(url, opts), out)) return out.value as T
       const body = e?.data || {}
       const err: ApiError = {
         code: body.code || 'E5000',
@@ -63,19 +77,38 @@ export function useApi() {
 
   // 鉴权下载：带 Authorization/X-Project-Id 取 Blob，触发保存后释放 URL；文件名优先取响应头 Content-Disposition。
   async function download(path: string, params?: any, filename?: string): Promise<void> {
-    const headers: Record<string, string> = {}
-    if (token().value) headers.Authorization = `Bearer ${token().value}`
-    if (project().value) headers['X-Project-Id'] = project().value
+    async function doFetch(): Promise<Blob> {
+      const headers: Record<string, string> = {}
+      if (token().value) headers.Authorization = `Bearer ${token().value}`
+      if (project().value) headers['X-Project-Id'] = project().value
+      return $fetch<Blob>('/api/v1' + path, {
+        params,
+        headers,
+        responseType: 'blob',
+        retry: 0,
+        onResponse({ response }) {
+          disposition = response.headers.get('content-disposition') || ''
+        }
+      })
+    }
     let disposition = ''
-    const blob = await $fetch<Blob>('/api/v1' + path, {
-      params,
-      headers,
-      responseType: 'blob',
-      retry: 0,
-      onResponse({ response }) {
-        disposition = response.headers.get('content-disposition') || ''
+    let blob: Blob
+    try {
+      blob = await doFetch()
+    } catch (e: any) {
+      const out: { value?: Blob } = {}
+      if (await handleUnauthorized(e, doFetch, out)) {
+        blob = out.value as Blob
+      } else {
+        const body = e?.data || {}
+        const err: ApiError = {
+          code: body.code || 'E5000',
+          msg: body.msg || e?.message || '网络错误',
+          suggest: body.suggest
+        }
+        throw err
       }
-    })
+    }
     const match = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(disposition)
     const name = filename || (match ? decodeURIComponent(match[1]) : 'download')
     const url = URL.createObjectURL(blob)
