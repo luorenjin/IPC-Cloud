@@ -61,6 +61,36 @@ export function useApi() {
     }
   }
 
+  // 鉴权下载：带 Authorization/X-Project-Id 取 Blob，触发保存后释放 URL；文件名优先取响应头 Content-Disposition。
+  async function download(path: string, params?: any, filename?: string): Promise<void> {
+    const headers: Record<string, string> = {}
+    if (token().value) headers.Authorization = `Bearer ${token().value}`
+    if (project().value) headers['X-Project-Id'] = project().value
+    let disposition = ''
+    const blob = await $fetch<Blob>('/api/v1' + path, {
+      params,
+      headers,
+      responseType: 'blob',
+      retry: 0,
+      onResponse({ response }) {
+        disposition = response.headers.get('content-disposition') || ''
+      }
+    })
+    const match = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(disposition)
+    const name = filename || (match ? decodeURIComponent(match[1]) : 'download')
+    const url = URL.createObjectURL(blob)
+    try {
+      const a = document.createElement('a')
+      a.href = url
+      a.download = name
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+    } finally {
+      URL.revokeObjectURL(url)
+    }
+  }
+
   return {
     request,
     get: <T = any>(url: string, params?: any) =>
@@ -70,6 +100,7 @@ export function useApi() {
     put: <T = any>(url: string, body?: any) =>
       request<T>(url, { method: 'PUT', body }),
     del: <T = any>(url: string) => request<T>(url, { method: 'DELETE' }),
+    download,
     project: project
   }
 }

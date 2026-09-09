@@ -4,7 +4,9 @@ const props = withDefaults(defineProps<{
   variant?: 'primary' | 'default' | 'ghost' | 'danger' | 'dangerText' | 'text'
   size?: 'sm' | 'md' | 'lg'
   block?: boolean
-}>(), { variant: 'default', size: 'md', block: false })
+  loading?: boolean
+  disabled?: boolean
+}>(), { variant: 'default', size: 'md', block: false, loading: false, disabled: false })
 
 const base = 'inline-flex items-center justify-center gap-1.5 rounded-chrome font-medium transition-colors select-none whitespace-nowrap disabled:opacity-45 disabled:cursor-not-allowed'
 const sizes = { sm: 'h-7 px-2.5 text-xs', md: 'h-8 px-3.5 text-sm', lg: 'h-10 px-5 text-sm' }
@@ -20,5 +22,8 @@ const cls = computed(() => [base, sizes[props.size], variants[props.variant], pr
 </script>
 
 <template>
-  <button :class="cls" type="button"><slot /></button>
+  <button :class="cls" type="button" :disabled="disabled || loading" :aria-busy="loading || undefined">
+    <Icon v-if="loading" name="refresh" :size="14" class="ipc-spin" />
+    <slot />
+  </button>
 </template>

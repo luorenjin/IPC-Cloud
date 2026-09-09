@@ -1,13 +1,14 @@
 // WebSocket 实时事件（设备状态/告警/任务进度）。
 export function useWs(onEvent: (ev: any) => void) {
+  const { getToken, getProjectId } = useAuth()
   let ws: WebSocket | null = null
   let closed = false
   let retryMs = 3000
   let failCount = 0
 
   function connect() {
-    const token = useCookie('ipc_token').value
-    const projectId = useCookie('ipc_project').value || ''
+    const token = getToken()
+    const projectId = getProjectId() || ''
     if (!token || closed) return
     const proto = location.protocol === 'https:' ? 'wss' : 'ws'
     try {

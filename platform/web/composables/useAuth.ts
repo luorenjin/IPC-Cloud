@@ -42,5 +42,17 @@ export function useAuth() {
     navigateTo('/login')
   }
 
-  return { user, projects, currentProject, setupDone, loadMe, login, switchProject, logout }
+  // ipc_token / ipc_project 的唯一读取点，供 useApi、useWs 等复用。
+  function getToken(): string | null | undefined {
+    return useCookie('ipc_token').value
+  }
+  function getProjectId(): string | null | undefined {
+    return useCookie('ipc_project').value
+  }
+
+  return {
+    user, projects, currentProject, setupDone,
+    loadMe, login, switchProject, logout,
+    getToken, getProjectId
+  }
 }

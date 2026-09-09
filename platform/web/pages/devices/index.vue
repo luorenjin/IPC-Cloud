@@ -219,8 +219,18 @@ async function doBatchDelete() {
   }
 }
 
-function exportCsv() {
-  window.open('/api/v1/devices/export?ids=' + selection.value.join(','), '_blank')
+async function exportCsv() {
+  const params: any = {}
+  if (selectedGroup.value) params.groupId = selectedGroup.value
+  if (query.keyword) params.keyword = query.keyword.trim()
+  if (query.status) params.status = query.status
+  if (query.source) params.source = query.source
+  if (selection.value.length) params.ids = selection.value.join(',')
+  try {
+    await api.download('/devices/export', params)
+  } catch (e: any) {
+    toastApiError(e, '导出失败')
+  }
 }
 
 const syncing = ref(false)

@@ -106,14 +106,18 @@ function resetFilters() {
 }
 
 /* 导出 CSV（带当前筛选条件；后端 /audit-logs/export 输出 CSV） */
-function exportLogs() {
-  const qs = new URLSearchParams()
-  if (filters.action.trim()) qs.set('action', filters.action.trim())
-  if (filters.username.trim()) qs.set('username', filters.username.trim())
-  if (filters.dateFrom) qs.set('start', String(Date.parse(filters.dateFrom + 'T00:00:00')))
-  if (filters.dateTo) qs.set('end', String(Date.parse(filters.dateTo + 'T23:59:59')))
-  window.open('/api/v1/audit-logs/export' + (qs.toString() ? '?' + qs.toString() : ''))
-  toast.success('已开始导出（最多 10000 条）')
+async function exportLogs() {
+  const params: any = {}
+  if (filters.action.trim()) params.action = filters.action.trim()
+  if (filters.username.trim()) params.username = filters.username.trim()
+  if (filters.dateFrom) params.start = String(Date.parse(filters.dateFrom + 'T00:00:00'))
+  if (filters.dateTo) params.end = String(Date.parse(filters.dateTo + 'T23:59:59'))
+  try {
+    await api.download('/audit-logs/export', params)
+    toast.success('已开始导出（最多 10000 条）')
+  } catch (e: any) {
+    toastApiError(e, '导出失败')
+  }
 }
 
 const fmtTime = (ts: any) =>
