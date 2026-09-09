@@ -353,9 +353,9 @@ async function submitAdd() {
     const lines = batchIdText.value.split('\n').map((l) => l.trim()).filter(Boolean)
     if (!lines.length) return toast.warning('请在文本框中粘贴设备ID列表')
     const items: { deviceId: string; verifyCode: string }[] = []
-    for (const line of lines) {
-      const parts = line.split(/[,\s]+/).filter(Boolean)
-      if (parts.length < 2) return toast.warning(`第 ${lines.indexOf(line) + 1} 行缺少验证码：${line}`)
+    for (let i = 0; i < lines.length; i++) {
+      const parts = lines[i].split(/[,\s]+/).filter(Boolean)
+      if (parts.length < 2) return toast.warning(`第 ${i + 1} 行缺少验证码：${lines[i]}`)
       items.push({ deviceId: parts[0].toUpperCase(), verifyCode: parts[1] })
     }
     adding.value = true
