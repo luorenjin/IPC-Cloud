@@ -31,7 +31,7 @@ function onModel(v: any) { emit('update:modelValue', dec(v)) }
 <template>
   <SelectRoot :model-value="inner" :disabled="disabled" :open="open" @update:open="open = $event" @update:model-value="onModel">
     <SelectTrigger
-      class="flex items-center gap-1 rounded border bg-surface px-2.5 text-left outline-none transition-colors data-[state=open]:border-primary data-[state=open]:ring-1 data-[state=open]:ring-primary/25 disabled:bg-zone disabled:cursor-not-allowed disabled:opacity-60"
+      class="flex items-center gap-1 rounded-chrome border bg-surface px-2.5 text-left outline-none transition-colors data-[state=open]:border-primary data-[state=open]:ring-1 data-[state=open]:ring-primary/25 disabled:bg-zone disabled:cursor-not-allowed disabled:opacity-60"
       :class="[width, heights[size], open ? 'border-primary' : 'border-line hover:border-placeholder']"
     >
       <SelectValue class="truncate text-body data-[placeholder]:text-placeholder" :placeholder="placeholder" />
@@ -40,7 +40,7 @@ function onModel(v: any) { emit('update:modelValue', dec(v)) }
     <SelectPortal>
       <SelectContent
         position="popper" side="bottom" :side-offset="4" align="start"
-        class="z-50 min-w-[var(--reka-select-trigger-width)] overflow-hidden rounded border border-line bg-surface shadow-pop ipc-anim-pop-in"
+        class="z-50 min-w-[var(--reka-select-trigger-width)] overflow-hidden rounded-chrome border border-line bg-surface-2 shadow-pop ipc-anim-pop-in"
       >
         <SelectViewport class="p-1 max-h-72 overflow-y-auto">
           <SelectItem

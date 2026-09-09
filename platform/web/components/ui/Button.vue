@@ -6,7 +6,7 @@ const props = withDefaults(defineProps<{
   block?: boolean
 }>(), { variant: 'default', size: 'md', block: false })
 
-const base = 'inline-flex items-center justify-center gap-1.5 rounded font-medium transition-colors select-none whitespace-nowrap disabled:opacity-45 disabled:cursor-not-allowed'
+const base = 'inline-flex items-center justify-center gap-1.5 rounded-chrome font-medium transition-colors select-none whitespace-nowrap disabled:opacity-45 disabled:cursor-not-allowed'
 const sizes = { sm: 'h-7 px-2.5 text-xs', md: 'h-8 px-3.5 text-sm', lg: 'h-10 px-5 text-sm' }
 const variants = {
   primary: 'bg-primary text-white hover:bg-primary-deep active:bg-primary-deep',

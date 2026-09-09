@@ -9,13 +9,15 @@ const activeTab = ref('roles')
 
 /* ---------------- 权限模型 ---------------- */
 // 模块清单（左栏）
+// label 需与侧栏菜单文案保持一致（管理员在此授权，看到的名称必须与导航对得上）；
+// value 是落库的权限键（Role.Perms["menus"]），任何情况下都不得改动。
 const MODULES = [
-  { value: 'dashboard', label: '仪表盘' },
+  { value: 'dashboard', label: '总览' },
   { value: 'devices', label: '设备' },
   { value: 'live', label: '实时预览' },
   { value: 'playback', label: '录像回放' },
   { value: 'alarms', label: '告警' },
-  { value: 'record', label: '录像设置' },
+  { value: 'record', label: '计划' },
   { value: 'system', label: '系统' }
 ]
 // 操作权限（右栏）
@@ -86,6 +88,21 @@ function permSummary(row: any): string {
   const menuLabels = menus.map((v) => MODULES.find((m) => m.value === v)?.label || v)
   const actionLabels = actions.map((v) => ACTION_OPTIONS.find((a) => a.value === v)?.label || v)
   return [menuLabels.join('、') || '无菜单', actionLabels.join('/') || '无操作'].join(' · ')
+}
+
+/* 权限摘要改为按模块分 chip 展示（纯展示，底层数据仍取自 perms.menus/matrix） */
+function permChips(row: any): { label: string; count: number }[] {
+  const menus: string[] = row?.perms?.menus || []
+  return menus.map((v) => ({
+    label: MODULES.find((m) => m.value === v)?.label || v,
+    count: (row?.perms?.matrix?.[v]?.actions || []).length
+  }))
+}
+
+/* 模块图标（纯展示） */
+const MODULE_ICONS: Record<string, string> = {
+  dashboard: 'gauge', devices: 'camera', live: 'monitor', playback: 'film',
+  alarms: 'bell', record: 'clipboard', system: 'settings'
 }
 
 /* ---------------- 角色 ---------------- */
@@ -255,6 +272,19 @@ function openScopeDlg(kind: 'groups' | 'channels') {
   scopeDlg.loading = true
   ensureScopeData().finally(() => { scopeDlg.loading = false })
 }
+
+/* 矩阵改版后每行都可直接打开资源范围弹窗：先定位目标模块，再复用原有 openScopeDlg */
+function openModuleScope(mod: string, kind: 'groups' | 'channels') {
+  selMod.value = mod
+  openScopeDlg(kind)
+}
+
+/* 权限矩阵列定义：模块（行头）+ 各操作权限（纯展示） */
+const MATRIX_COLS = computed(() => [
+  { key: 'module', label: '模块', width: '128px', ellipsis: false },
+  ...ACTION_OPTIONS.map((a) => ({ key: a.value, label: a.label, width: '64px', align: 'center' as const, ellipsis: false })),
+  { key: 'scope', label: '资源范围', ellipsis: false }
+])
 
 function buildGroupTree() {
   const map = new Map<any, any>()
@@ -436,7 +466,7 @@ const fmtTime = (ts: any) =>
 const roleCols = [
   { key: 'name', label: '名称', width: '180px' },
   { key: 'builtin', label: '内置', width: '90px', align: 'center' as const },
-  { key: 'perms', label: '权限摘要', width: '220px' },
+  { key: 'perms', label: '权限摘要', width: '260px', ellipsis: false },
   { key: 'members', label: '成员数', width: '90px', align: 'center' as const },
   { key: 'ops', label: '操作', width: '170px', align: 'center' as const, fixed: true }
 ]
@@ -478,7 +508,10 @@ onMounted(async () => {
                 <UiTag v-else color="default">自定义</UiTag>
               </template>
               <template #perms="{ row }">
-                <span class="block truncate" :title="permSummary(row)">{{ permSummary(row) }}</span>
+                <div v-if="permChips(row).length" class="flex flex-wrap gap-1" :title="permSummary(row)">
+                  <UiTag v-for="c in permChips(row)" :key="c.label">{{ c.label }}<span class="text-placeholder">·{{ c.count }}</span></UiTag>
+                </div>
+                <span v-else class="text-placeholder">—</span>
               </template>
               <template #members="{ row }">{{ memberCountMap[row.id] || 0 }}</template>
               <template #ops="{ row }">
@@ -551,7 +584,7 @@ onMounted(async () => {
     <UiDialog
       v-model:open="roleDlg.visible"
       :title="roleDlg.mode === 'create' ? '新建角色' : '编辑角色'"
-      :width="roleDlg.step === 0 ? 'max-w-md' : 'max-w-3xl'"
+      :width="roleDlg.step === 0 ? 'max-w-md' : 'max-w-4xl'"
     >
       <UiSteps :steps="['基本信息', '选择权限']" :current="roleDlg.step" class="mb-4" />
 
@@ -568,50 +601,72 @@ onMounted(async () => {
         </template>
       </div>
 
-      <!-- 第二步：权限矩阵（左模块 / 右操作权限+资源范围） -->
-      <div v-else class="grid grid-cols-[180px_1fr] gap-4">
-        <div class="border-r border-line-soft pr-2">
-          <p class="mb-1.5 px-1 text-xs text-placeholder">模块</p>
-          <UiTree :nodes="MODULES.map((m) => ({ label: m.label, value: m.value }))" :selected="selMod" @select="(n: any) => (selMod = n.value)" />
-        </div>
-        <div class="min-w-0">
-          <p class="mb-2 text-sm font-semibold text-ink">{{ MODULES.find((m) => m.value === selMod)?.label }}</p>
-          <div class="mb-4">
-            <p class="mb-1.5 text-xs text-muted">操作权限</p>
-            <div class="flex flex-wrap gap-x-5 gap-y-2">
-              <UiCheckbox
-                v-for="a in ACTION_OPTIONS" :key="a.value"
-                :model-value="roleDlg.matrix[selMod].actions.includes(a.value)"
-                :label="a.label"
-                @update:model-value="(v: boolean) => toggleAction(selMod, a.value, v)"
-              />
-            </div>
-          </div>
-          <div>
-            <p class="mb-1.5 text-xs text-muted">资源范围</p>
-            <div class="flex flex-wrap items-center gap-3">
-              <UiSegmented v-model="roleDlg.matrix[selMod].scope" :items="SCOPE_OPTIONS" />
+      <!-- 第二步：权限矩阵（行=模块，列=操作权限，末列为该模块的资源范围） -->
+      <div v-else>
+        <UiTable :columns="MATRIX_COLS" :rows="MODULES" row-key="value" empty="无可配置模块">
+          <template #module="{ row }">
+            <span class="inline-flex items-center gap-1.5 font-medium text-ink">
+              <UiIcon :name="MODULE_ICONS[row.value] || 'square'" :size="14" class="text-muted" />
+              {{ row.label }}
+            </span>
+          </template>
+          <template #view="{ row }">
+            <UiCheckbox
+              :model-value="roleDlg.matrix[row.value].actions.includes('view')"
+              @update:model-value="(v: boolean) => toggleAction(row.value, 'view', v)"
+            />
+          </template>
+          <template #preview="{ row }">
+            <UiCheckbox
+              :model-value="roleDlg.matrix[row.value].actions.includes('preview')"
+              @update:model-value="(v: boolean) => toggleAction(row.value, 'preview', v)"
+            />
+          </template>
+          <template #playback="{ row }">
+            <UiCheckbox
+              :model-value="roleDlg.matrix[row.value].actions.includes('playback')"
+              @update:model-value="(v: boolean) => toggleAction(row.value, 'playback', v)"
+            />
+          </template>
+          <template #ptz="{ row }">
+            <UiCheckbox
+              :model-value="roleDlg.matrix[row.value].actions.includes('ptz')"
+              @update:model-value="(v: boolean) => toggleAction(row.value, 'ptz', v)"
+            />
+          </template>
+          <template #config="{ row }">
+            <UiCheckbox
+              :model-value="roleDlg.matrix[row.value].actions.includes('config')"
+              @update:model-value="(v: boolean) => toggleAction(row.value, 'config', v)"
+            />
+          </template>
+          <template #delete="{ row }">
+            <UiCheckbox
+              :model-value="roleDlg.matrix[row.value].actions.includes('delete')"
+              @update:model-value="(v: boolean) => toggleAction(row.value, 'delete', v)"
+            />
+          </template>
+          <template #scope="{ row }">
+            <div class="flex flex-wrap items-center gap-2">
+              <UiSegmented v-model="roleDlg.matrix[row.value].scope" :items="SCOPE_OPTIONS" />
               <UiButton
-                v-if="roleDlg.matrix[selMod].scope === 'groups'" variant="default" size="sm"
-                @click="openScopeDlg('groups')"
+                v-if="roleDlg.matrix[row.value].scope === 'groups'" variant="default" size="sm"
+                @click="openModuleScope(row.value, 'groups')"
               >
-                <UiIcon name="folder" :size="13" />选择分组（{{ roleDlg.matrix[selMod].groups.length }}）
+                <UiIcon name="folder" :size="13" />{{ roleDlg.matrix[row.value].groups.length }}
               </UiButton>
               <UiButton
-                v-if="roleDlg.matrix[selMod].scope === 'channels'" variant="default" size="sm"
-                @click="openScopeDlg('channels')"
+                v-if="roleDlg.matrix[row.value].scope === 'channels'" variant="default" size="sm"
+                @click="openModuleScope(row.value, 'channels')"
               >
-                <UiIcon name="video" :size="13" />选择通道（{{ roleDlg.matrix[selMod].channels.length }}）
+                <UiIcon name="video" :size="13" />{{ roleDlg.matrix[row.value].channels.length }}
               </UiButton>
-              <span v-if="roleDlg.matrix[selMod].scope !== 'all'" class="text-xs text-placeholder">
-                未选择时该模块仅对空范围生效
-              </span>
             </div>
-          </div>
-          <p class="mt-4 border-t border-line-soft pt-2 text-xs text-placeholder">
-            提示：勾选某模块的操作权限即授予该模块；资源范围控制可见的设备分组/通道。
-          </p>
-        </div>
+          </template>
+        </UiTable>
+        <p class="mt-3 border-t border-line-soft pt-2 text-xs text-placeholder">
+          提示：勾选某模块的操作权限即授予该模块；资源范围（全部/指定分组/指定通道）控制该模块可见的设备。未指定分组或通道时仅对空范围生效。
+        </p>
       </div>
 
       <template #footer>

@@ -12,10 +12,10 @@ const props = withDefaults(defineProps<{ label: string; side?: 'top' | 'right' |
       <TooltipPortal>
         <TooltipContent
           :side="side" :side-offset="4"
-          class="z-50 rounded bg-[#1f2329] px-2 py-1 text-xs text-white shadow-pop ipc-anim-fade-in"
+          class="z-50 rounded-chrome border border-line bg-surface-2 px-2 py-1 text-xs text-ink shadow-pop ipc-anim-fade-in"
         >
           {{ label }}
-          <span class="absolute left-1/2 top-full -translate-x-1/2 border-4 border-transparent border-t-[#1f2329]" />
+          <span class="absolute left-1/2 top-full -translate-x-1/2 border-4 border-transparent border-t-[var(--color-surface-2)]" />
         </TooltipContent>
       </TooltipPortal>
     </TooltipRoot>

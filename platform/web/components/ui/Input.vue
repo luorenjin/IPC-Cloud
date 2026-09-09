@@ -20,7 +20,7 @@ const heights = { sm: 'h-7 text-xs', md: 'h-8 text-sm', lg: 'h-10 text-sm' }
 
 <template>
   <div
-    class="group/ipc flex items-center rounded border bg-surface px-2.5 transition-colors"
+    class="group/ipc flex items-center rounded-chrome border bg-surface px-2.5 transition-colors"
     :class="[
       width, heights[size],
       focused ? 'border-primary ring-1 ring-primary/25' : 'border-line hover:border-placeholder',

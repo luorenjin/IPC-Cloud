@@ -188,7 +188,8 @@ onMounted(() => {
         :rows="items" :loading="loading" :row-key="'id'" empty="暂无录像模板，点击「新建模板」开始配置"
       >
         <template #kind="{ row }">
-          <UiTag :color="row.kind === 'event' ? 'warning' : 'primary'" plain>{{ KIND_MAP[row.kind] || row.kind }}</UiTag>
+          <!-- 录像三色语义（REC-02）：定时=primary/信号青，事件=success/绿，与 playback.vue 一致 -->
+          <UiTag :color="row.kind === 'event' ? 'success' : 'primary'" plain>{{ KIND_MAP[row.kind] || row.kind }}</UiTag>
         </template>
         <template #schedule="{ row }">{{ fmtSchedule(row.schedule) }}</template>
         <template #builtin="{ row }">
@@ -222,9 +223,9 @@ onMounted(() => {
         </div>
         <div>
           <p class="mb-1.5 text-sm text-muted">{{ form.kind === 'event' ? '事件触发时段（事件发生时在时段内才录像）' : '录像时间（在网格上拖选时段）' }}</p>
-          <ScheduleGrid v-model="form.schedule" />
+          <ScheduleGrid v-model="form.schedule" :kind="form.kind" />
         </div>
-        <p v-if="editing && (refCount[editing.id] || 0) > 0" class="flex items-center gap-1.5 rounded bg-warning-soft px-3 py-2 text-xs text-warning">
+        <p v-if="editing && (refCount[editing.id] || 0) > 0" class="flex items-center gap-1.5 rounded-signal bg-warning-soft px-3 py-2 text-xs text-warning">
           <UiIcon name="alert-triangle" :size="13" />
           该模板正被 {{ refCount[editing.id] }} 个通道使用，保存后将同步更新这些通道的录像计划
         </p>

@@ -17,7 +17,7 @@ const style: Record<string, { icon: string; cls: string }> = {
       <ToastRoot
         v-for="t in items" :key="t.id" :default-open="true"
         @update:open="(v) => { if (!v) dismiss(t.id) }"
-        class="pointer-events-auto flex w-full items-start gap-2.5 rounded border border-line bg-surface px-4 py-3 shadow-pop ipc-anim-toast-in"
+        class="pointer-events-auto flex w-full items-start gap-2.5 rounded-chrome border border-line bg-surface-2 px-4 py-3 shadow-pop ipc-anim-toast-in"
       >
         <span :class="style[t.type].cls" class="mt-0.5"><Icon :name="style[t.type].icon" :size="17" /></span>
         <div class="min-w-0 flex-1">

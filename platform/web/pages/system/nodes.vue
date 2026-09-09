@@ -20,12 +20,26 @@ async function loadNodes() {
   }
 }
 
-/* 状态标签：online 绿 / offline 红 */
+/* 状态标签：节点自身运行状态灯——在线=信号青（primary）、离线=警戒红；
+   区别于设备业务在线态的 success 绿（本页规格明确要求信号青，见设计方案） */
 function statusTag(s: string) {
-  if (s === 'online') return { text: '在线', color: 'success' as const }
+  if (s === 'online') return { text: '在线', color: 'primary' as const }
   if (s === 'offline') return { text: '离线', color: 'danger' as const }
   if (s === 'disabled') return { text: '已禁用', color: 'info' as const }
   return { text: s || '未知', color: 'warning' as const }
+}
+
+/* 状态灯点样式（纯展示，复用 statusTag 的语义色） */
+const LAMP_STYLE: Record<string, { dot: string; text: string }> = {
+  primary: { dot: 'bg-primary shadow-[0_0_6px_var(--color-primary)]', text: 'text-primary' },
+  danger: { dot: 'bg-danger shadow-[0_0_6px_var(--color-danger)]', text: 'text-danger' },
+  warning: { dot: 'bg-warning', text: 'text-warning' },
+  info: { dot: 'bg-info', text: 'text-info' }
+}
+function nodeLamp(row: any) {
+  if (row.disabled) return { ...LAMP_STYLE.info, label: '已禁用' }
+  const t = statusTag(row.status)
+  return { ...(LAMP_STYLE[t.color] || LAMP_STYLE.info), label: t.text }
 }
 
 /* 相对时间 */
@@ -52,6 +66,52 @@ const fmtBytes = (b: any) => {
   let v = n
   while (v >= 1024 && i < units.length - 1) { v /= 1024; i++ }
   return v.toFixed(i === 0 ? 0 : 1) + ' ' + units[i]
+}
+
+/* 负载：以流数/上限占用率表示（后端未提供 CPU/负载指标，取现有字段派生，纯展示） */
+function loadPct(row: any): number {
+  const max = Number(row?.maxStreams || 0)
+  return max > 0 ? Math.min(100, Math.round((Number(row?.streams || 0) / max) * 100)) : 0
+}
+
+/* ---------------- 卡片迷你实时曲线（sparkline，纯展示） ----------------
+ * 后端未下发历史序列，这里新增一份仅供本页渲染使用的本地滑动窗口缓存：
+ * 每次 loadNodes() 成功刷新节点列表（初始加载 / 手动刷新 / node.status 推送触发的刷新）
+ * 就为每个节点追加一个采样点，超出窗口长度后丢弃最旧的点；不引入定时轮询，
+ * 不影响原有节点数据获取与自检/禁用等业务逻辑。
+ */
+const HISTORY_LEN = 24
+const nodeHistory = reactive<Record<string, { load: number[]; bwIn: number[]; bwOut: number[]; playing: number[] }>>({})
+
+function pushHistoryPoint(arr: number[], v: number) {
+  arr.push(v)
+  if (arr.length > HISTORY_LEN) arr.shift()
+}
+function recordNodeHistory(list: any[]) {
+  const ids = new Set(list.map((n) => n.id))
+  Object.keys(nodeHistory).forEach((id) => { if (!ids.has(id)) delete nodeHistory[id] }) // 节点被删除时清理，避免无限增长
+  list.forEach((row) => {
+    const h = nodeHistory[row.id] || (nodeHistory[row.id] = { load: [], bwIn: [], bwOut: [], playing: [] })
+    pushHistoryPoint(h.load, loadPct(row))
+    pushHistoryPoint(h.bwIn, Number(row.bytesIn ?? row.bwIn ?? 0))
+    pushHistoryPoint(h.bwOut, Number(row.bytesOut ?? row.bwOut ?? 0))
+    pushHistoryPoint(h.playing, Number(row.playing ?? row.viewers ?? 0))
+  })
+}
+watch(nodes, (list) => recordNodeHistory(list))
+
+/* 把数值窗口归一化为 SVG polyline 的 points 坐标串（纯展示，不引入图表库） */
+function sparkPoints(values: number[], w = 64, h = 22): string {
+  if (!values || !values.length) return ''
+  const vals = values.length === 1 ? [values[0], values[0]] : values
+  const min = Math.min(...vals)
+  const max = Math.max(...vals)
+  const span = max - min
+  const step = w / (vals.length - 1)
+  return vals.map((v, i) => {
+    const y = span === 0 ? h / 2 : h - ((v - min) / span) * h
+    return (i * step).toFixed(1) + ',' + y.toFixed(1)
+  }).join(' ')
 }
 
 /* ---------------- 新建/编辑节点 ---------------- */
@@ -260,18 +320,6 @@ async function kickStream(ss: any) {
   }
 }
 
-const cols = [
-  { key: 'name', label: '名称', width: '130px' },
-  { key: 'apiUrl', label: 'API 地址', width: '180px' },
-  { key: 'status', label: '状态', width: '86px', align: 'center' as const },
-  { key: 'version', label: '版本', width: '90px' },
-  { key: 'streams', label: '流数/上限', width: '100px', align: 'center' as const },
-  { key: 'playing', label: '播放数', width: '80px', align: 'center' as const },
-  { key: 'bw', label: '带宽 in/out', width: '140px' },
-  { key: 'lastKeepalive', label: '最近心跳', width: '105px', align: 'center' as const },
-  { key: 'weight', label: '权重', width: '70px', align: 'center' as const },
-  { key: 'ops', label: '操作', width: '250px', align: 'center' as const, fixed: true }
-]
 const streamCols = [
   { key: 'app', label: '应用', width: '90px' },
   { key: 'stream', label: '流名称', width: '180px' },
@@ -310,44 +358,103 @@ onMounted(async () => {
         </div>
       </template>
 
-      <UiTable :columns="cols" :rows="nodes" :loading="loading" empty="暂无媒体节点">
-        <template #apiUrl="{ row }">
-          <span class="block truncate" :title="row.apiUrl">{{ row.apiUrl }}</span>
-        </template>
-        <template #status="{ row }">
-          <UiTag v-if="row.disabled" color="info" dot>已禁用</UiTag>
-          <UiTag v-else :color="statusTag(row.status).color" dot>{{ statusTag(row.status).text }}</UiTag>
-        </template>
-        <template #version="{ row }">{{ row.version || '—' }}</template>
-        <template #streams="{ row }">
-          <span :class="row.streams >= row.maxStreams ? 'text-danger' : ''">{{ row.streams ?? 0 }} / {{ row.maxStreams ?? 0 }}</span>
-        </template>
-        <template #playing="{ row }">{{ row.playing ?? row.viewers ?? 0 }}</template>
-        <template #bw="{ row }">
-          <span class="text-xs">{{ fmtBytes(row.bytesIn ?? row.bwIn) }} / {{ fmtBytes(row.bytesOut ?? row.bwOut) }}</span>
-        </template>
-        <template #lastKeepalive="{ row }">{{ ago(row.lastKeepalive) }}</template>
-        <template #weight="{ row }">
-          <span :class="row.weight === 0 ? 'text-placeholder' : ''">{{ row.weight ?? 100 }}</span>
-        </template>
-        <template #ops="{ row }">
-          <span class="inline-flex items-center justify-center gap-1">
-            <UiButton variant="text" size="sm" @click="openNodeDlg('edit', row)">编辑</UiButton>
-            <UiButton variant="text" size="sm" :disabled="checkingId === row.id" @click="selfcheck(row)">
-              {{ checkingId === row.id ? '自检中…' : '自检' }}
-            </UiButton>
-            <UiButton variant="text" size="sm" @click="showDetail(row)">详情</UiButton>
-            <UiButton variant="text" size="sm" @click="toggleDisable(row)">{{ row.weight === 0 ? '启用' : '禁用' }}</UiButton>
-            <UiTooltip v-if="row.streams > 0" label="节点存在活跃流，请先在详情中踢流">
-              <span><UiButton variant="dangerText" size="sm" disabled>删除</UiButton></span>
-            </UiTooltip>
-            <UiButton v-else variant="dangerText" size="sm" @click="removeNode(row)">删除</UiButton>
-          </span>
-        </template>
-        <template #empty-action>
-          <UiButton variant="primary" @click="openNodeDlg('create')">新建节点</UiButton>
-        </template>
-      </UiTable>
+      <UiLoading :loading="loading" class="min-h-[168px]">
+        <div v-if="nodes.length" class="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+          <div
+            v-for="row in nodes" :key="row.id"
+            class="flex flex-col overflow-hidden rounded-signal border border-line bg-surface transition-colors hover:border-placeholder"
+          >
+            <!-- 状态灯 + 名称 -->
+            <div class="flex items-center justify-between gap-2 border-b border-line-soft px-3.5 py-2.5">
+              <div class="flex min-w-0 items-center gap-2">
+                <span class="h-2 w-2 shrink-0 rounded-full" :class="nodeLamp(row).dot" />
+                <span class="truncate text-sm font-semibold text-ink" :title="row.name">{{ row.name }}</span>
+              </div>
+              <span class="shrink-0 text-xs" :class="nodeLamp(row).text">{{ nodeLamp(row).label }}</span>
+            </div>
+
+            <div class="space-y-2.5 px-3.5 py-3">
+              <!-- 基本信息 -->
+              <div class="flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[11px] text-placeholder">
+                <span class="max-w-full truncate" :title="row.apiUrl">{{ row.apiUrl }}</span>
+                <span>v{{ row.version || '—' }}</span>
+                <span :class="row.weight === 0 ? 'text-placeholder' : ''">权重 {{ row.weight ?? 100 }}</span>
+                <span>心跳 {{ ago(row.lastKeepalive) }}</span>
+              </div>
+
+              <!-- 迷你实时曲线：负载 / 带宽 / 在线通道数（最近若干次轮询的采样点连线） -->
+              <div class="grid grid-cols-3 gap-2">
+                <div class="rounded-signal bg-zone px-2 py-1.5">
+                  <div class="flex items-baseline justify-between gap-1">
+                    <span class="text-[11px] text-muted">负载</span>
+                    <span class="font-mono text-xs" :class="row.maxStreams && row.streams >= row.maxStreams ? 'text-danger' : 'text-body'">{{ loadPct(row) }}%</span>
+                  </div>
+                  <svg viewBox="0 0 64 22" class="mt-1 h-5 w-full" preserveAspectRatio="none">
+                    <polyline
+                      :points="sparkPoints(nodeHistory[row.id]?.load || [])" fill="none" stroke="var(--color-primary)"
+                      stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"
+                    />
+                  </svg>
+                </div>
+                <div class="rounded-signal bg-zone px-2 py-1.5">
+                  <div class="flex items-baseline justify-between gap-1">
+                    <span class="text-[11px] text-muted">带宽 入/出</span>
+                  </div>
+                  <svg viewBox="0 0 64 22" class="mt-1 h-5 w-full" preserveAspectRatio="none">
+                    <polyline
+                      :points="sparkPoints(nodeHistory[row.id]?.bwIn || [])" fill="none" stroke="var(--color-primary)"
+                      stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"
+                    />
+                    <polyline
+                      :points="sparkPoints(nodeHistory[row.id]?.bwOut || [])" fill="none" stroke="var(--color-muted)"
+                      stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"
+                    />
+                  </svg>
+                  <div class="mt-0.5 truncate font-mono text-[10px] text-placeholder">
+                    {{ fmtBytes(row.bytesIn ?? row.bwIn) }} / {{ fmtBytes(row.bytesOut ?? row.bwOut) }}
+                  </div>
+                </div>
+                <div class="rounded-signal bg-zone px-2 py-1.5">
+                  <div class="flex items-baseline justify-between gap-1">
+                    <span class="text-[11px] text-muted">在线通道</span>
+                    <span class="font-mono text-xs text-body">{{ row.playing ?? row.viewers ?? 0 }}</span>
+                  </div>
+                  <svg viewBox="0 0 64 22" class="mt-1 h-5 w-full" preserveAspectRatio="none">
+                    <polyline
+                      :points="sparkPoints(nodeHistory[row.id]?.playing || [])" fill="none" stroke="var(--color-success)"
+                      stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"
+                    />
+                  </svg>
+                </div>
+              </div>
+
+              <div class="text-xs text-placeholder">
+                流数/上限
+                <span class="font-mono" :class="row.maxStreams && row.streams >= row.maxStreams ? 'text-danger' : 'text-body'">{{ row.streams ?? 0 }} / {{ row.maxStreams ?? 0 }}</span>
+              </div>
+            </div>
+
+            <!-- 操作 -->
+            <div class="mt-auto flex flex-wrap items-center gap-1 border-t border-line-soft px-2.5 py-2">
+              <UiButton variant="text" size="sm" @click="openNodeDlg('edit', row)">编辑</UiButton>
+              <UiButton variant="text" size="sm" :disabled="checkingId === row.id" @click="selfcheck(row)">
+                {{ checkingId === row.id ? '自检中…' : '自检' }}
+              </UiButton>
+              <UiButton variant="text" size="sm" @click="showDetail(row)">详情</UiButton>
+              <UiButton variant="text" size="sm" @click="toggleDisable(row)">{{ row.disabled ? '启用' : '禁用' }}</UiButton>
+              <UiTooltip v-if="row.streams > 0" label="节点存在活跃流，请先在详情中踢流">
+                <span class="ml-auto"><UiButton variant="dangerText" size="sm" disabled>删除</UiButton></span>
+              </UiTooltip>
+              <UiButton v-else variant="dangerText" size="sm" class="ml-auto" @click="removeNode(row)">删除</UiButton>
+            </div>
+          </div>
+        </div>
+        <UiEmptyState v-else-if="!loading" text="暂无媒体节点">
+          <template #action>
+            <UiButton variant="primary" @click="openNodeDlg('create')">新建节点</UiButton>
+          </template>
+        </UiEmptyState>
+      </UiLoading>
     </UiCard>
 
     <!-- 新建/编辑节点对话框 -->

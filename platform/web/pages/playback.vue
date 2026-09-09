@@ -371,7 +371,7 @@ onMounted(async () => {
 <template>
   <div class="flex h-[calc(100vh-84px)] gap-3">
     <!-- 左：通道树 -->
-    <div class="flex w-58 shrink-0 flex-col overflow-hidden rounded border border-line bg-surface" style="width: 232px">
+    <div class="flex w-58 shrink-0 flex-col overflow-hidden rounded-signal border border-line bg-surface" style="width: 232px">
       <div class="border-b border-line-soft p-3">
         <p class="mb-2 text-sm font-semibold text-ink">选择通道</p>
         <UiInput v-model="treeSearch" placeholder="搜索通道" size="sm" clearable>
@@ -388,21 +388,21 @@ onMounted(async () => {
 
     <div class="flex min-w-0 flex-1 flex-col gap-2.5">
       <!-- 工具条 -->
-      <div class="flex flex-wrap items-center gap-3 rounded border border-line bg-surface px-3 py-2">
+      <div class="flex flex-wrap items-center gap-3 rounded-signal border border-line bg-surface px-3 py-2">
         <span class="text-sm font-semibold text-ink">{{ curChannelName }}</span>
         <div class="flex items-center gap-1">
-          <button class="flex h-7 w-7 items-center justify-center rounded border border-line text-muted hover:border-primary hover:text-primary" @click="shiftDay(-1)"><Icon name="chevron-left" :size="14" /></button>
+          <button class="flex h-7 w-7 items-center justify-center rounded-chrome border border-line text-muted hover:border-primary hover:text-primary" @click="shiftDay(-1)"><Icon name="chevron-left" :size="14" /></button>
           <UiPopover v-model:open="calOpen" width="w-64">
             <template #trigger>
-              <button class="flex h-7 items-center gap-1.5 rounded border border-line bg-surface px-2.5 text-sm text-body hover:border-primary">
+              <button class="flex h-7 items-center gap-1.5 rounded-chrome border border-line bg-surface px-2.5 text-sm text-body hover:border-primary">
                 <Icon name="calendar" :size="13" class="text-placeholder" />{{ new Date(dayStart).toLocaleDateString('zh-CN') }}
               </button>
             </template>
             <div>
               <div class="mb-1 flex items-center justify-between">
-                <button class="rounded p-1 text-muted hover:bg-zone" @click="calMonth = new Date(calMonth.getFullYear(), calMonth.getMonth() - 1, 1)"><Icon name="chevron-left" :size="14" /></button>
+                <button class="rounded-chrome p-1 text-muted hover:bg-zone" @click="calMonth = new Date(calMonth.getFullYear(), calMonth.getMonth() - 1, 1)"><Icon name="chevron-left" :size="14" /></button>
                 <span class="text-sm font-medium text-ink">{{ calMonth.getFullYear() }} 年 {{ calMonth.getMonth() + 1 }} 月</span>
-                <button class="rounded p-1 text-muted hover:bg-zone" @click="calMonth = new Date(calMonth.getFullYear(), calMonth.getMonth() + 1, 1)"><Icon name="chevron-right" :size="14" /></button>
+                <button class="rounded-chrome p-1 text-muted hover:bg-zone" @click="calMonth = new Date(calMonth.getFullYear(), calMonth.getMonth() + 1, 1)"><Icon name="chevron-right" :size="14" /></button>
               </div>
               <div class="grid grid-cols-7 gap-0.5 text-center text-[11px] text-placeholder">
                 <span v-for="w in ['一', '二', '三', '四', '五', '六', '日']" :key="w" class="py-1">{{ w }}</span>
@@ -411,7 +411,7 @@ onMounted(async () => {
                 <template v-for="(d, i) in calDays" :key="i">
                   <button
                     v-if="d"
-                    class="relative flex h-7 items-center justify-center rounded text-[13px] transition-colors hover:bg-primary-soft"
+                    class="relative flex h-7 items-center justify-center rounded-chrome text-[13px] transition-colors hover:bg-primary-soft"
                     :class="dayStart === d.getTime() ? 'bg-primary font-medium text-white hover:bg-primary' : recDays.has(dayKey(d)) ? 'font-medium text-primary' : 'text-body'"
                     @click="pickDate(d)"
                   >
@@ -426,7 +426,7 @@ onMounted(async () => {
               </p>
             </div>
           </UiPopover>
-          <button class="flex h-7 w-7 items-center justify-center rounded border border-line text-muted hover:border-primary hover:text-primary" @click="shiftDay(1)"><Icon name="chevron-right" :size="14" /></button>
+          <button class="flex h-7 w-7 items-center justify-center rounded-chrome border border-line text-muted hover:border-primary hover:text-primary" @click="shiftDay(1)"><Icon name="chevron-right" :size="14" /></button>
         </div>
         <UiSegmented
           :model-value="source" @update:model-value="source = $event as any"
@@ -434,44 +434,66 @@ onMounted(async () => {
         />
         <div class="ml-auto flex items-center gap-2">
           <button
-            class="flex h-7 items-center gap-1 rounded border px-2 text-xs transition-colors"
+            class="flex h-7 items-center gap-1 rounded-chrome border px-2 text-xs transition-colors"
             :class="selectMode ? 'border-primary bg-primary-soft text-primary' : 'border-line text-muted hover:border-primary hover:text-primary'"
             @click="selectMode = !selectMode"
           ><Icon name="sliders" :size="13" />框选下载</button>
-          <span class="text-xs text-placeholder">滚轮缩放 · {{ zoomLabel }}</span>
-          <button v-if="zoomLabel !== '24h'" class="text-xs text-primary hover:underline" @click="resetZoom">重置</button>
         </div>
       </div>
 
-      <!-- 24h 时间轴 -->
-      <div class="rounded border border-line bg-surface px-3 pb-3 pt-2">
-        <div class="relative mb-0.5 h-4">
-          <span v-for="t in ticks" :key="t.left" class="absolute -translate-x-1/2 text-[10px] text-placeholder" :style="{ left: t.left + '%' }">{{ t.label }}</span>
+      <!-- 24h 时间轴（Hero：深槽 + 三色实体色块，语义见 REC-02） -->
+      <div class="rounded-signal border border-line bg-surface px-3 pb-2.5 pt-2.5">
+        <div class="relative mb-1 h-4">
+          <span v-for="t in ticks" :key="t.left" class="absolute -translate-x-1/2 font-mono text-[10px] text-placeholder" :style="{ left: t.left + '%' }">{{ t.label }}</span>
         </div>
         <div
-          ref="tlEl" class="relative h-7 rounded bg-zone" :class="selectMode ? 'cursor-crosshair' : 'cursor-pointer'"
+          ref="tlEl" class="relative h-9 rounded-signal border border-line-soft bg-canvas shadow-[inset_0_1px_4px_rgba(0,0,0,0.6)]"
+          :class="selectMode ? 'cursor-crosshair' : 'cursor-pointer'"
           @click="onTimelineClick" @wheel="onWheel" @mousedown="onTlDown" @mousemove="onTlMove" @mouseup="onTlUp" @mouseleave="onTlUp"
         >
           <div
-            v-for="(seg, i) in shownSegs" :key="i" class="absolute bottom-1 top-1 rounded-sm"
+            v-for="(seg, i) in shownSegs" :key="i" class="absolute bottom-1.5 top-1.5 rounded-signal transition-opacity hover:opacity-85"
             :style="{ ...segStyle(seg), background: TYPE_COLOR[seg.type] || 'var(--color-rec-timer)' }"
             :title="`${fmt(seg.s)} ~ ${fmt(seg.e)}（${TYPE_NAME[seg.type] || seg.type}）`"
           />
-          <div v-if="dragStyle.left" class="pointer-events-none absolute bottom-0 top-0 rounded-sm border border-primary bg-primary/25" :style="dragStyle" />
-          <div v-if="curTs" class="pointer-events-none absolute -bottom-1 -top-1 w-0.5 rounded bg-danger" :style="{ left: curLeft }">
-            <span class="absolute -top-5 left-1/2 -translate-x-1/2 whitespace-nowrap rounded bg-ink px-1 py-px text-[10px] text-white">{{ curLabel }}</span>
+          <div v-if="dragStyle.left" class="pointer-events-none absolute bottom-0 top-0 rounded-signal border border-primary bg-primary/25" :style="dragStyle" />
+          <div v-if="curTs" class="pointer-events-none absolute -bottom-1.5 -top-1.5 w-[2px] bg-primary shadow-[0_0_6px_var(--color-primary)]" :style="{ left: curLeft }">
+            <span class="absolute -top-6 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-chrome border border-primary/50 bg-surface-2 px-1.5 py-0.5 font-mono text-[11px] text-ink shadow-pop">{{ curLabel }}</span>
           </div>
         </div>
-        <div class="mt-2 flex items-center gap-4">
-          <UiCheckbox v-model="typeFilter.timer" label="定时" />
-          <UiCheckbox v-model="typeFilter.event" label="事件" />
-          <UiCheckbox v-model="typeFilter.manual" label="手动" />
+        <!-- 缩放/倍速：从属于时间轴本身，不做成独立工具栏 -->
+        <div class="mt-2.5 flex flex-wrap items-center gap-4 border-t border-line-soft pt-2.5">
+          <div class="flex items-center gap-4">
+            <UiCheckbox v-model="typeFilter.timer">
+              <span class="inline-flex items-center gap-1.5"><span class="h-1.5 w-1.5 rounded-full" :style="{ background: TYPE_COLOR.timer }" />定时</span>
+            </UiCheckbox>
+            <UiCheckbox v-model="typeFilter.event">
+              <span class="inline-flex items-center gap-1.5"><span class="h-1.5 w-1.5 rounded-full" :style="{ background: TYPE_COLOR.event }" />事件</span>
+            </UiCheckbox>
+            <UiCheckbox v-model="typeFilter.manual">
+              <span class="inline-flex items-center gap-1.5"><span class="h-1.5 w-1.5 rounded-full" :style="{ background: TYPE_COLOR.manual }" />手动</span>
+            </UiCheckbox>
+          </div>
+          <div class="h-3.5 w-px bg-line-soft" />
+          <div class="flex items-center gap-1.5 text-xs text-placeholder">
+            <Icon name="zoom-in" :size="13" />滚轮缩放
+            <span class="font-mono text-body">{{ zoomLabel }}</span>
+            <button v-if="zoomLabel !== '24h'" class="text-primary hover:underline" @click="resetZoom">重置</button>
+          </div>
+          <div class="h-3.5 w-px bg-line-soft" />
+          <div class="flex items-center gap-2">
+            <span class="text-xs text-placeholder">倍速</span>
+            <UiSelect
+              :model-value="String(speed)" width="w-24" size="sm" :disabled="!session"
+              :options="speeds.map((s) => ({ label: s + 'x', value: String(s) }))" @update:model-value="onSpeedChange"
+            />
+          </div>
           <span class="ml-auto text-[11px] text-placeholder">共 {{ shownSegs.length }} 段</span>
         </div>
       </div>
 
       <!-- 播放器 -->
-      <div class="relative min-h-0 flex-1 overflow-hidden rounded border border-line bg-black">
+      <div class="relative min-h-0 flex-1 overflow-hidden rounded-signal border border-line bg-black">
         <H265Player v-if="deviceUrl" ref="players0" :url="deviceUrl" :title="curChannelName" :muted="muted" />
         <video
           v-else-if="platformUrl" ref="videoEl" :src="platformUrl" controls autoplay preload="metadata"
@@ -489,16 +511,12 @@ onMounted(async () => {
         </div>
       </div>
 
-      <!-- 控制条（REC-03：9 档倍速 / 30s 快进 / 静音 / 截图） -->
-      <div class="flex flex-wrap items-center gap-2 rounded border border-line bg-surface px-3 py-2">
+      <!-- 控制条（REC-03：9 档倍速——控件随时间轴放置于其正下方 / 30s 快进 / 静音 / 截图） -->
+      <div class="flex flex-wrap items-center gap-2 rounded-signal border border-line bg-surface px-3 py-2">
         <UiButton size="sm" :disabled="!session" @click="togglePause">
           <Icon :name="paused ? 'play' : 'pause'" :size="13" />{{ paused ? '继续' : '暂停' }}
         </UiButton>
         <UiButton size="sm" :disabled="!session" @click="forward30"><Icon name="fast-forward" :size="13" />30s</UiButton>
-        <UiSelect
-          :model-value="String(speed)" width="w-24" size="sm" :disabled="!session"
-          :options="speeds.map((s) => ({ label: s + 'x', value: String(s) }))" @update:model-value="onSpeedChange"
-        />
         <UiButton size="sm" :disabled="!session" @click="toggleMute">
           <Icon :name="muted ? 'volume-x' : 'volume-2'" :size="13" />{{ muted ? '取消静音' : '静音' }}
         </UiButton>

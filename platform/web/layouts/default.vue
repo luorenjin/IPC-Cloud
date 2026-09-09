@@ -72,15 +72,16 @@ function goto(r: any) {
 
 const menu = computed(() => [
   { label: t('nav.dashboard'), icon: 'gauge', path: '/' },
+  // 设备为单条目：添加设备已是列表页工具栏按钮，国标待确认由列表页入口进入，
+  // 待办计数上提至此一级菜单，保留"侧栏一眼可见有事待办"（ADD-05）。
+  { label: t('nav.devices'), icon: 'video', path: '/devices', badge: pendingCount.value },
+  // 预览与回放同属"看画面"（一个看实时、一个看过去），归入「视频」一组。
   {
-    label: t('nav.devices'), icon: 'video', children: [
-      { label: t('nav.deviceList'), path: '/devices' },
-      { label: t('nav.addDevice'), path: '/devices?add=1' },
-      { label: t('nav.pending'), path: '/devices/pending', badge: pendingCount.value }
+    label: t('nav.video'), icon: 'monitor', children: [
+      { label: t('nav.live'), path: '/live' },
+      { label: t('nav.playback'), path: '/playback' }
     ]
   },
-  { label: t('nav.live'), icon: 'monitor', path: '/live' },
-  { label: t('nav.playback'), icon: 'film', path: '/playback' },
   {
     label: t('nav.alarms'), icon: 'bell', children: [
       { label: t('nav.messageCenter'), path: '/alarms' },
@@ -88,8 +89,10 @@ const menu = computed(() => [
       { label: t('nav.alarmTemplates'), path: '/alarms/templates' }
     ]
   },
+  // 命名为「计划」而非「录像」：后者会与「视频」下的"录像回放"撞概念，
+  // 而本组子项恰为"录像计划 / 计划模板"，「计划」既准确又无歧义。
   {
-    label: t('nav.record'), icon: 'film', children: [
+    label: t('nav.plan'), icon: 'calendar', children: [
       { label: t('nav.recordPlans'), path: '/record/plans' },
       { label: t('nav.recordTemplates'), path: '/record/templates' }
     ]
@@ -113,7 +116,6 @@ function groupActive(m: any) {
 function isActive(path: string) {
   const p = path.split('?')[0]
   if (p === '/') return route.path === '/'
-  if (path.includes('?add=1')) return route.path === '/devices' && route.query.add === '1'
   return route.path.startsWith(p)
 }
 menu.value.forEach((m: any) => { if (m.children) expanded[m.label] = groupActive(m) })
@@ -134,36 +136,39 @@ function onUserMenu(v: string) {
   <div class="flex h-screen overflow-hidden bg-canvas">
     <!-- 侧栏 -->
     <aside class="flex w-55 shrink-0 flex-col bg-sidebar" style="width: 220px">
-      <div class="flex h-13 items-center gap-2 border-b border-white/5 px-5" style="height: 52px">
-        <span class="flex h-6 w-6 items-center justify-center rounded bg-primary text-white"><Icon name="video" :size="14" /></span>
-        <span class="text-[17px] font-bold tracking-wide text-white">IpcCloud</span>
+      <div class="flex h-13 items-center gap-2 border-b border-line px-5" style="height: 52px">
+        <span class="flex h-6 w-6 items-center justify-center rounded-signal bg-primary text-sidebar"><Icon name="video" :size="14" /></span>
+        <span class="text-[17px] font-bold tracking-wide text-ink">IpcCloud</span>
       </div>
       <nav class="flex-1 overflow-y-auto py-2">
         <template v-for="m in menu" :key="m.label">
           <div
             v-if="!m.children"
-            class="mx-2 flex cursor-pointer items-center gap-2.5 rounded px-3 py-2 text-sm transition-colors"
-            :class="isActive(m.path) ? 'bg-primary font-medium text-white' : 'text-sidebar-text hover:bg-sidebar-hover hover:text-white'"
+            class="relative mx-2 flex cursor-pointer items-center gap-2.5 rounded-signal px-3 py-2 text-sm transition-colors"
+            :class="isActive(m.path) ? 'bg-sidebar-hover font-medium text-ink' : 'text-sidebar-text hover:bg-sidebar-hover hover:text-ink'"
             @click="navigateTo(m.path)"
           >
-            <Icon :name="m.icon" :size="16" />{{ m.label }}
+            <span class="absolute left-0 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-full bg-primary transition-opacity" :class="isActive(m.path) ? 'opacity-100' : 'opacity-0'" />
+            <Icon :name="m.icon" :size="16" :class="isActive(m.path) ? 'text-primary' : ''" />{{ m.label }}
+            <span v-if="m.badge" class="ml-auto rounded-full bg-danger px-1.5 text-[10px] leading-4 text-white">{{ m.badge > 99 ? '99+' : m.badge }}</span>
           </div>
           <template v-else>
             <div
-              class="mx-2 flex cursor-pointer items-center gap-2.5 rounded px-3 py-2 text-sm transition-colors"
-              :class="groupActive(m) ? 'text-white' : 'text-sidebar-text hover:bg-sidebar-hover hover:text-white'"
+              class="mx-2 flex cursor-pointer items-center gap-2.5 rounded-signal px-3 py-2 text-sm transition-colors"
+              :class="groupActive(m) ? 'text-ink' : 'text-sidebar-text hover:bg-sidebar-hover hover:text-ink'"
               @click="toggleGroup(m.label)"
             >
-              <Icon :name="m.icon" :size="16" />{{ m.label }}
+              <Icon :name="m.icon" :size="16" :class="groupActive(m) ? 'text-primary' : ''" />{{ m.label }}
               <Icon name="chevron-down" :size="13" class="ml-auto transition-transform" :class="expanded[m.label] ? '' : '-rotate-90'" />
             </div>
-            <div v-show="expanded[m.label]" class="mb-1 ml-4 border-l border-white/8 pl-2">
+            <div v-show="expanded[m.label]" class="mb-1 ml-4 border-l border-line pl-2">
               <div
                 v-for="s in m.children" :key="s.path"
-                class="flex cursor-pointer items-center justify-between rounded px-3 py-1.5 text-[13px] transition-colors"
-                :class="isActive(s.path) ? 'bg-primary font-medium text-white' : 'text-sidebar-text hover:bg-sidebar-hover hover:text-white'"
+                class="relative flex cursor-pointer items-center justify-between rounded-signal px-3 py-1.5 text-[13px] transition-colors"
+                :class="isActive(s.path) ? 'bg-sidebar-hover font-medium text-ink' : 'text-sidebar-text hover:bg-sidebar-hover hover:text-ink'"
                 @click="navigateTo(s.path)"
               >
+                <span class="absolute -left-2 top-1/2 h-3.5 w-0.5 -translate-y-1/2 rounded-full bg-primary transition-opacity" :class="isActive(s.path) ? 'opacity-100' : 'opacity-0'" />
                 <span>{{ s.label }}</span>
                 <span v-if="s.badge" class="rounded-full bg-danger px-1.5 text-[10px] leading-4 text-white">{{ s.badge > 99 ? '99+' : s.badge }}</span>
               </div>
@@ -180,7 +185,7 @@ function onUserMenu(v: string) {
         <button
           v-if="route.path !== '/'"
           type="button"
-          class="flex items-center gap-1 rounded border border-[#e5e6eb] bg-white px-2.5 py-1 text-xs text-[#4e5969] hover:border-[#1785E6] hover:text-[#1785E6] transition-colors"
+          class="flex items-center gap-1 rounded-chrome border border-line bg-surface px-2.5 py-1 text-xs text-muted hover:border-primary hover:text-primary transition-colors"
           @click="navigateTo('/')"
         >
           <Icon name="chevron-left" :size="13" />返回首页
@@ -194,7 +199,7 @@ function onUserMenu(v: string) {
           />
           <button
             type="button"
-            class="p-1.5 rounded text-[#86909c] hover:bg-[#f2f3f5] hover:text-[#1785E6]"
+            class="p-1.5 rounded-chrome text-muted hover:bg-zone hover:text-primary"
             title="所有企业及项目"
             @click="navigateTo('/console')"
           >
@@ -210,7 +215,7 @@ function onUserMenu(v: string) {
               :placeholder="t('common.search') + '（设备 / 通道）'" @focus="searchResults.length && (searchOpen = true)"
             />
           </div>
-          <div v-if="searchOpen && searchResults.length" class="absolute left-0 top-9 z-50 w-72 rounded border border-line bg-surface p-1 shadow-pop">
+          <div v-if="searchOpen && searchResults.length" class="absolute left-0 top-9 z-50 w-72 rounded-chrome border border-line bg-surface-2 p-1 shadow-pop">
             <div
               v-for="(r, i) in searchResults" :key="i"
               class="flex cursor-pointer items-center gap-2 rounded px-2.5 py-1.5 text-sm hover:bg-primary-soft"

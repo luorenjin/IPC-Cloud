@@ -85,31 +85,71 @@ useWs((ev: any) => {
 </script>
 
 <template>
-  <UiCard flat>
+  <!-- 待处理清单：卡片化呈现，刻意区别于常规设备列表（devices/index.vue）的表格视觉 -->
+  <UiCard flat body-class="p-4">
     <template #header>
       <div class="flex w-full items-center justify-between">
-        <span class="text-sm font-semibold text-ink">国标待确认设备</span>
+        <div class="flex items-center gap-2">
+          <span class="text-sm font-semibold text-ink">国标待确认设备</span>
+          <UiTag v-if="items.length" color="warning" dot>{{ items.length }} 台待处理</UiTag>
+        </div>
         <UiButton size="sm" @click="load"><Icon name="refresh" :size="13" />刷新</UiButton>
       </div>
     </template>
-    <UiTable
-      :columns="[
-        { key: 'gbId', label: '国标 ID' },
-        { key: 'ip', label: 'IP', width: '140px' },
-        { key: 'vendor', label: '厂商', width: '120px' },
-        { key: 'model', label: '型号', width: '140px' },
-        { key: 'firstSeen', label: '首次注册时间', width: '180px' },
-        { key: 'ops', label: '操作', width: '170px', ellipsis: false }
-      ]"
-      :rows="items" :loading="loading" :row-key="'id'"
-      empty="暂无待确认的国标设备。设备按 GB28181 注册且不在白名单时，会出现在这里。"
-    >
-      <template #firstSeen="{ row }">{{ fmt(row.firstSeen) }}</template>
-      <template #ops="{ row }">
-        <UiButton variant="primary" size="sm" @click="askConfirm(row)">确认入组</UiButton>
-        <UiButton variant="dangerText" size="sm" @click="doReject(row)">拒绝</UiButton>
-      </template>
-    </UiTable>
+
+    <UiLoading :loading="loading">
+      <UiEmptyState
+        v-if="!items.length"
+        icon="clipboard"
+        text="暂无待确认的国标设备。设备按 GB28181 注册且不在白名单时，会出现在这里。"
+      />
+      <div v-else class="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+        <div
+          v-for="row in items" :key="row.id"
+          class="relative flex flex-col gap-3 overflow-hidden rounded-signal border border-line bg-canvas p-4 pl-5 transition-colors hover:border-warning/50"
+        >
+          <!-- 左侧警示条：标记"待人工确认"的队列语义 -->
+          <span class="absolute inset-y-0 left-0 w-1 bg-warning" />
+
+          <div class="flex items-start justify-between gap-2">
+            <div class="flex min-w-0 items-center gap-2.5">
+              <span class="flex h-9 w-9 shrink-0 items-center justify-center rounded-signal bg-warning-soft text-warning">
+                <Icon name="shield-alert" :size="17" />
+              </span>
+              <div class="min-w-0">
+                <div class="truncate font-mono text-sm font-semibold text-ink" :title="row.gbId">{{ row.gbId }}</div>
+                <div class="mt-0.5 text-xs text-placeholder">首次注册 {{ fmt(row.firstSeen) }}</div>
+              </div>
+            </div>
+            <UiTag color="warning">待确认</UiTag>
+          </div>
+
+          <div class="grid grid-cols-3 gap-2 border-t border-line-soft pt-3 text-xs">
+            <div class="min-w-0">
+              <div class="text-placeholder">IP</div>
+              <div class="mt-0.5 truncate font-mono text-body" :title="row.ip">{{ row.ip || '—' }}</div>
+            </div>
+            <div class="min-w-0">
+              <div class="text-placeholder">厂商</div>
+              <div class="mt-0.5 truncate text-body" :title="row.vendor">{{ row.vendor || '—' }}</div>
+            </div>
+            <div class="min-w-0">
+              <div class="text-placeholder">型号</div>
+              <div class="mt-0.5 truncate text-body" :title="row.model">{{ row.model || '—' }}</div>
+            </div>
+          </div>
+
+          <div class="mt-1 flex items-center gap-2">
+            <UiButton variant="primary" size="sm" class="flex-1 justify-center" @click="askConfirm(row)">
+              <Icon name="check" :size="13" />确认入组
+            </UiButton>
+            <UiButton variant="dangerText" size="sm" class="flex-1 justify-center" @click="doReject(row)">
+              <Icon name="x" :size="13" />拒绝
+            </UiButton>
+          </div>
+        </div>
+      </div>
+    </UiLoading>
   </UiCard>
 
   <!-- 确认入组弹窗 -->

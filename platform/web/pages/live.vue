@@ -64,6 +64,8 @@ const players = ref<any[]>([])
 const wrap = ref<HTMLElement>()
 
 const curCell = computed(() => cells.value[selected.value] || cells.value[0])
+// 通道树"信号灯"：标记当前已上屏（在任意画面格中播放）的通道，纯展示用，复用侧栏激活态手法
+const onScreenIds = computed(() => new Set(cells.value.filter((c) => c.channel).map((c) => c.channel!.id)))
 
 function applyGrid(g: 1 | 4 | 9) {
   const old = cells.value
@@ -192,6 +194,12 @@ const dirs = [
   { icon: 'arrow-down', rot: 0, pan: 0, tilt: -1, cls: 's' },
   { icon: 'arrow-down', rot: -45, pan: 1, tilt: -1, cls: 'se' }
 ]
+// 摇杆九宫格：显式声明方向→网格坐标，贴合真实云台控制器方向布局，不依赖 dirs 数组书写顺序（纯展示）
+const dirGridPos: Record<string, { col: number; row: number }> = {
+  nw: { col: 1, row: 1 }, n: { col: 2, row: 1 }, ne: { col: 3, row: 1 },
+  w: { col: 1, row: 2 }, e: { col: 3, row: 2 },
+  sw: { col: 1, row: 3 }, s: { col: 2, row: 3 }, se: { col: 3, row: 3 }
+}
 
 async function ptzCmd(body: any) {
   const ch = curCell.value?.channel
@@ -253,8 +261,8 @@ async function delPreset(p: any) {
 
 <template>
   <div class="flex h-[calc(100vh-84px)] gap-3">
-    <!-- 左：通道树（搜索 + 在线圆点 + 拖拽） -->
-    <div class="flex w-58 shrink-0 flex-col overflow-hidden rounded border border-line bg-surface" style="width: 232px">
+    <!-- 左：通道树（搜索 + 在线圆点 + 拖拽 + 上屏信号灯） -->
+    <div class="flex w-58 shrink-0 flex-col overflow-hidden rounded-signal border border-line bg-surface" style="width: 232px">
       <div class="border-b border-line-soft p-3">
         <p class="mb-2 text-sm font-semibold text-ink">通道列表</p>
         <UiInput v-model="treeSearch" placeholder="搜索通道" size="sm" clearable><template #prefix><Icon name="search" :size="13" class="text-placeholder" /></template></UiInput>
@@ -263,12 +271,17 @@ async function delPreset(p: any) {
         <UiTree :nodes="treeData" :search="treeSearch" @select="onNodeClick">
           <template #node="{ node }">
             <span
-              class="flex min-w-0 items-center gap-1.5"
+              class="relative flex min-w-0 items-center gap-1.5"
               :draggable="!!node.channel && isOnline(node.channel)"
               @dragstart="onTreeDragStart($event, node)"
             >
-              <span v-if="node.channel" class="h-2 w-2 shrink-0 rounded-full" :class="isOnline(node.channel) ? 'bg-success' : 'bg-[#c9cdd4]'" />
-              <span class="truncate" :class="node.channel && !isOnline(node.channel) ? 'text-placeholder' : ''">{{ node.label }}</span>
+              <!-- 信号灯：该通道当前已上屏——复用侧栏激活态手法（细竖线 + 变色），而非整块高亮胶囊 -->
+              <span v-if="node.channel && onScreenIds.has(node.channel.id)" class="absolute -left-2 top-1/2 h-3.5 w-0.5 -translate-y-1/2 rounded-full bg-primary" />
+              <span v-if="node.channel" class="h-2 w-2 shrink-0 rounded-full" :class="isOnline(node.channel) ? 'bg-success' : 'bg-placeholder'" />
+              <span
+                class="truncate"
+                :class="node.channel && !isOnline(node.channel) ? 'text-placeholder' : node.channel && onScreenIds.has(node.channel.id) ? 'font-medium text-primary' : ''"
+              >{{ node.label }}</span>
             </span>
           </template>
         </UiTree>
@@ -276,28 +289,14 @@ async function delPreset(p: any) {
       </div>
     </div>
 
-    <!-- 右：工具栏 + 分屏网格 + PTZ -->
+    <!-- 右：视频宫格（Hero，唯一允许"发光"的界面元素） + 底部机身工具条 -->
     <div class="flex min-w-0 flex-1 flex-col">
-      <div class="mb-2.5 flex flex-wrap items-center gap-2">
-        <UiSegmented
-          :model-value="String(grid)" @update:model-value="grid = Number($event) as any"
-          :items="[{ label: '1 分屏', value: '1' }, { label: '4 分屏', value: '4' }, { label: '9 分屏', value: '9' }]"
-        />
-        <UiButton size="sm" @click="fullscreen"><Icon name="maximize" :size="13" />全屏</UiButton>
-        <UiButton size="sm" variant="primary" :disabled="!curCell?.channel" @click="doSnapshot"><Icon name="camera" :size="13" />抓图</UiButton>
-        <UiButton size="sm" @click="closeAll"><Icon name="x" :size="13" />全部关闭</UiButton>
-        <UiButton size="sm" :disabled="!curCell?.channel" @click="ptzPanel = !ptzPanel">
-          <Icon name="crosshair" :size="13" />云台
-        </UiButton>
-        <span class="ml-auto text-xs text-placeholder">双击或拖拽通道到画面格播放</span>
-      </div>
-
-      <div ref="wrap" class="relative min-h-0 flex-1 overflow-hidden rounded border border-line bg-black">
+      <div ref="wrap" class="relative min-h-0 flex-1 overflow-hidden rounded-signal border border-line bg-black">
         <div class="grid h-full gap-0.5" :class="grid === 9 ? 'grid-cols-3 grid-rows-3' : grid === 4 ? 'grid-cols-2 grid-rows-2' : 'grid-cols-1 grid-rows-1'">
           <div
             v-for="(cell, i) in cells" :key="i"
             class="group/cell relative cursor-pointer bg-black"
-            :class="i === selected ? 'outline outline-2 -outline-offset-2 outline-primary' : ''"
+            :class="i === selected ? 'shadow-[inset_0_0_0_2px_var(--color-primary),inset_0_0_22px_-4px_var(--color-primary)]' : ''"
             @click="selected = i"
             @dragover.prevent
             @drop="onCellDrop($event, i)"
@@ -306,53 +305,51 @@ async function delPreset(p: any) {
               v-if="cell.url" :ref="(el: any) => (players[i] = el)" :url="cell.url" muted
               @retry="cell.channel && playInto(cell, cell.channel)"
             />
-            <div v-else class="flex h-full flex-col items-center justify-center gap-2 text-[#4e5969]">
+            <div v-else class="flex h-full flex-col items-center justify-center gap-2 text-placeholder">
               <Icon name="video" :size="30" :stroke="1.4" />
               <span class="text-xs">双击左侧通道或拖拽到此处播放</span>
             </div>
 
             <!-- 标题条（LIVE-01：通道名 + 码流 + 关闭） -->
             <div v-if="cell.channel" class="absolute inset-x-0 top-0 flex items-center justify-between bg-gradient-to-b from-black/60 to-transparent px-2.5 py-1.5 opacity-0 transition-opacity group-hover/cell:opacity-100" :class="i === selected ? 'opacity-100' : ''">
-              <span class="truncate text-xs text-white">{{ cell.channel.name }}<span class="ml-1.5 text-[#c9cdd4]">{{ cell.profile === 'main' ? '主码流' : '子码流' }}</span></span>
-              <button class="rounded p-0.5 text-[#c9cdd4] hover:bg-white/15 hover:text-white" @click.stop="closeCell(cell)">
+              <span class="truncate text-xs text-white">{{ cell.channel.name }}<span class="ml-1.5 text-white/70">{{ cell.profile === 'main' ? '主码流' : '子码流' }}</span></span>
+              <button class="rounded-chrome p-0.5 text-white/70 hover:bg-white/15 hover:text-white" @click.stop="closeCell(cell)">
                 <Icon name="x" :size="13" />
               </button>
-            </div>
-            <!-- 底部工具（清晰度切换，LIVE-05） -->
-            <div v-if="cell.channel && i === selected" class="absolute inset-x-0 bottom-0 flex items-center justify-end gap-1 bg-gradient-to-t from-black/60 to-transparent px-2.5 py-1.5">
-              <button
-                class="rounded border border-[#4e5969] px-2 py-0.5 text-[11px] text-white transition-colors hover:border-primary"
-                :class="!canSub(cell) ? 'cursor-not-allowed opacity-40' : cell.profile === 'sub' ? 'border-primary bg-primary/20' : ''"
-                :disabled="!canSub(cell)"
-                @click.stop="switchProfile(cell, cell.profile === 'main' ? 'sub' : 'main')"
-              >{{ cell.profile === 'main' ? '子码流' : '主码流' }}</button>
             </div>
           </div>
         </div>
 
-        <!-- PTZ 浮动面板 -->
-        <div v-if="ptzPanel && curCell?.channel" class="absolute right-3 top-3 z-10 w-44 rounded border border-line bg-surface p-3 shadow-pop">
+        <!-- PTZ 浮动面板：九宫格摇杆造型 -->
+        <div v-if="ptzPanel && curCell?.channel" class="absolute right-3 top-3 z-10 w-44 rounded-chrome border border-line bg-surface-2 p-3 shadow-pop">
           <div class="mb-2 flex items-center justify-between">
             <span class="truncate text-xs font-medium text-ink">云台 · {{ curCell.channel.name }}</span>
             <button class="text-placeholder hover:text-body" @click="ptzPanel = false"><Icon name="x" :size="13" /></button>
           </div>
-          <div class="mx-auto grid w-fit grid-cols-3 gap-1">
-            <template v-for="d in dirs" :key="d.cls">
-              <button
-                v-if="d.cls !== 'c'"
-                class="flex h-8 w-9 items-center justify-center rounded border border-line bg-canvas text-muted transition-colors hover:border-primary hover:bg-primary-soft hover:text-primary active:border-primary active:bg-primary active:text-white"
-                @mousedown.prevent="ptzStart(d)" @mouseup="ptzStop()" @mouseleave="ptzStop()"
-              >
-                <Icon :name="d.icon" :size="14" :style="{ transform: `rotate(${d.rot}deg)` }" />
-              </button>
-            </template>
-            <span class="flex h-8 w-9 items-center justify-center text-[9px] text-placeholder">PTZ</span>
+          <!-- 摇杆：圆形裁切 + 3x3 显式坐标，贴合真实云台控制器方向布局；中心为停止钮 -->
+          <div class="mx-auto grid h-28 w-28 grid-cols-3 grid-rows-3 overflow-hidden rounded-full border border-line bg-canvas">
+            <button
+              v-for="d in dirs" :key="d.cls"
+              class="flex items-center justify-center border border-line-soft/70 text-muted transition-colors hover:bg-primary-soft hover:text-primary active:bg-primary active:text-white"
+              :style="{ gridColumn: dirGridPos[d.cls].col, gridRow: dirGridPos[d.cls].row }"
+              @mousedown.prevent="ptzStart(d)" @mouseup="ptzStop()" @mouseleave="ptzStop()"
+            >
+              <Icon :name="d.icon" :size="13" :style="{ transform: `rotate(${d.rot}deg)` }" />
+            </button>
+            <button
+              class="flex items-center justify-center border border-line-soft/70 bg-surface text-primary transition-colors hover:bg-primary-soft active:bg-primary active:text-white"
+              style="grid-column: 2; grid-row: 2"
+              title="停止"
+              @click="ptzStop()"
+            >
+              <Icon name="crosshair" :size="14" />
+            </button>
           </div>
           <div class="mt-2 grid grid-cols-2 gap-1">
-            <button class="h-6 rounded border border-line text-[11px] text-muted transition-colors hover:border-primary hover:text-primary" @mousedown.prevent="ptzZoom(1)" @mouseup="ptzStop()" @mouseleave="ptzStop()">变倍 +</button>
-            <button class="h-6 rounded border border-line text-[11px] text-muted transition-colors hover:border-primary hover:text-primary" @mousedown.prevent="ptzZoom(-1)" @mouseup="ptzStop()" @mouseleave="ptzStop()">变倍 −</button>
-            <button class="h-6 rounded border border-line text-[11px] text-muted transition-colors hover:border-primary hover:text-primary" @mousedown.prevent="ptzFocus(1)" @mouseup="ptzStop()" @mouseleave="ptzStop()">聚焦 +</button>
-            <button class="h-6 rounded border border-line text-[11px] text-muted transition-colors hover:border-primary hover:text-primary" @mousedown.prevent="ptzFocus(-1)" @mouseup="ptzStop()" @mouseleave="ptzStop()">聚焦 −</button>
+            <button class="h-6 rounded-chrome border border-line text-[11px] text-muted transition-colors hover:border-primary hover:text-primary" @mousedown.prevent="ptzZoom(1)" @mouseup="ptzStop()" @mouseleave="ptzStop()">变倍 +</button>
+            <button class="h-6 rounded-chrome border border-line text-[11px] text-muted transition-colors hover:border-primary hover:text-primary" @mousedown.prevent="ptzZoom(-1)" @mouseup="ptzStop()" @mouseleave="ptzStop()">变倍 −</button>
+            <button class="h-6 rounded-chrome border border-line text-[11px] text-muted transition-colors hover:border-primary hover:text-primary" @mousedown.prevent="ptzFocus(1)" @mouseup="ptzStop()" @mouseleave="ptzStop()">聚焦 +</button>
+            <button class="h-6 rounded-chrome border border-line text-[11px] text-muted transition-colors hover:border-primary hover:text-primary" @mousedown.prevent="ptzFocus(-1)" @mouseup="ptzStop()" @mouseleave="ptzStop()">聚焦 −</button>
           </div>
           <div class="mt-2 flex items-center gap-2">
             <span class="shrink-0 text-[11px] text-muted">速度 {{ ptzSpeed }}</span>
@@ -367,13 +364,50 @@ async function delPreset(p: any) {
             </div>
             <div v-if="!presets.length" class="py-1 text-center text-[11px] text-placeholder">暂无预置位</div>
             <ul v-else class="max-h-24 space-y-0.5 overflow-y-auto">
-              <li v-for="p in presets" :key="p.id ?? p.index" class="flex items-center gap-1 rounded px-1 py-0.5 text-[11px] hover:bg-zone">
+              <li v-for="p in presets" :key="p.id ?? p.index" class="flex items-center gap-1 rounded-chrome px-1 py-0.5 text-[11px] hover:bg-zone">
                 <button class="min-w-0 flex-1 truncate text-left text-body hover:text-primary" @click="gotoPreset(p)">{{ p.name || ('预置位' + (p.index ?? p.id)) }}</button>
                 <button class="text-placeholder hover:text-danger" @click="delPreset(p)"><Icon name="trash" :size="11" /></button>
               </li>
             </ul>
           </div>
         </div>
+      </div>
+
+      <!-- 底部工具条：监视器机身控制按钮式扁平图标条（分屏/清晰度/截图/云台/关闭） -->
+      <div class="mt-2.5 flex h-11 shrink-0 items-center gap-1.5 overflow-x-auto rounded-chrome border border-line bg-surface-2 px-2.5">
+        <UiSegmented
+          :model-value="String(grid)" @update:model-value="grid = Number($event) as any"
+          :items="[{ label: '1 分屏', value: '1' }, { label: '4 分屏', value: '4' }, { label: '9 分屏', value: '9' }]"
+        />
+        <span class="mx-1 h-5 w-px shrink-0 bg-line" />
+        <button
+          class="flex h-7 shrink-0 items-center gap-1.5 rounded-chrome px-2.5 text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-40"
+          :class="curCell?.profile === 'sub' ? 'bg-primary-soft text-primary' : 'text-muted hover:bg-zone hover:text-primary'"
+          :disabled="!curCell?.channel || !canSub(curCell)"
+          @click="switchProfile(curCell, curCell?.profile === 'main' ? 'sub' : 'main')"
+        ><Icon name="sliders" :size="13" />{{ curCell?.profile === 'sub' ? '子码流' : '主码流' }}</button>
+        <button
+          class="flex h-7 shrink-0 items-center gap-1.5 rounded-chrome px-2.5 text-xs text-muted transition-colors hover:bg-zone hover:text-primary disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted"
+          :disabled="!curCell?.channel"
+          @click="doSnapshot"
+        ><Icon name="camera" :size="13" />抓图</button>
+        <button
+          class="flex h-7 shrink-0 items-center gap-1.5 rounded-chrome px-2.5 text-xs text-muted transition-colors hover:bg-zone hover:text-primary"
+          @click="fullscreen"
+        ><Icon name="maximize" :size="13" />全屏</button>
+        <span class="mx-1 h-5 w-px shrink-0 bg-line" />
+        <button
+          class="flex h-7 shrink-0 items-center gap-1.5 rounded-chrome px-2.5 text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-40"
+          :class="ptzPanel ? 'bg-primary-soft text-primary' : 'text-muted hover:bg-zone hover:text-primary'"
+          :disabled="!curCell?.channel"
+          @click="ptzPanel = !ptzPanel"
+        ><Icon name="crosshair" :size="13" />云台</button>
+        <span class="mx-1 h-5 w-px shrink-0 bg-line" />
+        <button
+          class="flex h-7 shrink-0 items-center gap-1.5 rounded-chrome px-2.5 text-xs text-muted transition-colors hover:bg-zone hover:text-primary"
+          @click="closeAll"
+        ><Icon name="power" :size="13" />全部关闭</button>
+        <span class="ml-auto shrink-0 text-xs text-placeholder">双击或拖拽左侧通道到画面格播放</span>
       </div>
     </div>
   </div>

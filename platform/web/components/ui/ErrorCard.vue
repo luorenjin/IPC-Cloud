@@ -5,15 +5,15 @@ const emit = defineEmits<{ retry: []; diagnose: [] }>()
 </script>
 
 <template>
-  <div class="flex flex-col items-center justify-center gap-2 rounded bg-black/70 px-6 py-5 text-center backdrop-blur-sm">
+  <div class="flex flex-col items-center justify-center gap-2 rounded-chrome bg-black/70 px-6 py-5 text-center backdrop-blur-sm">
     <span class="text-danger"><Icon name="alert-circle" :size="26" /></span>
     <p class="text-sm font-medium text-white">
       <span v-if="code" class="mr-1 font-mono text-danger">{{ code }}</span>{{ msg || '播放失败' }}
     </p>
-    <p v-if="suggest" class="max-w-sm text-xs leading-5 text-[#c9cdd4]">{{ suggest }}</p>
+    <p v-if="suggest" class="max-w-sm text-xs leading-5 text-white/70">{{ suggest }}</p>
     <div class="mt-1 flex items-center gap-2">
-      <button class="h-7 rounded border border-[#4e5969] px-3 text-xs text-white transition-colors hover:border-primary hover:text-primary" @click="emit('retry')">重试</button>
-      <button class="h-7 rounded border border-[#4e5969] px-3 text-xs text-white transition-colors hover:border-primary hover:text-primary" @click="emit('diagnose')">诊断</button>
+      <button class="h-7 rounded-chrome border border-white/20 px-3 text-xs text-white transition-colors hover:border-primary hover:text-primary" @click="emit('retry')">重试</button>
+      <button class="h-7 rounded-chrome border border-white/20 px-3 text-xs text-white transition-colors hover:border-primary hover:text-primary" @click="emit('diagnose')">诊断</button>
     </div>
   </div>
 </template>

@@ -16,7 +16,7 @@ watch(open, (v) => { if (!v) inputValue.value = '' })
   <AlertDialogRoot :open="open" @update:open="(v) => { if (!v) settle(false) }">
     <AlertDialogPortal>
       <AlertDialogOverlay class="fixed inset-0 z-[60] bg-black/45 ipc-anim-fade-in" />
-      <AlertDialogContent class="fixed left-1/2 top-1/2 z-[60] w-[calc(100vw-48px)] max-w-sm -translate-x-1/2 -translate-y-1/2 rounded-md border border-line bg-surface p-5 shadow-pop ipc-anim-pop-in outline-none">
+      <AlertDialogContent class="fixed left-1/2 top-1/2 z-[60] w-[calc(100vw-48px)] max-w-sm -translate-x-1/2 -translate-y-1/2 rounded-chrome border border-line bg-surface-2 p-5 shadow-pop ipc-anim-pop-in outline-none">
         <div class="flex gap-3">
           <span class="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full" :class="state.danger ? 'bg-danger-soft text-danger' : 'bg-warning-soft text-warning'">
             <Icon :name="state.danger ? 'alert-triangle' : 'alert-circle'" :size="18" />
@@ -34,11 +34,11 @@ watch(open, (v) => { if (!v) inputValue.value = '' })
           </div>
         </div>
         <div class="mt-5 flex justify-end gap-2">
-          <button class="h-8 rounded border border-line bg-surface px-3.5 text-sm text-body transition-colors hover:border-placeholder" @click="settle(false)">
+          <button class="h-8 rounded-chrome border border-line bg-surface px-3.5 text-sm text-body transition-colors hover:border-placeholder" @click="settle(false)">
             {{ state.cancelText }}
           </button>
           <button
-            class="h-8 rounded px-3.5 text-sm text-white transition-colors disabled:cursor-not-allowed disabled:opacity-45"
+            class="h-8 rounded-chrome px-3.5 text-sm text-white transition-colors disabled:cursor-not-allowed disabled:opacity-45"
             :class="state.danger ? 'bg-danger hover:opacity-85' : 'bg-primary hover:bg-primary-deep'"
             :disabled="!canConfirm" @click="settle(true)"
           >{{ state.confirmText }}</button>

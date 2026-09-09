@@ -87,6 +87,42 @@ async function runDiag() {
     diag.loading = false
   }
 }
+// 诊断项状态灯颜色映射：成功=绿点/失败=红点/结果未知（理论上不会出现，容错兜底）=脉冲琥珀
+function diagDotClass(it: any) {
+  if (it.ok === true) return 'bg-success'
+  if (it.ok === false) return 'bg-danger'
+  return 'bg-warning animate-pulse'
+}
+
+// ================= 健康仪表条（概览 Tab 顶部三段式，纯展示计算属性） =================
+const barDot: Record<string, string> = { success: 'bg-success', warning: 'bg-warning', danger: 'bg-danger', info: 'bg-info' }
+const barText: Record<string, string> = { success: 'text-success', warning: 'text-warning', danger: 'text-danger', info: 'text-info' }
+const uptimeSeg = computed(() => {
+  const d = dev.value || {}
+  const st = statusInfo(d.status)
+  const ts = d.lastOnline || d.lastSeen
+  return { color: st.color, value: ts ? ago(ts) : '—', sub: `当前状态：${st.label}` }
+})
+const streamSeg = computed(() => {
+  const chs = channels.value
+  const total = chs.length
+  const live = chs.filter((ch: any) => streamInfo(ch).color === 'success').length
+  const color = !total ? 'info' : live === total ? 'success' : live > 0 ? 'warning' : 'info'
+  return { color, value: total ? `${live}/${total} 路` : '无通道', sub: total ? '推流中通道数' : '该设备暂未上报通道' }
+})
+const diagSeg = computed(() => {
+  if (diag.loading) return { color: 'warning', value: '诊断中', sub: '正在探测设备连通性…', pulse: true }
+  if (!diag.items.length) return { color: 'info', value: '尚未诊断', sub: '前往"诊断"页运行一键检测' }
+  const failCount = diag.items.filter((it: any) => it.ok === false).length
+  return failCount
+    ? { color: 'danger', value: `${failCount} 项异常`, sub: `共 ${diag.items.length} 项检测` }
+    : { color: 'success', value: '全部正常', sub: `共 ${diag.items.length} 项检测均通过` }
+})
+const healthSegs = computed(() => [
+  { key: 'uptime', icon: 'clock', title: '在线时长', ...uptimeSeg.value },
+  { key: 'stream', icon: 'video', title: '码流状态', ...streamSeg.value },
+  { key: 'diag', icon: 'activity', title: '最近诊断结果', ...diagSeg.value }
+])
 
 // ================= 通道操作 =================
 async function toggleCh(ch: any, val: any) {
@@ -291,7 +327,7 @@ onMounted(load)
     <UiCard flat>
       <!-- 头部 -->
       <div class="mb-1 flex items-center gap-2.5">
-        <button class="flex items-center gap-1 rounded border border-line px-2 py-1 text-xs text-muted transition-colors hover:border-primary hover:text-primary" @click="navigateTo('/devices')">
+        <button class="flex items-center gap-1 rounded-chrome border border-line px-2 py-1 text-xs text-muted transition-colors hover:border-primary hover:text-primary" @click="navigateTo('/devices')">
           <Icon name="arrow-left" :size="12" />返回
         </button>
         <span class="text-base font-bold text-ink">{{ dev?.name || '设备详情' }}</span>
@@ -315,7 +351,20 @@ onMounted(load)
       ]">
         <!-- a) 概览 -->
         <div v-if="tab === 'overview'" class="space-y-4 pt-4">
-          <div class="grid grid-cols-1 gap-x-8 gap-y-2 rounded border border-line md:grid-cols-3">
+          <!-- 健康仪表条：在线时长 / 码流状态 / 最近诊断结果，三段式横向排列 -->
+          <div class="grid grid-cols-1 divide-y divide-line-soft rounded-signal border border-line bg-zone md:grid-cols-3 md:divide-x md:divide-y-0">
+            <div v-for="seg in healthSegs" :key="seg.key" class="flex items-center gap-3 px-4 py-3">
+              <span class="h-2 w-2 shrink-0 rounded-full" :class="[barDot[seg.color], seg.pulse ? 'animate-pulse' : '']" />
+              <Icon :name="seg.icon" :size="15" class="shrink-0 text-placeholder" />
+              <div class="min-w-0">
+                <p class="text-xs text-placeholder">{{ seg.title }}</p>
+                <p class="truncate text-sm font-semibold" :class="barText[seg.color]">{{ seg.value }}</p>
+                <p class="truncate text-[11px] text-muted">{{ seg.sub }}</p>
+              </div>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-1 gap-x-8 gap-y-2 rounded-signal border border-line md:grid-cols-3">
             <div v-for="r in infoRows" :key="r.label" class="flex border-b border-line-soft px-3 py-2 text-sm last:border-0">
               <span class="w-24 shrink-0 text-placeholder">{{ r.label }}</span>
               <span class="min-w-0 truncate text-ink" :title="String(r.value)">{{ r.value }}</span>
@@ -341,7 +390,7 @@ onMounted(load)
                 { label: 'TF 卡', value: metrics.tfHealth || (metrics.tfTotal ? (metrics.tfUsed || 0) + '/' + metrics.tfTotal + 'GB' : '') },
                 { label: '码率', value: metrics.bitrate ? metrics.bitrate + 'kbps' : '' }
               ]" :key="m.label" v-show="m.value && m.value !== '—'"
-                class="rounded border border-line py-3 text-center">
+                class="rounded-signal border border-line py-3 text-center">
                 <p class="text-xs text-placeholder">{{ m.label }}</p>
                 <p class="mt-1 text-lg font-bold text-ink">{{ m.value }}</p>
               </div>
@@ -380,7 +429,7 @@ onMounted(load)
             </template>
             <template #stream="{ row }"><UiTag :color="streamInfo(row).color as any">{{ streamInfo(row).label }}</UiTag></template>
             <template #cover="{ row }">
-              <img v-if="row.coverUrl" :src="row.coverUrl" class="h-8 w-14 rounded object-cover" alt="">
+              <img v-if="row.coverUrl" :src="row.coverUrl" class="h-8 w-14 rounded-signal object-cover" alt="">
               <span v-else class="text-xs text-placeholder">—</span>
             </template>
             <template #ops="{ row }">
@@ -394,7 +443,7 @@ onMounted(load)
         <div v-if="tab === 'config'" class="pt-4">
           <UiLoading :loading="cfg.loading">
             <div class="min-h-40 space-y-4">
-              <div v-if="dev?.source !== 'idp'" class="flex items-center gap-2 rounded border border-line bg-zone px-3 py-2.5 text-sm text-muted">
+              <div v-if="dev?.source !== 'idp'" class="flex items-center gap-2 rounded-signal border border-line bg-zone px-3 py-2.5 text-sm text-muted">
                 <Icon name="info" :size="15" class="text-placeholder" />
                 该设备来源（{{ srcInfo(dev?.source).label }}）不支持远程配置，功能已禁用。
               </div>
@@ -418,20 +467,31 @@ onMounted(load)
           </UiLoading>
         </div>
 
-        <!-- d) 诊断 -->
+        <!-- d) 诊断：示波器读数式列表——状态灯 + 探测项 + 耗时（等宽右对齐），扫读友好 -->
         <div v-if="tab === 'diag'" class="space-y-3 pt-4">
-          <UiButton variant="primary" :disabled="diag.loading" @click="runDiag">
-            <Icon name="activity" :size="14" :class="diag.loading ? 'ipc-spin' : ''" />开始诊断
-          </UiButton>
-          <div v-if="diag.items.length" class="rounded border border-line">
-            <div v-for="(it, i) in diag.items" :key="i" class="flex items-baseline gap-2 border-b border-line-soft px-3 py-2.5 text-sm last:border-0">
-              <span class="font-bold" :class="it.ok ? 'text-success' : 'text-danger'">{{ it.ok ? '✓' : '✕' }}</span>
-              <span class="w-32 shrink-0 text-ink">{{ it.name || it.item || '检查项' }}</span>
-              <span class="text-[13px]" :class="it.ok ? 'text-muted' : 'text-danger'">{{ it.msg || '' }}</span>
-              <span v-if="it.cost" class="ml-auto text-xs text-placeholder">{{ it.cost }}ms</span>
+          <div class="flex items-center gap-3">
+            <UiButton variant="primary" :disabled="diag.loading" @click="runDiag">
+              <Icon name="activity" :size="14" :class="diag.loading ? 'ipc-spin' : ''" />开始诊断
+            </UiButton>
+            <span v-if="diag.items.length && !diag.loading" class="text-xs text-placeholder">
+              共 {{ diag.items.length }} 项 · {{ diag.items.filter((it) => it.ok).length }} 项通过
+            </span>
+          </div>
+
+          <div v-if="diag.items.length" class="divide-y divide-line-soft rounded-signal border border-line">
+            <div v-for="(it, i) in diag.items" :key="i" class="flex items-center gap-3 px-3 py-2.5 text-sm">
+              <span class="h-2 w-2 shrink-0 rounded-full" :class="diagDotClass(it)" />
+              <span class="w-32 shrink-0 truncate text-ink">{{ it.name || it.item || '检查项' }}</span>
+              <span class="min-w-0 flex-1 truncate text-[13px]" :class="it.ok === false ? 'text-danger' : 'text-muted'">
+                {{ it.msg || (it.ok === false ? '未通过' : it.ok === true ? '正常' : '等待结果') }}
+              </span>
+              <span v-if="it.cost != null" class="ml-auto shrink-0 font-mono text-xs tabular-nums text-placeholder">{{ it.cost }}ms</span>
             </div>
           </div>
-          <p v-else-if="!diag.loading" class="text-sm text-placeholder">点击"开始诊断"检查设备连通性与配置（诊断记录保留 7 天）</p>
+          <div v-else-if="diag.loading" class="rounded-signal border border-line-soft px-3 py-6 text-center text-sm text-placeholder">
+            <Icon name="activity" :size="18" class="ipc-spin mx-auto mb-2 text-primary" />正在探测设备连通性…
+          </div>
+          <p v-else class="text-sm text-placeholder">点击"开始诊断"检查设备连通性与配置（诊断记录保留 7 天）</p>
         </div>
 
         <!-- e) 日志 -->
@@ -455,7 +515,7 @@ onMounted(load)
 
     <!-- 快照弹窗 -->
     <UiDialog v-model:open="snapDlg.show" title="通道快照" width="max-w-xl">
-      <img v-if="snapDlg.src" :src="snapDlg.src" class="block w-full rounded" alt="快照">
+      <img v-if="snapDlg.src" :src="snapDlg.src" class="block w-full rounded-signal" alt="快照">
       <UiEmptyState v-else text="暂无快照数据" />
     </UiDialog>
 

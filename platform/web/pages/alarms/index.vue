@@ -29,6 +29,9 @@ const LEVEL_MAP: Record<string, { label: string; color: string }> = {
 const fmt = (ts: any) => new Date(Number(ts)).toLocaleString('zh-CN', { hour12: false })
 const kindName = (k: string) => KIND_MAP[k] || k
 const levelInfo = (l: string) => LEVEL_MAP[l] || { label: l || '-', color: 'default' }
+// 行首色条：级别→背景色（延续告警红=高危 / 警告黄=中危 / 信息灰=低危三级语义）
+const LEVEL_BAR: Record<string, string> = { error: 'bg-danger', warn: 'bg-warning', info: 'bg-info' }
+const levelBarClass = (l: string) => LEVEL_BAR[l] || 'bg-placeholder'
 
 // ---------- 列表状态 ----------
 const tab = ref<'all' | 'device' | 'platform'>('all')
@@ -254,6 +257,7 @@ onMounted(() => {
           <!-- 告警列表 -->
           <UiTable
             :columns="[
+              { key: 'bar', label: '', width: '28px', align: 'center', ellipsis: false },
               { key: 'snapshot', label: '抓拍', width: '70px', align: 'center' },
               { key: 'ts', label: '时间', width: '160px' },
               { key: 'kind', label: '类型', width: '110px' },
@@ -266,8 +270,11 @@ onMounted(() => {
             ]"
             :rows="shownItems" :loading="loading" :row-key="'id'" empty="暂无告警消息"
           >
+            <template #bar="{ row }">
+              <span class="mx-auto block h-5 w-1 rounded-full" :class="levelBarClass(row.level)" />
+            </template>
             <template #snapshot="{ row }">
-              <img v-if="row.snapshotUrl" :src="row.snapshotUrl" class="h-6 w-9 rounded object-cover cursor-pointer hover:opacity-80 mx-auto" @click.stop="openDetail(row)" alt="抓拍" />
+              <img v-if="row.snapshotUrl" :src="row.snapshotUrl" class="h-6 w-9 rounded-signal object-cover cursor-pointer hover:opacity-80 mx-auto" @click.stop="openDetail(row)" alt="抓拍" />
               <span v-else class="text-xs text-placeholder">—</span>
             </template>
             <template #ts="{ row }">{{ fmt(row.ts) }}</template>
@@ -304,9 +311,9 @@ onMounted(() => {
           <!-- 快照 -->
           <div v-if="detail.snapshotUrl">
             <p class="mb-1.5 text-xs font-medium text-muted">现场快照</p>
-            <img :src="detail.snapshotUrl" alt="告警快照" class="w-full rounded border border-line" />
+            <img :src="detail.snapshotUrl" alt="告警快照" class="w-full rounded-signal border border-line" />
           </div>
-          <div v-else class="flex h-32 items-center justify-center rounded border border-line bg-zone text-xs text-placeholder">
+          <div v-else class="flex h-32 items-center justify-center rounded-signal border border-line bg-zone text-xs text-placeholder">
             <UiIcon name="image" :size="20" class="mr-1.5" />无快照
           </div>
 
@@ -327,7 +334,7 @@ onMounted(() => {
           <!-- 设备信息 -->
           <div>
             <p class="mb-1.5 text-xs font-medium text-muted">设备信息</p>
-            <div class="rounded border border-line bg-zone/50 p-3">
+            <div class="rounded-signal border border-line bg-zone/50 p-3">
               <div class="grid grid-cols-[72px_1fr] gap-x-3 gap-y-2 text-sm">
                 <span class="text-muted">设备</span>
                 <span class="text-ink">{{ detail.device?.name || deviceMap[detail.deviceId] || detail.deviceId || '—' }}</span>
@@ -344,7 +351,7 @@ onMounted(() => {
             <div v-if="detail.rules?.length" class="space-y-1.5">
               <div
                 v-for="r in detail.rules" :key="r.id"
-                class="flex items-center justify-between gap-2 rounded border border-line px-3 py-2 text-xs"
+                class="flex items-center justify-between gap-2 rounded-signal border border-line px-3 py-2 text-xs"
               >
                 <span class="truncate text-body">{{ ruleKindsText(r) }}</span>
                 <UiTag :color="r.enabled ? 'success' : 'default'" plain>{{ r.enabled ? '启用' : '停用' }}</UiTag>
@@ -356,7 +363,7 @@ onMounted(() => {
           <!-- 原始数据 -->
           <div>
             <p class="mb-1.5 text-xs font-medium text-muted">详细数据</p>
-            <pre class="max-h-52 overflow-auto rounded bg-zone p-2.5 font-mono text-xs text-body">{{ JSON.stringify(detail.data, null, 2) }}</pre>
+            <pre class="max-h-52 overflow-auto rounded-signal bg-zone p-2.5 font-mono text-xs text-body">{{ JSON.stringify(detail.data, null, 2) }}</pre>
           </div>
         </div>
       </UiLoading>

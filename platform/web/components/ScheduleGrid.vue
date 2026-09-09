@@ -1,6 +1,11 @@
 <script setup lang="ts">
 // 周 × 24h 网格编辑器（REC-05/ALM-01 通用）：拖选生成时间段。
-const props = defineProps<{ modelValue: { days: number[]; ranges: string[][] } }>()
+const props = withDefaults(defineProps<{
+  modelValue: { days: number[]; ranges: string[][] }
+  /** 可选：录像类型（REC-02 三色语义，定时=primary/信号青，事件=success/绿，与 playback.vue 一致）。
+   *  网格交互本身仍是二元开关（录像/不录像），不引入新的三态切换 UI——仅涂色颜色随类型联动。 */
+  kind?: string
+}>(), { kind: 'timer' })
 const emit = defineEmits(['update:modelValue'])
 
 const days = ['周一', '周二', '周三', '周四', '周五', '周六', '周日']
@@ -28,6 +33,9 @@ function slot2hm(i: number): string {
   const h = Math.floor(i / 2), m = i % 2 === 1 ? '30' : '00'
   return `${String(h).padStart(2, '0')}:${m}`
 }
+
+// 已涂色格子的展示色：跟随 REC-02 录像三色语义
+const paintColor = computed(() => (props.kind === 'event' ? 'var(--color-rec-event)' : 'var(--color-rec-timer)'))
 
 let painting = ref(false)
 let paintVal = ref(true)
@@ -80,31 +88,42 @@ function onMouseUpHandler() {
 </script>
 
 <template>
-  <div class="sched">
-    <div class="head" />
-    <div v-for="i in 48" :key="i" class="head">{{ (i - 1) % 2 === 0 ? Math.floor((i - 1) / 2) : '' }}</div>
+  <div class="sched-outer">
+    <div class="sched">
+      <div class="head" />
+      <div v-for="i in 48" :key="i" class="head">{{ (i - 1) % 2 === 0 ? Math.floor((i - 1) / 2) : '' }}</div>
 
-    <template v-for="(d, di) in days" :key="d">
-      <div class="day">{{ d }}</div>
-      <div
-        v-for="s in 48" :key="s" class="cell"
-        :class="{ on: grid[di][s - 1] }"
-        @mousedown="onMouseDown(di, s - 1)" @mouseover="onMouseOver(di, s - 1)"
-      />
-    </template>
+      <template v-for="(d, di) in days" :key="d">
+        <div class="day">{{ d }}</div>
+        <div
+          v-for="s in 48" :key="s" class="cell"
+          :class="{ on: grid[di][s - 1], hstart: (s - 1) % 2 === 0 }"
+          :style="grid[di][s - 1] ? { background: paintColor } : undefined"
+          @mousedown="onMouseDown(di, s - 1)" @mouseover="onMouseOver(di, s - 1)"
+        />
+      </template>
+    </div>
   </div>
 </template>
 
 <style scoped>
+.sched-outer {
+  overflow-x: auto;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-signal);
+  background: var(--color-canvas);
+  padding: 8px;
+}
 .sched {
   display: grid;
   grid-template-columns: 48px repeat(48, 1fr);
-  gap: 1px; user-select: none; overflow-x: auto;
+  gap: 1px; user-select: none;
   min-width: 432px;
 }
-.head { font-size: 9px; color: var(--color-placeholder); text-align: center; height: 16px; }
-.day { font-size: 12px; color: var(--color-muted); height: 16px; line-height: 16px; }
-.cell { height: 16px; background: var(--color-zone); cursor: pointer; }
+.head { font-family: var(--font-mono); font-size: 9px; color: var(--color-placeholder); text-align: center; height: 16px; line-height: 16px; }
+.day { font-size: 12px; font-weight: 500; color: var(--color-body); height: 16px; line-height: 16px; }
+.cell { height: 16px; background: var(--color-zone); border-radius: 1px; cursor: pointer; transition: background-color 0.12s ease; }
+.cell.hstart { box-shadow: inset 1px 0 0 var(--color-line); }
 .cell:hover { outline: 1px solid var(--color-primary); outline-offset: -1px; }
 .cell.on { background: var(--color-rec-timer); }
 </style>

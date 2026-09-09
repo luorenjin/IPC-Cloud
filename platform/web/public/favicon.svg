@@ -1,0 +1,8 @@
+﻿<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none">
+  <rect width="32" height="32" rx="7" fill="#00B8C9"/>
+  <!-- IpcCloud Video Camera Icon: Signal Cyan bg + Dark Slate stroke -->
+  <g transform="translate(3.5, 4)">
+    <path d="M14 5H3a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2z" stroke="#0B1112" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M23.5 7l-6.5 5 6.5 5V7z" stroke="#0B1112" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>

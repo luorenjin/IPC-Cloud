@@ -83,6 +83,10 @@ services:
       context: ./web
       args:
         API_ORIGIN: http://server:8080
+    environment:
+      # ws-proxy 插件在运行时读取（server/plugins/ws-proxy.ts），
+      # 与构建期的 API_ORIGIN 是两回事：缺失会回落到容器自身的 localhost:8080 导致 WS 握手失败。
+      WS_UPSTREAM: http://server:8080
     depends_on:
       - server
     ports:

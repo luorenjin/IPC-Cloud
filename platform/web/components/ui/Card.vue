@@ -4,7 +4,7 @@ const props = withDefaults(defineProps<{ title?: string; bodyClass?: string; fla
 </script>
 
 <template>
-  <div class="rounded border border-line bg-surface" :class="flat ? '' : 'shadow-card'">
+  <div class="rounded-signal border border-line bg-surface" :class="flat ? '' : 'shadow-card'">
     <div v-if="title || $slots.header" class="flex items-center justify-between border-b border-line-soft px-4 py-3">
       <slot name="header">
         <span class="text-sm font-semibold text-ink">{{ title }}</span>

@@ -82,10 +82,10 @@ onMounted(async () => {
         </div>
         <span class="text-right text-sm text-body">当前项目</span>
         <span class="text-sm text-body">{{ currentProject?.name || '—' }}</span>
-        <span class="text-right text-sm text-body"></span>
-        <div class="flex justify-end">
-          <UiButton variant="primary" :disabled="infoSaving" @click="saveInfo">{{ infoSaving ? '保存中…' : '保存姓名' }}</UiButton>
-        </div>
+      </div>
+      <!-- 表单操作区独立于字段网格，与设置页footer 风格保持一致 -->
+      <div class="mt-3 flex justify-end border-t border-line-soft pt-3">
+        <UiButton variant="primary" :disabled="infoSaving" @click="saveInfo">{{ infoSaving ? '保存中…' : '保存姓名' }}</UiButton>
       </div>
     </UiCard>
 
@@ -98,12 +98,10 @@ onMounted(async () => {
         <UiInput v-model="pwdForm.newPassword" type="password" placeholder="至少 8 位，包含字母与数字" :maxlength="64" />
         <span class="text-right text-sm text-body"><span class="text-danger">*</span>确认密码</span>
         <UiInput v-model="pwdForm.confirm" type="password" placeholder="再次输入新密码" :maxlength="64" @enter="changePwd" />
-        <span class="text-right text-sm text-body"></span>
+      </div>
+      <div class="mt-3 flex items-center justify-between gap-3 border-t border-line-soft pt-3">
         <p class="text-xs text-placeholder">密码需至少 8 位且同时包含字母与数字；修改成功后其他设备的登录会话仍保持有效。</p>
-        <span class="text-right text-sm text-body"></span>
-        <div class="flex justify-end">
-          <UiButton variant="primary" :disabled="pwdSaving" @click="changePwd">{{ pwdSaving ? '提交中…' : '修改密码' }}</UiButton>
-        </div>
+        <UiButton variant="primary" class="shrink-0" :disabled="pwdSaving" @click="changePwd">{{ pwdSaving ? '提交中…' : '修改密码' }}</UiButton>
       </div>
     </UiCard>
 

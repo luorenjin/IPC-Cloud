@@ -27,6 +27,11 @@ export default defineNuxtConfig({
         { charset: 'utf-8' },
         { name: 'viewport', content: 'width=device-width, initial-scale=1' }
       ],
+      link: [
+        { rel: 'icon', type: 'image/x-icon', href: '/favicon.ico' },
+        { rel: 'icon', type: 'image/svg+xml', href: '/favicon.svg' },
+        { rel: 'apple-touch-icon', href: '/apple-touch-icon.png' }
+      ],
       script: [
         // h265web.js 由部署时放置于 /vendor/h265web.js（含模块与 wasm 资源）
         { src: '/vendor/h265web.js', async: true, tagPosition: 'head' }

@@ -191,7 +191,7 @@ const errText = computed(() => (errMsg.value || '播放失败').replace(/E\d{4}\
 
 <style scoped>
 .player-box {
-  position: relative; width: 100%; height: 100%; background: #000;
+  position: relative; width: 100%; height: 100%; background: black;
   display: flex; align-items: center; justify-content: center;
 }
 /* wasm 画布按 16:9 位图尺寸构建，CSS auto 显示（禁止库内联拉伸样式），

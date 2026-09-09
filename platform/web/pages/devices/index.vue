@@ -7,6 +7,9 @@ const toast = useToast()
 const confirmBox = useConfirm()
 const { currentProject } = useAuth()
 
+// 国标待确认计数：与侧栏徽标共用同一份状态（由 layouts/default.vue 拉取并刷新）
+const pendingCount = useState('gbPending', () => 0)
+
 // ================= 分组管理 =================
 const groups = ref<any[]>([])
 const selectedGroup = ref<string>('')
@@ -18,6 +21,15 @@ const groupMap = computed(() => {
   return m
 })
 const groupOptions = computed(() => groups.value.map((g: any) => ({ value: g.id, label: g.name })))
+
+// 协议来源四色语义（PRD §9.1，与 devices/[id].vue 保持一致映射，不改语义）
+const srcMap: Record<string, { label: string; color: string }> = {
+  idp: { label: '自有', color: 'idp' },
+  gb28181: { label: '国标', color: 'gb' },
+  onvif: { label: 'ONVIF', color: 'onvif' },
+  rtsp: { label: 'RTSP', color: 'rtsp' }
+}
+function srcInfo(s?: string) { return srcMap[s || ''] || { label: s || '—', color: 'default' } }
 
 async function loadGroups() {
   try {
@@ -121,6 +133,7 @@ const allCols = [
   { key: 'index', label: '序号' },
   { key: 'name', label: '设备名称' },
   { key: 'type', label: '设备类型' },
+  { key: 'source', label: '来源' },
   { key: 'status', label: '设备状态' },
   { key: 'model', label: '设备型号' },
   { key: 'ip', label: 'IP地址' },
@@ -364,16 +377,16 @@ onMounted(async () => {
 
 <template>
   <div class="flex gap-4 items-start">
-    <!-- 左侧：设备分组（严格对齐图 4） -->
-    <div class="w-60 shrink-0 rounded-lg border border-[#e5e6eb] bg-white p-3 shadow-sm">
+    <!-- 左侧：设备分组（信号灯式激活态，与全局侧栏呼应：左侧细竖线 + 图标变色，而非整块高亮胶囊） -->
+    <div class="w-60 shrink-0 rounded-signal border border-line bg-surface p-3 shadow-card">
       <div class="mb-3 flex items-center justify-between">
-        <span class="text-sm font-bold text-[#1f2329]">设备分组</span>
+        <span class="text-sm font-bold text-ink">设备分组</span>
         <div class="flex items-center gap-1">
-          <button class="p-1 text-[#86909c] hover:text-[#1785E6]" title="新增分组" @click="openAddGroup">
+          <button class="rounded-chrome p-1 text-muted transition-colors hover:bg-zone hover:text-primary" title="新增分组" @click="openAddGroup">
             <Icon name="plus" :size="15" />
           </button>
           <button
-            class="p-1 text-[#86909c] hover:text-[#1785E6] disabled:opacity-30"
+            class="rounded-chrome p-1 text-muted transition-colors hover:bg-zone hover:text-primary disabled:opacity-30"
             :disabled="!selectedGroup"
             title="编辑当前分组"
             @click="openEditGroup(groups.find(g => g.id === selectedGroup))"
@@ -384,41 +397,37 @@ onMounted(async () => {
       </div>
 
       <!-- 搜索框 -->
-      <div class="mb-3 flex h-8 items-center rounded border border-[#e5e6eb] bg-[#f7f8fa] px-2 text-xs">
-        <Icon name="search" :size="13" class="mr-1.5 text-[#86909c]" />
-        <input
-          v-model="groupSearch"
-          type="text"
-          placeholder="搜索分组"
-          class="w-full bg-transparent outline-none placeholder:text-[#86909c]"
-        />
-      </div>
+      <UiInput v-model="groupSearch" placeholder="搜索分组" size="sm" class="mb-3">
+        <template #prefix><Icon name="search" :size="13" class="mr-1.5 text-placeholder" /></template>
+      </UiInput>
 
       <!-- 分组树列表 -->
-      <div class="space-y-1">
+      <div class="space-y-0.5">
         <div
-          class="flex cursor-pointer items-center justify-between rounded px-2.5 py-1.5 text-xs transition-colors"
-          :class="!selectedGroup ? 'bg-[#e8f3fc] font-bold text-[#1785E6]' : 'text-[#4e5969] hover:bg-[#f2f3f5]'"
+          class="relative flex cursor-pointer items-center justify-between rounded-signal py-1.5 pl-4 pr-2.5 text-xs transition-colors"
+          :class="!selectedGroup ? 'bg-zone font-medium text-ink' : 'text-muted hover:bg-zone hover:text-ink'"
           @click="selectedGroup = ''; search()"
         >
+          <span class="absolute left-0.5 top-1/2 h-3.5 w-0.5 -translate-y-1/2 rounded-full bg-primary transition-opacity" :class="!selectedGroup ? 'opacity-100' : 'opacity-0'" />
           <span class="flex items-center gap-1.5">
-            <Icon name="folder" :size="14" />全部分组
+            <Icon name="folder" :size="14" :class="!selectedGroup ? 'text-primary' : ''" />全部分组
           </span>
-          <span class="text-[11px] text-[#86909c]">({{ stats.total }})</span>
+          <span class="text-[11px] text-placeholder">({{ stats.total }})</span>
         </div>
 
         <div
           v-for="g in groups.filter(x => !groupSearch || x.name.includes(groupSearch))"
           :key="g.id"
-          class="flex cursor-pointer items-center justify-between rounded px-2.5 py-1.5 text-xs transition-colors"
-          :class="selectedGroup === g.id ? 'bg-[#e8f3fc] font-bold text-[#1785E6]' : 'text-[#4e5969] hover:bg-[#f2f3f5]'"
+          class="relative flex cursor-pointer items-center justify-between rounded-signal py-1.5 pl-4 pr-2.5 text-xs transition-colors"
+          :class="selectedGroup === g.id ? 'bg-zone font-medium text-ink' : 'text-muted hover:bg-zone hover:text-ink'"
           @click="selectedGroup = g.id; search()"
         >
+          <span class="absolute left-0.5 top-1/2 h-3.5 w-0.5 -translate-y-1/2 rounded-full bg-primary transition-opacity" :class="selectedGroup === g.id ? 'opacity-100' : 'opacity-0'" />
           <span class="flex items-center gap-1.5 truncate">
-            <Icon name="chevron-down" :size="11" class="text-[#86909c]" />
-            <Icon name="video" :size="13" />{{ g.name }}
+            <Icon name="chevron-down" :size="11" class="text-placeholder" />
+            <Icon name="video" :size="13" :class="selectedGroup === g.id ? 'text-primary' : ''" />{{ g.name }}
           </span>
-          <span class="text-[11px] text-[#86909c]">(0/1)</span>
+          <span class="text-[11px] text-placeholder">(0/1)</span>
         </div>
       </div>
     </div>
@@ -426,18 +435,18 @@ onMounted(async () => {
     <!-- 右侧：主体区 -->
     <div class="min-w-0 flex-1 space-y-3">
       <!-- 顶部设备状态卡片（图 4：IPC 2台，离线 2，可折叠） -->
-      <div class="relative rounded-lg border border-[#e5e6eb] bg-white p-4 shadow-sm">
+      <div class="relative rounded-signal border border-line bg-surface p-4 shadow-card">
         <div v-show="!cardCollapsed" class="flex items-center gap-4">
-          <div class="flex h-12 w-12 items-center justify-center rounded-lg bg-[#f2f3f5] text-[#4e5969]">
+          <div class="flex h-12 w-12 items-center justify-center rounded-signal bg-zone text-muted">
             <Icon name="video" :size="28" />
           </div>
           <div>
-            <div class="text-xs text-[#86909c]">IPC</div>
-            <div class="mt-0.5 text-xl font-bold text-[#1f2329]">
+            <div class="text-xs text-muted">IPC</div>
+            <div class="mt-0.5 text-xl font-bold text-ink">
               {{ stats.total }} <span class="text-xs font-normal">台</span>
             </div>
             <div class="mt-1 flex items-center gap-1.5">
-              <span class="rounded bg-[#fef0ef] px-1.5 py-0.5 text-[10px] font-medium text-[#f53f3f]">
+              <span class="rounded-signal bg-danger-soft px-1.5 py-0.5 text-[10px] font-medium text-danger">
                 离线 {{ stats.offline }}
               </span>
             </div>
@@ -445,41 +454,34 @@ onMounted(async () => {
         </div>
 
         <!-- 卡片折叠收起把手（对齐图 4 居中 ^ 按钮） -->
-        <div class="flex justify-center border-t border-[#f2f3f5] pt-1 mt-2">
-          <button class="text-[#86909c] hover:text-[#1785E6] p-0.5" @click="cardCollapsed = !cardCollapsed">
+        <div class="flex justify-center border-t border-line-soft pt-1 mt-2">
+          <button class="p-0.5 text-muted transition-colors hover:text-primary" @click="cardCollapsed = !cardCollapsed">
             <Icon :name="cardCollapsed ? 'chevron-down' : 'chevron-up'" :size="15" />
           </button>
         </div>
       </div>
 
       <!-- 表格主体卡片 -->
-      <div class="rounded-lg border border-[#e5e6eb] bg-white p-4 shadow-sm">
+      <div class="rounded-signal border border-line bg-surface p-4 shadow-card">
         <!-- 主工具栏行：全部 | IPC Tab 与 添加设备按钮（严格对齐图 4） -->
-        <div class="mb-3 flex items-center justify-between border-b border-[#f2f3f5] pb-3">
-          <div class="flex items-center gap-6 text-sm font-medium">
-            <button
-              class="relative pb-1.5 transition-colors"
-              :class="query.tab === 'all' ? 'text-[#1785E6] font-bold border-b-2 border-[#1785E6]' : 'text-[#4e5969] hover:text-[#1f2329]'"
-              @click="query.tab = 'all'"
-            >
-              全部
-            </button>
-            <button
-              class="relative pb-1.5 transition-colors"
-              :class="query.tab === 'ipc' ? 'text-[#1785E6] font-bold border-b-2 border-[#1785E6]' : 'text-[#4e5969] hover:text-[#1f2329]'"
-              @click="query.tab = 'ipc'"
-            >
-              IPC
-            </button>
-          </div>
-
-          <!-- 右侧高亮大按钮：+ 添加设备 -->
-          <button
-            class="flex items-center gap-1.5 rounded bg-[#1785E6] px-4 py-1.5 text-sm font-medium text-white shadow-sm hover:bg-[#0a6bcc] transition-colors"
-            @click="openAddModal"
+        <div class="mb-3">
+          <UiTabs
+            v-model="query.tab"
+            :items="[{ label: '全部', value: 'all' }, { label: 'IPC', value: 'ipc' }]"
           >
-            <Icon name="plus" :size="15" />添加设备
-          </button>
+            <template #extra>
+              <!-- 国标待确认入口：与侧栏徽标同源（useState('gbPending')），仅有待确认时出现 -->
+              <UiButton v-if="pendingCount > 0" class="ml-auto" @click="navigateTo('/devices/pending')">
+                待确认(国标)
+                <span class="ml-1 rounded-full bg-danger px-1.5 text-[10px] leading-4 text-white">
+                  {{ pendingCount > 99 ? '99+' : pendingCount }}
+                </span>
+              </UiButton>
+              <UiButton variant="primary" :class="pendingCount > 0 ? '' : 'ml-auto'" @click="openAddModal">
+                <Icon name="plus" :size="15" />添加设备
+              </UiButton>
+            </template>
+          </UiTabs>
         </div>
 
         <!-- 批量操作与列配置条（严格对齐图 4 功能按钮阵列） -->
@@ -489,68 +491,33 @@ onMounted(async () => {
             <!-- [=] 内容 列配置按钮 -->
             <UiPopover>
               <template #trigger>
-                <button class="flex items-center gap-1 rounded border border-[#e5e6eb] bg-white px-2 py-1 text-[#4e5969] hover:border-[#1785E6] hover:text-[#1785E6]">
-                  <Icon name="list" :size="13" />内容
-                </button>
+                <UiButton size="sm"><Icon name="list" :size="13" />内容</UiButton>
               </template>
-              <div class="w-40 space-y-1 p-1">
-                <div
-                  v-for="c in allCols"
-                  :key="c.key"
-                  class="flex cursor-pointer items-center gap-2 rounded px-2 py-1 text-xs hover:bg-[#e8f3fc]"
-                  @click="toggleCol(c.key)"
-                >
-                  <input type="checkbox" :checked="showCol(c.key)" class="h-3 w-3 rounded text-[#1785E6]" />
-                  <span>{{ c.label }}</span>
+              <div class="w-40 space-y-0.5 p-1">
+                <div v-for="c in allCols" :key="c.key" class="rounded px-1.5 py-1 hover:bg-zone">
+                  <UiCheckbox :model-value="showCol(c.key)" :label="c.label" @update:model-value="toggleCol(c.key)" />
                 </div>
               </div>
             </UiPopover>
 
-            <button class="rounded border border-[#e5e6eb] bg-white px-2 py-1 text-[#4e5969] hover:border-[#1785E6]">网络设置配置</button>
-            <button
-              class="rounded border border-[#e5e6eb] bg-white px-2 py-1 text-[#4e5969] hover:border-[#1785E6] disabled:opacity-40"
-              :disabled="!selection.length"
-              @click="openBatchMove"
-            >
-              设备转移
-            </button>
-            <button
-              class="rounded border border-[#e5e6eb] bg-white px-2 py-1 text-[#4e5969] hover:border-[#1785E6] disabled:opacity-40"
-              :disabled="!selection.length"
-              @click="doBatchReboot"
-            >
-              重启设备
-            </button>
-            <button
-              class="rounded border border-[#e5e6eb] bg-white px-2 py-1 text-[#f53f3f] hover:bg-[#fef0ef] disabled:opacity-40"
-              :disabled="!selection.length"
-              @click="doBatchDelete"
-            >
-              删除设备
-            </button>
-            <button class="rounded border border-[#e5e6eb] bg-white px-2 py-1 text-[#4e5969] hover:border-[#1785E6]">设置地理位置</button>
-            <button class="rounded border border-[#e5e6eb] bg-white px-2 py-1 text-[#4e5969] hover:border-[#1785E6]" @click="exportCsv">导出设备信息</button>
-            <button class="rounded border border-[#e5e6eb] bg-white px-2 py-1 text-[#4e5969] hover:border-[#1785E6]" @click="load">设备同步</button>
-            <button class="rounded border border-[#e5e6eb] p-1 text-[#4e5969] hover:text-[#1785E6]" title="刷新" @click="load">
-              <Icon name="refresh" :size="13" />
-            </button>
+            <UiButton size="sm">网络设置配置</UiButton>
+            <UiButton size="sm" :disabled="!selection.length" @click="openBatchMove">设备转移</UiButton>
+            <UiButton size="sm" :disabled="!selection.length" @click="doBatchReboot">重启设备</UiButton>
+            <UiButton variant="dangerText" size="sm" :disabled="!selection.length" @click="doBatchDelete">删除设备</UiButton>
+            <UiButton size="sm">设置地理位置</UiButton>
+            <UiButton size="sm" @click="exportCsv">导出设备信息</UiButton>
+            <UiButton size="sm" @click="load">设备同步</UiButton>
+            <UiButton size="sm" title="刷新" @click="load"><Icon name="refresh" :size="13" /></UiButton>
           </div>
 
           <!-- 右侧搜索与过滤 -->
           <div class="flex items-center gap-2">
-            <button class="rounded border border-[#e5e6eb] bg-white px-2.5 py-1 text-[#4e5969] hover:border-[#1785E6]">设备升级</button>
-            <button class="rounded border border-[#e5e6eb] bg-white px-2.5 py-1 text-[#4e5969] hover:border-[#1785E6]" @click="openAddModal">批量添加</button>
+            <UiButton size="sm">设备升级</UiButton>
+            <UiButton size="sm" @click="openAddModal">批量添加</UiButton>
             <!-- 搜索框 -->
-            <div class="relative flex h-7 w-48 items-center rounded border border-[#e5e6eb] bg-white px-2 focus-within:border-[#1785E6]">
-              <Icon name="search" :size="12" class="mr-1 text-[#86909c]" />
-              <input
-                v-model="query.keyword"
-                type="text"
-                class="w-full bg-transparent text-xs outline-none placeholder:text-[#86909c]"
-                placeholder="搜索设备名/MAC/IP"
-                @enter="search"
-              />
-            </div>
+            <UiInput v-model="query.keyword" placeholder="搜索设备名/MAC/IP" size="sm" width="w-48" @enter="search">
+              <template #prefix><Icon name="search" :size="12" class="mr-1 text-placeholder" /></template>
+            </UiInput>
             <!-- 筛选下拉 -->
             <UiSelect
               v-model="query.status"
@@ -567,25 +534,24 @@ onMounted(async () => {
         </div>
 
         <!-- 表格（对齐图 4 表格所有列字段） -->
-        <div class="overflow-x-auto border border-[#e5e6eb] rounded">
-          <table class="w-full text-left text-xs text-[#1f2329]">
-            <thead class="bg-[#f7f8fa] text-[#4e5969] border-b border-[#e5e6eb]">
+        <div class="overflow-x-auto rounded-signal border border-line">
+          <table class="w-full text-left text-xs text-body">
+            <thead class="border-b border-line bg-zone text-muted">
               <tr>
                 <th class="py-2.5 px-3 w-8">
-                  <input
-                    type="checkbox"
-                    :checked="selection.length > 0 && selection.length === devices.length"
-                    class="h-3.5 w-3.5 rounded text-[#1785E6]"
-                    @change="selection = selection.length === devices.length ? [] : devices.map(d => d.id)"
+                  <UiCheckbox
+                    :model-value="selection.length > 0 && selection.length === devices.length"
+                    @update:model-value="selection = selection.length === devices.length ? [] : devices.map(d => d.id)"
                   />
                 </th>
                 <th v-if="showCol('index')" class="py-2.5 px-3 w-10 text-center">序号</th>
                 <th v-if="showCol('name')" class="py-2.5 px-3">设备名称</th>
                 <th v-if="showCol('type')" class="py-2.5 px-3">设备类型</th>
+                <th v-if="showCol('source')" class="py-2.5 px-3">来源</th>
                 <th v-if="showCol('status')" class="py-2.5 px-3">设备状态</th>
                 <th v-if="showCol('model')" class="py-2.5 px-3">设备型号</th>
-                <th v-if="showCol('ip')" class="py-2.5 px-3">IP地址</th>
-                <th v-if="showCol('mac')" class="py-2.5 px-3">MAC地址</th>
+                <th v-if="showCol('ip')" class="py-2.5 px-3 text-right">IP地址</th>
+                <th v-if="showCol('mac')" class="py-2.5 px-3 text-right">MAC地址</th>
                 <th v-if="showCol('group')" class="py-2.5 px-3">所属分组</th>
                 <th v-if="showCol('location')" class="py-2.5 px-3">地理位置</th>
                 <th v-if="showCol('duration')" class="py-2.5 px-3">状态持续时长</th>
@@ -593,106 +559,74 @@ onMounted(async () => {
                 <th v-if="showCol('ops')" class="py-2.5 px-3 text-right">操作</th>
               </tr>
             </thead>
-            <tbody class="divide-y divide-[#e5e6eb]">
+            <tbody class="divide-y divide-line-soft">
               <template v-for="(row, idx) in devices" :key="row.id">
-                <tr class="hover:bg-[#f7f9fc] transition-colors">
+                <tr class="transition-colors hover:bg-primary-softer">
                   <td class="py-2.5 px-3">
-                    <input
-                      type="checkbox"
-                      :checked="selection.includes(row.id)"
-                      class="h-3.5 w-3.5 rounded text-[#1785E6]"
-                      @change="selection.includes(row.id) ? selection = selection.filter(id => id !== row.id) : selection.push(row.id)"
+                    <UiCheckbox
+                      :model-value="selection.includes(row.id)"
+                      @update:model-value="selection.includes(row.id) ? selection = selection.filter(id => id !== row.id) : selection.push(row.id)"
                     />
                   </td>
-                  <td v-if="showCol('index')" class="py-2.5 px-3 text-center text-[#86909c]">{{ idx + 1 }}</td>
+                  <td v-if="showCol('index')" class="py-2.5 px-3 text-center text-placeholder">{{ idx + 1 }}</td>
                   <td v-if="showCol('name')" class="py-2.5 px-3">
                     <div class="flex items-center gap-1.5 text-left">
                       <button
                         type="button"
-                        class="rounded p-0.5 text-placeholder hover:bg-zone"
-                        :class="expandedRow === row.id ? 'rotate-90 text-[#1785E6]' : 'text-[#86909c]'"
-                        style="transition: transform .15s"
+                        class="rounded-chrome p-0.5 text-placeholder transition-transform hover:bg-zone"
+                        :class="expandedRow === row.id ? 'rotate-90 text-primary' : ''"
                         title="展开通道列表"
                         @click.stop="toggleExpand(row)"
                       >
                         <Icon name="chevron-right" :size="12" />
                       </button>
-                      <button
-                        type="button"
-                        class="font-medium text-[#1785E6] hover:underline truncate max-w-[160px] text-left"
-                        @click="router.push(`/devices/${row.id}`)"
-                      >
+                      <UiButton variant="text" size="sm" class="max-w-[160px] truncate" @click="router.push(`/devices/${row.id}`)">
                         {{ row.name }}
-                      </button>
+                      </UiButton>
                     </div>
                   </td>
                   <td v-if="showCol('type')" class="py-2.5 px-3">{{ row.type || 'IPC' }}</td>
+                  <td v-if="showCol('source')" class="py-2.5 px-3"><UiTag :color="srcInfo(row.source).color">{{ srcInfo(row.source).label }}</UiTag></td>
                   <td v-if="showCol('status')" class="py-2.5 px-3">
-                    <span class="flex items-center gap-1.5" :class="row.status === 'online' ? 'text-[#00b578]' : 'text-[#f53f3f]'">
-                      <span class="h-2 w-2 rounded-full" :class="row.status === 'online' ? 'bg-[#00b578]' : 'bg-[#f53f3f]'" />
+                    <span class="flex items-center gap-1.5" :class="row.status === 'online' ? 'text-primary' : 'text-muted'">
+                      <span class="h-2 w-2 rounded-full transition-colors" :class="row.status === 'online' ? 'bg-primary' : 'bg-muted'" />
                       {{ row.status === 'online' ? '在线' : '离线' }}
                     </span>
                   </td>
-                  <td v-if="showCol('model')" class="py-2.5 px-3 text-[#4e5969]">{{ row.model || 'TL-IPC455E-AI4' }}</td>
-                  <td v-if="showCol('ip')" class="py-2.5 px-3 font-mono text-[#4e5969]">{{ row.ip || '192.168.1.53' }}</td>
-                  <td v-if="showCol('mac')" class="py-2.5 px-3 font-mono text-[#4e5969]">{{ row.mac || '4C-10-D5-85-3B-FB' }}</td>
+                  <td v-if="showCol('model')" class="py-2.5 px-3 text-muted">{{ row.model || 'TL-IPC455E-AI4' }}</td>
+                  <td v-if="showCol('ip')" class="py-2.5 px-3 text-right font-mono text-muted">{{ row.ip || '192.168.1.53' }}</td>
+                  <td v-if="showCol('mac')" class="py-2.5 px-3 text-right font-mono text-muted">{{ row.mac || '4C-10-D5-85-3B-FB' }}</td>
                   <td v-if="showCol('group')" class="py-2.5 px-3">{{ groupMap[row.groupId] || '默认' }}</td>
-                  <td v-if="showCol('location')" class="py-2.5 px-3 text-[#86909c]">{{ row.location || '---' }}</td>
-                  <td v-if="showCol('duration')" class="py-2.5 px-3 text-[#86909c]">---</td>
-                  <td v-if="showCol('pinned')" class="py-2.5 px-3 text-center text-[#86909c]">否</td>
+                  <td v-if="showCol('location')" class="py-2.5 px-3 text-placeholder">{{ row.location || '---' }}</td>
+                  <td v-if="showCol('duration')" class="py-2.5 px-3 text-placeholder">---</td>
+                  <td v-if="showCol('pinned')" class="py-2.5 px-3 text-center text-placeholder">否</td>
                   <!-- 操作列（对齐图 4：远程配置、编辑、预览） -->
                   <td v-if="showCol('ops')" class="py-2.5 px-3 text-right">
-                    <div class="flex items-center justify-end gap-2.5">
-                      <button
-                        class="text-[#1785E6] hover:underline"
-                        @click="router.push(`/devices/${row.id}`)"
-                      >
-                        远程配置
-                      </button>
-                      <button
-                        class="text-[#1785E6] hover:underline"
-                        @click="openEditDev(row)"
-                      >
-                        编辑
-                      </button>
-                      <button
-                        class="text-[#1785E6] hover:underline"
-                        @click="openPreview(row)"
-                      >
-                        预览
-                      </button>
-                      <button
-                        class="text-[#f53f3f] hover:underline ml-1"
-                        title="删除设备"
-                        @click="askDeleteSingle(row)"
-                      >
-                        删除
-                      </button>
+                    <div class="flex items-center justify-end gap-1">
+                      <UiButton variant="text" size="sm" @click="router.push(`/devices/${row.id}`)">远程配置</UiButton>
+                      <UiButton variant="text" size="sm" @click="openEditDev(row)">编辑</UiButton>
+                      <UiButton variant="text" size="sm" @click="openPreview(row)">预览</UiButton>
+                      <UiButton variant="dangerText" size="sm" title="删除设备" @click="askDeleteSingle(row)">删除</UiButton>
                     </div>
                   </td>
                 </tr>
 
                 <!-- 行展开通道子列表（图 4 / MGR-01） -->
-                <tr v-if="expandedRow === row.id" class="bg-[#f9fafc]">
-                  <td colspan="13" class="p-3 pl-12 border-b border-[#e5e6eb]">
-                    <div class="text-xs font-semibold text-[#4e5969] mb-1.5">通道列表：</div>
-                    <div v-if="!chCache[row.id]?.length" class="text-xs text-[#86909c]">
+                <tr v-if="expandedRow === row.id">
+                  <td colspan="14" class="border-b border-line-soft bg-zone p-3 pl-12">
+                    <div class="mb-1.5 text-xs font-semibold text-muted">通道列表：</div>
+                    <div v-if="!chCache[row.id]?.length" class="text-xs text-placeholder">
                       暂无子通道数据或单通道设备
                     </div>
                     <div v-else class="flex flex-wrap gap-2">
                       <div
                         v-for="ch in chCache[row.id]"
                         :key="ch.id"
-                        class="flex items-center gap-2 rounded border border-[#e5e6eb] bg-white px-2.5 py-1 text-xs"
+                        class="flex items-center gap-2 rounded-signal border border-line bg-surface px-2.5 py-1 text-xs"
                       >
-                        <span class="h-1.5 w-1.5 rounded-full" :class="ch.enabled !== false ? 'bg-[#00b578]' : 'bg-[#c9cdd4]'" />
-                        <span class="font-medium text-[#1f2329]">{{ ch.name || `通道 ${ch.idx}` }}</span>
-                        <button
-                          class="text-[#1785E6] hover:underline ml-1"
-                          @click="openPreview(row, ch)"
-                        >
-                          预览
-                        </button>
+                        <span class="h-1.5 w-1.5 rounded-full" :class="ch.enabled !== false ? 'bg-primary' : 'bg-line'" />
+                        <span class="font-medium text-ink">{{ ch.name || `通道 ${ch.idx}` }}</span>
+                        <UiButton variant="text" size="sm" class="ml-1" @click="openPreview(row, ch)">预览</UiButton>
                       </div>
                     </div>
                   </td>
@@ -703,11 +637,11 @@ onMounted(async () => {
         </div>
 
         <!-- 底部分页栏（严格对齐图 4） -->
-        <div class="mt-4 flex flex-wrap items-center justify-between gap-4 text-xs text-[#4e5969]">
+        <div class="mt-4 flex flex-wrap items-center justify-between gap-4 text-xs text-muted">
           <div>
-            共计 <span class="font-bold text-[#1f2329]">{{ total }}</span> 条
-            第 <span class="font-bold text-[#1f2329]">{{ query.page }}</span>/{{ Math.ceil(total / query.pageSize) || 1 }} 页
-            已选 <span class="font-bold text-[#1785E6]">{{ selection.length }}</span>
+            共计 <span class="font-bold text-ink">{{ total }}</span> 条
+            第 <span class="font-bold text-ink">{{ query.page }}</span>/{{ Math.ceil(total / query.pageSize) || 1 }} 页
+            已选 <span class="font-bold text-primary">{{ selection.length }}</span>
           </div>
 
           <div class="flex items-center gap-2">
@@ -722,21 +656,13 @@ onMounted(async () => {
               size="sm"
               @update:model-value="search"
             />
-            <button
-              class="h-7 w-7 rounded border border-[#e5e6eb] text-center hover:border-[#1785E6] disabled:opacity-30"
-              :disabled="query.page <= 1"
-              @click="query.page--; load()"
-            >
+            <UiButton size="sm" class="h-7 w-7 px-0" :disabled="query.page <= 1" @click="query.page--; load()">
               &lt;
-            </button>
-            <span class="px-2 py-0.5 font-bold text-[#1785E6] bg-[#e8f3fc] rounded">{{ query.page }}</span>
-            <button
-              class="h-7 w-7 rounded border border-[#e5e6eb] text-center hover:border-[#1785E6] disabled:opacity-30"
-              :disabled="query.page >= Math.ceil(total / query.pageSize)"
-              @click="query.page++; load()"
-            >
+            </UiButton>
+            <span class="rounded-chrome bg-primary-soft px-2 py-0.5 font-bold text-primary">{{ query.page }}</span>
+            <UiButton size="sm" class="h-7 w-7 px-0" :disabled="query.page >= Math.ceil(total / query.pageSize)" @click="query.page++; load()">
               &gt;
-            </button>
+            </UiButton>
           </div>
         </div>
       </div>
@@ -745,85 +671,39 @@ onMounted(async () => {
     <!-- ================= 【5. 添加设备弹窗】（100% 严格对齐图 5） ================= -->
     <UiDialog v-model:open="addDlg.show" title="添加设备" width="max-w-2xl">
       <!-- 顶部 Tab 栏（对齐图 5） -->
-      <div class="border-b border-[#e5e6eb]">
-        <div class="flex items-center gap-6 text-sm font-medium text-[#4e5969]">
-          <button
-            class="relative pb-2.5 transition-colors"
-            :class="addTab === 'idp' ? 'text-[#1785E6] font-bold border-b-2 border-[#1785E6]' : 'hover:text-[#1f2329]'"
-            @click="addTab = 'idp'"
-          >
-            设备ID添加
-          </button>
-          <button
-            class="relative pb-2.5 transition-colors"
-            :class="addTab === 'mac' ? 'text-[#1785E6] font-bold border-b-2 border-[#1785E6]' : 'hover:text-[#1f2329]'"
-            @click="addTab = 'mac'"
-          >
-            MAC地址添加
-          </button>
-          <button
-            class="relative pb-2.5 transition-colors"
-            :class="addTab === 'smart' ? 'text-[#1785E6] font-bold border-b-2 border-[#1785E6]' : 'hover:text-[#1f2329]'"
-            @click="addTab = 'smart'"
-          >
-            智能配置添加
-          </button>
-          <button
-            class="relative pb-2.5 transition-colors"
-            :class="addTab === 'app' ? 'text-[#1785E6] font-bold border-b-2 border-[#1785E6]' : 'hover:text-[#1f2329]'"
-            @click="addTab = 'app'"
-          >
-            来自物联APP的设备
-          </button>
-          <button
-            class="relative pb-2.5 transition-colors"
-            :class="addTab === 'pwd' ? 'text-[#1785E6] font-bold border-b-2 border-[#1785E6]' : 'hover:text-[#1f2329]'"
-            @click="addTab = 'pwd'"
-          >
-            设备密码添加
-          </button>
-          <button
-            class="relative pb-2.5 transition-colors"
-            :class="addTab === 'other' ? 'text-[#1785E6] font-bold border-b-2 border-[#1785E6]' : 'hover:text-[#1f2329]'"
-            @click="addTab = 'other'"
-          >
-            其他添加方式
-          </button>
-        </div>
-      </div>
+      <UiTabs
+        v-model="addTab"
+        :items="[
+          { label: '设备ID添加', value: 'idp' },
+          { label: 'MAC地址添加', value: 'mac' },
+          { label: '智能配置添加', value: 'smart' },
+          { label: '来自物联APP的设备', value: 'app' },
+          { label: '设备密码添加', value: 'pwd' },
+          { label: '其他添加方式', value: 'other' }
+        ]"
+      />
 
       <!-- 固定前置提示条（对齐图 5 顶部灰色背景小字） -->
-      <div class="mt-3 rounded bg-[#f7f8fa] p-3 text-xs text-[#86909c] leading-relaxed">
+      <div class="mt-3 rounded-signal bg-zone p-3 text-xs leading-relaxed text-muted">
         <div>请确认要添加的设备都已接入互联网，再进行添加操作。</div>
-        <div class="mt-0.5 text-[#c9cdd4]">* 添加AC设备后系统会自动识别并添加关联的FIT AP，无需再次添加FIT AP设备。</div>
+        <div class="mt-0.5 text-placeholder">* 添加AC设备后系统会自动识别并添加关联的FIT AP，无需再次添加FIT AP设备。</div>
       </div>
 
       <!-- 二级子 Tab 分段按钮（单台添加 | 批量导入ID，对齐图 5） -->
-      <div class="mt-4 flex items-center gap-2">
-        <button
-          class="rounded px-3 py-1.5 text-xs font-medium transition-colors border"
-          :class="addSubTab === 'single' ? 'bg-[#e8f3fc] border-[#1785E6] text-[#1785E6]' : 'border-[#e5e6eb] bg-white text-[#4e5969] hover:border-[#1785E6]'"
-          @click="addSubTab = 'single'"
-        >
-          单台添加
-        </button>
-        <button
-          class="rounded px-3 py-1.5 text-xs font-medium transition-colors border"
-          :class="addSubTab === 'batch' ? 'bg-[#e8f3fc] border-[#1785E6] text-[#1785E6]' : 'border-[#e5e6eb] bg-white text-[#4e5969] hover:border-[#1785E6]'"
-          @click="addSubTab = 'batch'"
-        >
-          批量导入ID
-        </button>
-      </div>
+      <UiSegmented
+        v-model="addSubTab"
+        class="mt-4"
+        :items="[{ label: '单台添加', value: 'single' }, { label: '批量导入ID', value: 'batch' }]"
+      />
 
       <!-- 单台添加表单（严格对齐图 5） -->
       <div v-if="addSubTab === 'single'" class="mt-6 space-y-4 max-w-md mx-auto">
         <!-- 所属分组 -->
         <div class="flex items-center gap-3">
-          <label class="w-24 text-right text-xs font-medium text-[#4e5969]"><span class="text-[#f53f3f]">*</span> 所属分组</label>
+          <label class="w-24 text-right text-xs font-medium text-muted"><span class="text-danger">*</span> 所属分组</label>
           <div class="flex items-center gap-2 flex-1 text-sm">
-            <span class="font-bold text-[#1f2329]">{{ groupMap[addForm.groupId] || '默认' }}</span>
-            <button class="text-[#1785E6] hover:text-[#0a6bcc]" title="修改所属分组" @click="openAddGroup">
+            <span class="font-bold text-ink">{{ groupMap[addForm.groupId] || '默认' }}</span>
+            <button class="text-primary hover:text-primary-deep" title="修改所属分组" @click="openAddGroup">
               <Icon name="edit" :size="13" />
             </button>
           </div>
@@ -831,46 +711,28 @@ onMounted(async () => {
 
         <!-- 设备 ID -->
         <div class="flex items-center gap-3">
-          <label class="w-24 text-right text-xs font-medium text-[#4e5969]"><span class="text-[#f53f3f]">*</span> 设备ID</label>
-          <div class="flex-1">
-            <input
-              v-model="addForm.deviceId"
-              type="text"
-              class="h-9 w-full rounded border border-[#dcdfe6] px-3 text-xs outline-none focus:border-[#1785E6] uppercase"
-              placeholder="请输入标贴上的设备ID，不区分大小写"
-            />
-          </div>
+          <label class="w-24 text-right text-xs font-medium text-muted"><span class="text-danger">*</span> 设备ID</label>
+          <UiInput v-model="addForm.deviceId" class="flex-1 uppercase" placeholder="请输入标贴上的设备ID，不区分大小写" />
         </div>
 
         <!-- 设备名称 -->
         <div class="flex items-center gap-3">
-          <label class="w-24 text-right text-xs font-medium text-[#4e5969]">设备名称</label>
-          <div class="flex-1">
-            <input
-              v-model="addForm.name"
-              type="text"
-              class="h-9 w-full rounded border border-[#dcdfe6] px-3 text-xs outline-none focus:border-[#1785E6]"
-              placeholder="选填"
-            />
-          </div>
+          <label class="w-24 text-right text-xs font-medium text-muted">设备名称</label>
+          <UiInput v-model="addForm.name" class="flex-1" placeholder="选填" />
         </div>
 
         <!-- 居中大按钮：+ 添加设备 -->
         <div class="pt-4 flex flex-col items-center">
-          <button
-            class="flex h-10 w-64 items-center justify-center rounded bg-[#1785E6] text-sm font-bold text-white shadow-sm hover:bg-[#0a6bcc] transition-colors disabled:opacity-50"
-            :disabled="adding"
-            @click="submitAdd"
-          >
-            <Icon v-if="adding" name="refresh" :size="14" class="mr-1.5 ipc-spin" />+ 添加设备
-          </button>
+          <UiButton variant="primary" size="lg" class="w-64" :disabled="adding" @click="submitAdd">
+            <Icon v-if="adding" name="refresh" :size="14" class="ipc-spin" />+ 添加设备
+          </UiButton>
 
           <!-- 底部帮助链接（对齐图 5 底部文字） -->
-          <div class="mt-3 flex items-center gap-1 text-xs text-[#86909c]">
+          <div class="mt-3 flex items-center gap-1 text-xs text-muted">
             <Icon name="help-circle" :size="13" />
-            <button type="button" class="hover:text-[#1785E6] hover:underline">如何查找设备ID</button>
-            <span class="mx-2 text-[#e5e6eb]">|</span>
-            <button type="button" class="text-[#1785E6] hover:underline" @click="router.push('/scan')">手机扫码录入 &gt;</button>
+            <button type="button" class="hover:text-primary hover:underline">如何查找设备ID</button>
+            <span class="mx-2 text-line">|</span>
+            <button type="button" class="text-primary hover:underline" @click="router.push('/scan')">手机扫码录入 &gt;</button>
           </div>
         </div>
       </div>
@@ -878,23 +740,19 @@ onMounted(async () => {
       <!-- 批量导入表单 -->
       <div v-else class="mt-6 space-y-4 max-w-md mx-auto">
         <div>
-          <label class="mb-1 block text-xs font-medium text-[#4e5969]">设备 ID 列表（每行一个 ID）*</label>
+          <label class="mb-1 block text-xs font-medium text-muted">设备 ID 列表（每行一个 ID）*</label>
           <textarea
             v-model="batchIdText"
             rows="6"
-            class="w-full rounded border border-[#dcdfe6] p-2.5 text-xs font-mono outline-none focus:border-[#1785E6]"
+            class="w-full rounded-chrome border border-line bg-surface p-2.5 text-xs font-mono text-body outline-none focus:border-primary"
             placeholder="A1B2C3D4E5F678901&#10;B2C3D4E5F67890123"
           />
         </div>
 
         <div class="flex flex-col items-center pt-2">
-          <button
-            class="flex h-10 w-64 items-center justify-center rounded bg-[#1785E6] text-sm font-bold text-white shadow-sm hover:bg-[#0a6bcc] transition-colors disabled:opacity-50"
-            :disabled="adding"
-            @click="submitAdd"
-          >
-            <Icon v-if="adding" name="refresh" :size="14" class="mr-1.5 ipc-spin" />开始批量导入
-          </button>
+          <UiButton variant="primary" size="lg" class="w-64" :disabled="adding" @click="submitAdd">
+            <Icon v-if="adding" name="refresh" :size="14" class="ipc-spin" />开始批量导入
+          </UiButton>
         </div>
       </div>
     </UiDialog>
@@ -902,7 +760,7 @@ onMounted(async () => {
     <!-- 分组管理弹窗 -->
     <UiDialog v-model:open="groupDlg.show" :title="groupDlg.mode === 'add' ? '新增设备分组' : '重命名分组'" width="max-w-sm">
       <div class="space-y-3">
-        <label class="block text-xs text-[#4e5969]">分组名称 *</label>
+        <label class="block text-xs text-muted">分组名称 *</label>
         <UiInput v-model="groupDlg.name" placeholder="请输入分组名称" />
       </div>
       <template #footer>
@@ -914,7 +772,7 @@ onMounted(async () => {
     <!-- 批量转移分组弹窗 -->
     <UiDialog v-model:open="batchMoveDlg.show" title="批量转移分组" width="max-w-sm">
       <div class="space-y-3">
-        <label class="block text-xs text-[#4e5969]">选择目标分组</label>
+        <label class="block text-xs text-muted">选择目标分组</label>
         <UiSelect v-model="batchMoveDlg.groupId" :options="groupOptions" class="w-full" />
       </div>
       <template #footer>
@@ -927,11 +785,11 @@ onMounted(async () => {
     <UiDialog v-model:open="editDevDlg.show" title="编辑设备" width="max-w-md">
       <div class="space-y-3">
         <div>
-          <label class="mb-1 block text-xs text-[#4e5969]">设备名称</label>
+          <label class="mb-1 block text-xs text-muted">设备名称</label>
           <UiInput v-model="editDevDlg.name" />
         </div>
         <div>
-          <label class="mb-1 block text-xs text-[#4e5969]">地理位置</label>
+          <label class="mb-1 block text-xs text-muted">地理位置</label>
           <UiInput v-model="editDevDlg.location" placeholder="如：深圳总部A座一楼" />
         </div>
       </div>

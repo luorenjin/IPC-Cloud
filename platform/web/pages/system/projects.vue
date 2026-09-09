@@ -73,6 +73,33 @@ async function toggleProject(row: any, v: boolean) {
   }
 }
 
+/* 删除项目（仅空项目可删，含设备/通道时后端拦截并给出具体数量） */
+async function removeProject(row: any) {
+  const ok = await confirm.ask({
+    title: '删除项目',
+    message: '确定删除项目「' + row.name + '」？',
+    detail:
+      '仅可删除空项目，项目下存在设备或通道时无法删除。删除后该项目的分组、角色、成员授权及告警与录像模板将一并清除，且不可恢复。',
+    danger: true,
+    confirmText: '删除'
+  })
+  if (!ok) return
+  const wasCurrent = row.id === currentProject.value?.id
+  try {
+    await api.del('/projects/' + row.id)
+    toast.success('项目「' + row.name + '」已删除')
+    await loadProjects()
+    // 删掉的是当前项目时，切到剩余项目（优先启用中的），避免顶栏与列表停留在已删项目上
+    if (wasCurrent) {
+      const next = projects.value.find((p) => p.enabled) || projects.value[0]
+      if (next) switchProject(next)
+    }
+    loadMe()
+  } catch (e: any) {
+    toastApiError(e, '删除失败')
+  }
+}
+
 /* 切换当前项目 */
 function useProject(row: any) {
   switchProject(row)
@@ -262,6 +289,13 @@ watch(currentProject, () => loadGroups())
 const fmtTime = (ts: any) =>
   ts ? new Date(typeof ts === 'string' ? Date.parse(ts) : ts).toLocaleString() : '-'
 
+// 停流等待时长换算为迷你数据条百分比（有效范围 5-600 秒，纯展示用）
+function idlePct(p: any) {
+  const v = Number(p?.settings?.streamIdleSec ?? 30)
+  if (!Number.isFinite(v) || v <= 0) return 4
+  return Math.max(4, Math.min(100, Math.round((v / 600) * 100)))
+}
+
 onMounted(async () => {
   // 布局可能尚未完成会话加载，兜底拉取一次
   if (!currentProject.value) await loadMe()
@@ -282,22 +316,71 @@ onMounted(async () => {
         <div v-if="projects.length" class="space-y-2.5">
           <div
             v-for="p in projects" :key="p.id"
-            class="rounded border p-3 transition-colors"
-            :class="p.id === currentProject?.id ? 'border-primary bg-primary-soft' : 'border-line bg-surface'"
+            class="rounded-signal border p-3.5 transition-colors"
+            :class="p.id === currentProject?.id ? 'border-primary bg-primary-softer' : 'border-line bg-surface hover:border-placeholder'"
           >
-            <div class="flex items-center gap-2">
-              <span class="truncate text-sm font-semibold text-ink">{{ p.name }}</span>
-              <UiTag v-if="!p.enabled" color="info">已停用</UiTag>
-              <UiTag v-else-if="p.id === currentProject?.id" color="success" dot>当前项目</UiTag>
+            <div class="flex items-start gap-2.5">
+              <span
+                class="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-signal"
+                :class="p.id === currentProject?.id ? 'bg-primary-soft text-primary' : 'bg-zone text-placeholder'"
+              >
+                <UiIcon name="folder" :size="14" />
+              </span>
+              <div class="min-w-0 flex-1">
+                <div class="flex flex-wrap items-center gap-1.5">
+                  <span class="truncate text-sm font-semibold text-ink">{{ p.name }}</span>
+                  <UiTag v-if="!p.enabled" color="info">已停用</UiTag>
+                  <UiTag v-else-if="p.id === currentProject?.id" color="primary" dot>当前项目</UiTag>
+                </div>
+                <div class="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-placeholder">
+                  <span>时区 {{ p.tz || '-' }}</span>
+                  <span>·</span>
+                  <span>{{ fmtTime(p.createdAt) }} 创建</span>
+                  <template v-if="p.id === currentProject?.id">
+                    <span>·</span>
+                    <span>{{ groups.length }} 个分组</span>
+                  </template>
+                </div>
+              </div>
             </div>
-            <div class="mt-1.5 text-xs text-placeholder">
-              时区 {{ p.tz || '-' }} · 默认停流 {{ p.settings?.streamIdleSec ?? '-' }} 秒 · {{ fmtTime(p.createdAt) }}
+
+            <!-- 关键运行参数迷你数据条（替代纯文字堆砌） -->
+            <div class="mt-3 space-y-1.5">
+              <div class="flex items-center gap-2">
+                <span class="w-16 shrink-0 text-[11px] text-placeholder">运行状态</span>
+                <div class="h-1 flex-1 overflow-hidden rounded-full bg-line">
+                  <div
+                    class="h-full rounded-full transition-all"
+                    :class="p.enabled ? 'bg-success' : 'bg-line'"
+                    :style="{ width: p.enabled ? '100%' : '6%' }"
+                  />
+                </div>
+                <span class="w-12 shrink-0 text-right text-[11px]" :class="p.enabled ? 'text-success' : 'text-muted'">
+                  {{ p.enabled ? '启用中' : '已停用' }}
+                </span>
+              </div>
+              <div class="flex items-center gap-2">
+                <span class="w-16 shrink-0 text-[11px] text-placeholder">停流响应</span>
+                <div class="h-1 flex-1 overflow-hidden rounded-full bg-line">
+                  <div class="h-full rounded-full bg-primary transition-all" :style="{ width: idlePct(p) + '%' }" />
+                </div>
+                <span class="w-12 shrink-0 text-right font-mono text-[11px] text-muted">{{ p.settings?.streamIdleSec ?? '-' }}s</span>
+              </div>
             </div>
-            <div class="mt-2 flex flex-wrap items-center gap-2">
+
+            <div class="mt-3 flex flex-wrap items-center gap-2 border-t border-line-soft pt-2.5">
               <UiSwitch :model-value="!!p.enabled" size="sm" @update:model-value="(v: boolean) => toggleProject(p, v)" />
-              <span class="text-xs text-muted">{{ p.enabled ? '启用中' : '已停用' }}</span>
               <UiButton variant="text" size="sm" class="ml-auto" @click="openProjDlg('edit', p)">重命名</UiButton>
               <UiButton v-if="p.id !== currentProject?.id" variant="text" size="sm" @click="useProject(p)">切换到此项目</UiButton>
+              <UiButton
+                variant="dangerText"
+                size="sm"
+                :disabled="projects.length <= 1"
+                :title="projects.length <= 1 ? '至少需要保留一个项目' : '仅可删除空项目'"
+                @click="removeProject(p)"
+              >
+                删除
+              </UiButton>
             </div>
           </div>
         </div>

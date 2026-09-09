@@ -14,7 +14,7 @@ const dims = computed(() => props.size === 'sm'
   <SwitchRoot
     :model-value="modelValue" :disabled="disabled"
     class="relative inline-flex shrink-0 items-center rounded-full transition-colors outline-none disabled:cursor-not-allowed disabled:opacity-45"
-    :class="[dims.root, modelValue ? 'bg-primary' : 'bg-[#c9cdd4]']"
+    :class="[dims.root, modelValue ? 'bg-primary' : 'bg-line']"
     @update:model-value="emit('update:modelValue', Boolean($event))"
   >
     <SwitchThumb class="absolute rounded-full bg-white shadow transition-transform" :class="[dims.thumb, modelValue ? dims.on : dims.off]" />

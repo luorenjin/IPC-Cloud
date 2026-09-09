@@ -40,7 +40,7 @@ function toggleAll() {
 </script>
 
 <template>
-  <div class="relative w-full overflow-auto rounded border border-line bg-surface">
+  <div class="relative w-full overflow-auto rounded-signal border border-line bg-surface">
     <table class="w-full border-collapse text-sm">
       <thead>
         <tr class="bg-zone text-left">

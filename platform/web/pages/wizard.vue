@@ -81,7 +81,7 @@ async function finish() {
 </script>
 
 <template>
-  <div class="w-[580px] max-w-[calc(100vw-32px)] rounded-md bg-surface p-8 shadow-pop">
+  <div class="w-[580px] max-w-[calc(100vw-32px)] rounded-signal border border-line bg-surface p-8 shadow-pop">
     <h1 class="mb-6 text-center text-lg font-bold text-ink">首次设置向导</h1>
     <UiSteps :steps="['创建项目', '添加媒体节点', '完成']" :current="step" class="mb-8 justify-center" />
 
@@ -91,7 +91,7 @@ async function finish() {
         <label class="text-right text-sm text-body"><span class="text-danger">*</span> 项目名称</label>
         <UiInput v-model="projectName" placeholder="如：园区监控" maxlength="32" @enter="createProject" />
       </div>
-      <div v-if="err1" class="mt-4 flex items-start gap-2 rounded border border-[#f7c8c4] bg-danger-soft px-3 py-2.5 text-sm text-danger">
+      <div v-if="err1" class="mt-4 flex items-start gap-2 rounded-chrome border border-danger/30 bg-danger-soft px-3 py-2.5 text-sm text-danger">
         <Icon name="alert-circle" :size="15" class="mt-0.5 shrink-0" />{{ err1 }}
       </div>
       <div class="mt-6 flex justify-center gap-2">
@@ -112,14 +112,14 @@ async function finish() {
         <label class="text-right text-sm text-muted">公网地址</label>
         <UiInput v-model="nodeForm.publicHost" placeholder="如：stream.example.com" />
       </div>
-      <div v-if="err2" class="mt-4 flex items-start gap-2 rounded border border-[#f7c8c4] bg-danger-soft px-3 py-2.5 text-sm text-danger">
+      <div v-if="err2" class="mt-4 flex items-start gap-2 rounded-chrome border border-danger/30 bg-danger-soft px-3 py-2.5 text-sm text-danger">
         <Icon name="alert-circle" :size="15" class="mt-0.5 shrink-0" />
         <div>
           <p>{{ err2.msg }}</p>
           <p v-if="err2.reason" class="mt-0.5 text-xs opacity-80">{{ err2.reason }}</p>
         </div>
       </div>
-      <div v-if="selfcheckTip" class="mt-4 flex items-start gap-2 rounded border border-[#bfe7d6] bg-success-soft px-3 py-2.5 text-sm text-success">
+      <div v-if="selfcheckTip" class="mt-4 flex items-start gap-2 rounded-chrome border border-success/30 bg-success-soft px-3 py-2.5 text-sm text-success">
         <Icon name="check-circle" :size="15" class="mt-0.5 shrink-0" />
         <div>
           <p>节点已添加，自检通过</p>

@@ -248,27 +248,27 @@ onBeforeUnmount(() => {
     class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-[1px] p-4 animate-in fade-in duration-200"
     @click.self="close"
   >
-    <!-- 弹窗容器（严格对齐商云设备弹窗尺寸与圆角） -->
+    <!-- 弹窗容器：浮层用 surface-2（比表格/卡片的 surface 再高一级）+ 外壳 chrome 圆角 -->
     <div
-      class="relative flex w-full max-w-[820px] flex-col overflow-hidden rounded-lg bg-white shadow-2xl transition-all"
+      class="relative flex w-full max-w-[820px] flex-col overflow-hidden rounded-chrome border border-line bg-surface-2 shadow-pop transition-all"
     >
       <!-- 弹窗头部：标题 + 关闭按钮 -->
       <div class="flex items-center justify-between px-5 pt-4 pb-2">
         <div class="flex items-center gap-2">
-          <h2 class="text-base font-semibold text-[#1f2329]">
+          <h2 class="text-base font-semibold text-ink">
             {{ device?.name || curChannel?.name || '办公室' }}
           </h2>
           <span
             v-if="device?.status"
             class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-normal"
-            :class="device.status === 'online' ? 'bg-[#e8ffea] text-[#00b578]' : 'bg-[#ffece8] text-[#f53f3f]'"
+            :class="device.status === 'online' ? 'bg-success-soft text-success' : 'bg-danger-soft text-danger'"
           >
-            <span class="h-1.5 w-1.5 rounded-full" :class="device.status === 'online' ? 'bg-[#00b578]' : 'bg-[#f53f3f]'" />
+            <span class="h-1.5 w-1.5 rounded-full" :class="device.status === 'online' ? 'bg-success' : 'bg-danger'" />
             {{ device.status === 'online' ? '在线' : '离线' }}
           </span>
         </div>
         <button
-          class="rounded p-1 text-[#86909c] transition-colors hover:bg-[#f2f3f5] hover:text-[#1f2329]"
+          class="rounded-chrome p-1 text-muted transition-colors hover:bg-zone hover:text-ink"
           title="关闭"
           @click="close"
         >
@@ -276,21 +276,21 @@ onBeforeUnmount(() => {
         </button>
       </div>
 
-      <!-- Tab 切换栏（左对齐，蓝底预览 + 白底回放，严格 100% 还原图 1） -->
+      <!-- Tab 切换栏（左对齐，信号青底预览 + 透明底回放，严格 100% 还原图 1 布局） -->
       <div class="flex items-center px-5 pb-3">
-        <div class="inline-flex rounded overflow-hidden border border-[#dcdfe6] text-xs">
+        <div class="inline-flex rounded-chrome overflow-hidden border border-line text-xs">
           <!-- 预览 Tab -->
           <button
             class="px-5 py-1.5 font-medium transition-colors"
-            :class="activeTab === 'preview' ? 'bg-[#1785E6] text-white' : 'bg-white text-[#4e5969] hover:text-[#1785E6]'"
+            :class="activeTab === 'preview' ? 'bg-primary text-white' : 'text-muted hover:text-primary'"
             @click="activeTab = 'preview'"
           >
             预览
           </button>
           <!-- 回放 Tab -->
           <button
-            class="flex items-center gap-1.5 px-5 py-1.5 font-medium border-l border-[#dcdfe6] transition-colors"
-            :class="activeTab === 'playback' ? 'bg-[#1785E6] text-white' : 'bg-white text-[#4e5969] hover:text-[#1785E6]'"
+            class="flex items-center gap-1.5 px-5 py-1.5 font-medium border-l border-line transition-colors"
+            :class="activeTab === 'playback' ? 'bg-primary text-white' : 'text-muted hover:text-primary'"
             @click="activeTab = 'playback'"
           >
             <Icon name="video" :size="13" />
@@ -299,17 +299,18 @@ onBeforeUnmount(() => {
         </div>
 
         <!-- 回放时的日期与存储源选择 -->
-        <div v-if="activeTab === 'playback'" class="ml-auto flex items-center gap-2 text-xs text-[#4e5969]">
-          <div class="flex items-center rounded border border-[#dcdfe6] bg-white px-2 py-0.5">
-            <button class="px-1 hover:text-[#1785E6]" title="前一天" @click="shiftDay(-1)">&lt;</button>
-            <span class="mx-1.5 font-mono text-[11px] font-medium text-[#1f2329]">
+        <div v-if="activeTab === 'playback'" class="ml-auto flex items-center gap-2 text-xs text-muted">
+          <div class="flex items-center rounded-chrome border border-line bg-zone px-2 py-0.5">
+            <button class="px-1 hover:text-primary" title="前一天" @click="shiftDay(-1)">&lt;</button>
+            <span class="mx-1.5 font-mono text-[11px] font-medium text-ink">
               {{ recDate.getFullYear() }}-{{ String(recDate.getMonth() + 1).padStart(2, '0') }}-{{ String(recDate.getDate()).padStart(2, '0') }}
             </span>
-            <button class="px-1 hover:text-[#1785E6]" title="后一天" @click="shiftDay(1)">&gt;</button>
+            <button class="px-1 hover:text-primary" title="后一天" @click="shiftDay(1)">&gt;</button>
           </div>
-          <span class="inline-flex items-center gap-1 text-[11px] text-[#86909c]">
-            <span class="h-2 w-2 rounded-sm bg-[#00b578]" /> 连续录像
-            <span class="h-2 w-2 rounded-sm bg-[#ff7d00] ml-1" /> 告警录像
+          <!-- 图例：连续=rec-timer(信号青) / 告警事件=rec-event(成功绿)，语义对齐 REC-02，与 playback.vue 一致 -->
+          <span class="inline-flex items-center gap-1 text-[11px] text-placeholder">
+            <span class="h-2 w-2 rounded-sm bg-rec-timer" /> 连续录像
+            <span class="h-2 w-2 rounded-sm bg-rec-event ml-1" /> 告警录像
           </span>
         </div>
       </div>
@@ -349,7 +350,7 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <!-- OSD 水印（严格对齐商云白色粗黑描边时间排版） -->
+        <!-- OSD 水印（叠加在实时视频画面之上，非主题表面，黑色描边保证任意画面背景下可读，不作 token 化） -->
         <div
           class="pointer-events-none absolute left-6 top-5 z-20 text-sm md:text-base font-bold tracking-wider text-white select-none"
           style="text-shadow: 1px 1px 2px #000, -1px -1px 2px #000, 1px -1px 2px #000, -1px 1px 2px #000;"
@@ -360,7 +361,7 @@ onBeforeUnmount(() => {
         <!-- 语音对讲激活提示 -->
         <div
           v-if="isIntercom && activeTab === 'preview'"
-          class="absolute top-5 right-5 z-20 flex items-center gap-1.5 rounded bg-[#00b578]/90 px-2.5 py-1 text-xs text-white shadow"
+          class="absolute top-5 right-5 z-20 flex items-center gap-1.5 rounded-chrome bg-success/90 px-2.5 py-1 text-xs text-white shadow"
         >
           <span class="h-2 w-2 animate-ping rounded-full bg-white" />
           <Icon name="mic" :size="13" />
@@ -369,53 +370,53 @@ onBeforeUnmount(() => {
       </div>
 
       <!-- ==================== 回放 24 小时时间轴 (仅在回放 Tab 显示) ==================== -->
-      <div v-if="activeTab === 'playback'" class="border-t border-[#e5e6eb] bg-[#f9fafc] px-5 py-2.5">
-        <div class="mb-1 flex items-center justify-between text-[11px] text-[#86909c]">
+      <div v-if="activeTab === 'playback'" class="border-t border-line bg-zone px-5 py-2.5">
+        <div class="mb-1 flex items-center justify-between text-[11px] text-placeholder">
           <span>00:00</span>
           <span>04:00</span>
           <span>08:00</span>
-          <span class="font-bold text-[#1785E6]">{{ formatSeconds(recCurSeconds) }}</span>
+          <span class="font-mono font-bold text-primary">{{ formatSeconds(recCurSeconds) }}</span>
           <span>16:00</span>
           <span>20:00</span>
           <span>24:00</span>
         </div>
 
-        <!-- 时间轴主体轨道 -->
+        <!-- 时间轴主体轨道（数据面用 signal 圆角） -->
         <div
           ref="timelineRef"
-          class="relative h-6 w-full cursor-pointer rounded bg-[#e5e6eb] overflow-hidden select-none"
+          class="relative h-6 w-full cursor-pointer rounded-signal bg-line overflow-hidden select-none"
           title="点击定位时间点"
           @click="onTimelineClick"
         >
-          <!-- 连续录像色块 (绿) & 告警录像色块 (橙) -->
+          <!-- 录像色块：连续=rec-timer(信号青) / 事件告警=rec-event(成功绿)，REC-02 语义，与 playback.vue 保持一致 -->
           <div
             v-for="(seg, idx) in recSegments"
             :key="idx"
-            class="absolute top-0 bottom-0 rounded-sm"
-            :class="seg.type === 'timer' ? 'bg-[#00b578]/70 hover:bg-[#00b578]' : 'bg-[#ff7d00] hover:bg-[#ff7d00]/90'"
+            class="absolute top-0 bottom-0 rounded-sm opacity-70 hover:opacity-100"
+            :class="seg.type === 'timer' ? 'bg-rec-timer' : 'bg-rec-event'"
             :style="{
               left: `${(seg.startSec / 86400) * 100}%`,
               width: `${((seg.endSec - seg.startSec) / 86400) * 100}%`
             }"
           />
 
-          <!-- 红色时间游标线 -->
+          <!-- 当前位置游标线（信号青，呼应 playback.vue 时间轴游标语义：cyan=当前信号位置，而非告警红） -->
           <div
-            class="pointer-events-none absolute top-0 bottom-0 z-10 w-[2px] bg-[#f53f3f]"
+            class="pointer-events-none absolute top-0 bottom-0 z-10 w-[2px] bg-primary shadow-[0_0_6px_var(--color-primary)]"
             :style="{ left: `${(recCurSeconds / 86400) * 100}%` }"
           >
-            <div class="h-1.5 w-1.5 -translate-x-[2px] bg-[#f53f3f] rotate-45" />
+            <div class="h-1.5 w-1.5 -translate-x-[2px] bg-primary rotate-45" />
           </div>
         </div>
       </div>
 
       <!-- ==================== 底部控制栏（100% 对齐图 1 底部：暂停/对讲/静音/超清） ==================== -->
-      <div class="flex items-center justify-between px-5 py-2.5 bg-white border-t border-[#e5e6eb]">
+      <div class="flex items-center justify-between px-5 py-2.5 bg-surface-2 border-t border-line">
         <!-- 左侧工具组 -->
         <div class="flex items-center gap-3">
           <!-- 播放 / 暂停按钮 -->
           <button
-            class="flex h-7 w-7 items-center justify-center rounded text-[#1f2329] transition-colors hover:bg-[#f2f3f5] hover:text-[#1785E6]"
+            class="flex h-7 w-7 items-center justify-center rounded-chrome text-ink transition-colors hover:bg-zone hover:text-primary"
             :title="isPlaying ? '暂停' : '播放'"
             @click="activeTab === 'preview' ? togglePlay() : (recPlaying = !recPlaying)"
           >
@@ -428,8 +429,8 @@ onBeforeUnmount(() => {
           <!-- 预览模式：对讲按钮（麦克风图标 + 对讲文字，图 1 关键元素） -->
           <button
             v-if="activeTab === 'preview'"
-            class="flex items-center gap-1 rounded px-2 py-1 text-xs transition-colors"
-            :class="isIntercom ? 'bg-[#e8ffea] text-[#00b578] font-semibold' : 'text-[#4e5969] hover:bg-[#f2f3f5] hover:text-[#1785E6]'"
+            class="flex items-center gap-1 rounded-chrome px-2 py-1 text-xs transition-colors"
+            :class="isIntercom ? 'bg-success-soft text-success font-semibold' : 'text-muted hover:bg-zone hover:text-primary'"
             title="语音对讲"
             @click="toggleIntercom"
           >
@@ -440,21 +441,21 @@ onBeforeUnmount(() => {
           <!-- 回放模式：快退 10s / 快进 30s -->
           <template v-if="activeTab === 'playback'">
             <button
-              class="rounded p-1 text-xs text-[#4e5969] hover:bg-[#f2f3f5] hover:text-[#1785E6]"
+              class="rounded-chrome p-1 text-xs text-muted hover:bg-zone hover:text-primary"
               title="快退 10 秒"
               @click="backward10"
             >
               <Icon name="skip-back" :size="14" />
             </button>
             <button
-              class="rounded p-1 text-xs text-[#4e5969] hover:bg-[#f2f3f5] hover:text-[#1785E6]"
+              class="rounded-chrome p-1 text-xs text-muted hover:bg-zone hover:text-primary"
               title="快进 30 秒"
               @click="forward30"
             >
               <Icon name="fast-forward" :size="14" />
             </button>
             <button
-              class="rounded border border-[#dcdfe6] px-2 py-0.5 text-xs font-mono font-medium text-[#4e5969] hover:border-[#1785E6] hover:text-[#1785E6]"
+              class="rounded-chrome border border-line px-2 py-0.5 text-xs font-mono font-medium text-muted hover:border-primary hover:text-primary"
               title="切换倍速"
               @click="toggleSpeed"
             >
@@ -464,7 +465,7 @@ onBeforeUnmount(() => {
 
           <!-- 音量 / 静音切换 -->
           <button
-            class="flex h-7 w-7 items-center justify-center rounded text-[#4e5969] transition-colors hover:bg-[#f2f3f5] hover:text-[#1785E6]"
+            class="flex h-7 w-7 items-center justify-center rounded-chrome text-muted transition-colors hover:bg-zone hover:text-primary"
             :title="isMuted ? '开启声音' : '静音'"
             @click="toggleMute"
           >
@@ -474,7 +475,7 @@ onBeforeUnmount(() => {
           <!-- 清晰度切换下拉（预览模式：超清/高清/标清胶囊，图 1 关键元素） -->
           <div v-if="activeTab === 'preview'" class="relative">
             <button
-              class="rounded border border-[#dcdfe6] px-2 py-0.5 text-xs text-[#4e5969] transition-colors hover:border-[#1785E6] hover:text-[#1785E6]"
+              class="rounded-chrome border border-line px-2 py-0.5 text-xs text-muted transition-colors hover:border-primary hover:text-primary"
               @click="showClarityMenu = !showClarityMenu"
             >
               {{ clarity === 'ultra' ? '超清' : clarity === 'hd' ? '高清' : '标清' }}
@@ -483,25 +484,25 @@ onBeforeUnmount(() => {
             <!-- 清晰度菜单 -->
             <div
               v-if="showClarityMenu"
-              class="absolute bottom-full left-0 mb-1 w-20 rounded border border-[#e5e6eb] bg-white py-1 shadow-lg z-30"
+              class="absolute bottom-full left-0 mb-1 w-20 rounded-chrome border border-line bg-surface-2 py-1 shadow-pop z-30"
             >
               <button
-                class="w-full px-3 py-1 text-left text-xs hover:bg-[#f2f3f5]"
-                :class="clarity === 'ultra' ? 'font-bold text-[#1785E6]' : 'text-[#4e5969]'"
+                class="w-full px-3 py-1 text-left text-xs hover:bg-zone"
+                :class="clarity === 'ultra' ? 'font-bold text-primary' : 'text-muted'"
                 @click="selectClarity('ultra')"
               >
                 超清
               </button>
               <button
-                class="w-full px-3 py-1 text-left text-xs hover:bg-[#f2f3f5]"
-                :class="clarity === 'hd' ? 'font-bold text-[#1785E6]' : 'text-[#4e5969]'"
+                class="w-full px-3 py-1 text-left text-xs hover:bg-zone"
+                :class="clarity === 'hd' ? 'font-bold text-primary' : 'text-muted'"
                 @click="selectClarity('hd')"
               >
                 高清
               </button>
               <button
-                class="w-full px-3 py-1 text-left text-xs hover:bg-[#f2f3f5]"
-                :class="clarity === 'sd' ? 'font-bold text-[#1785E6]' : 'text-[#4e5969]'"
+                class="w-full px-3 py-1 text-left text-xs hover:bg-zone"
+                :class="clarity === 'sd' ? 'font-bold text-primary' : 'text-muted'"
                 @click="selectClarity('sd')"
               >
                 标清
@@ -513,14 +514,14 @@ onBeforeUnmount(() => {
         <!-- 右侧辅助工具组：抓拍与全屏 -->
         <div class="flex items-center gap-2">
           <button
-            class="flex h-7 w-7 items-center justify-center rounded text-[#4e5969] transition-colors hover:bg-[#f2f3f5] hover:text-[#1785E6]"
+            class="flex h-7 w-7 items-center justify-center rounded-chrome text-muted transition-colors hover:bg-zone hover:text-primary"
             title="抓拍图片"
             @click="takeSnapshot"
           >
             <Icon name="camera" :size="15" />
           </button>
           <button
-            class="flex h-7 w-7 items-center justify-center rounded text-[#4e5969] transition-colors hover:bg-[#f2f3f5] hover:text-[#1785E6]"
+            class="flex h-7 w-7 items-center justify-center rounded-chrome text-muted transition-colors hover:bg-zone hover:text-primary"
             title="全屏"
             @click="toggleFullscreen"
           >

@@ -18,7 +18,7 @@ const open = ref(false)
     <DropdownMenuPortal>
       <DropdownMenuContent
         side="bottom" :align="align" :side-offset="4"
-        class="z-50 min-w-36 rounded border border-line bg-surface p-1 shadow-pop ipc-anim-pop-in outline-none"
+        class="z-50 min-w-36 rounded-chrome border border-line bg-surface-2 p-1 shadow-pop ipc-anim-pop-in outline-none"
       >
         <template v-for="it in items" :key="it.value">
           <DropdownMenuSeparator v-if="it.divided" class="my-1 h-px bg-line-soft" />

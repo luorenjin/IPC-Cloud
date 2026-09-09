@@ -256,7 +256,7 @@ onMounted(() => {
           <span class="text-xs text-muted">按设备分组，可勾选设备整组或单个通道</span>
           <span class="text-xs text-primary">已选 {{ form.channelIds.length }} 个通道</span>
         </div>
-        <div class="max-h-72 overflow-y-auto rounded border border-line p-2">
+        <div class="max-h-72 overflow-y-auto rounded-signal border border-line p-2">
           <UiTree :nodes="channelTree" @select="onTreeSelect">
             <template #node="{ node }">
               <span class="flex items-center gap-1.5">
@@ -287,7 +287,7 @@ onMounted(() => {
         <div class="max-h-72 space-y-2 overflow-y-auto">
           <div
             v-for="t in templates" :key="t.id"
-            class="flex cursor-pointer items-center gap-2.5 rounded border px-3 py-2.5 transition-colors"
+            class="flex cursor-pointer items-center gap-2.5 rounded-signal border px-3 py-2.5 transition-colors"
             :class="form.templateId === t.id ? 'border-primary bg-primary-soft' : 'border-line hover:border-primary'"
             @click="form.templateId = t.id"
           >
@@ -297,7 +297,8 @@ onMounted(() => {
             <div class="min-w-0">
               <div class="flex items-center gap-1.5 text-sm text-ink">
                 {{ t.name }}
-                <UiTag :color="t.kind === 'event' ? 'warning' : 'primary'" plain>{{ t.kind === 'event' ? '事件录像' : '定时录像' }}</UiTag>
+                <!-- 录像三色语义（REC-02）：定时=primary/信号青，事件=success/绿，与 playback.vue 一致 -->
+                <UiTag :color="t.kind === 'event' ? 'success' : 'primary'" plain>{{ t.kind === 'event' ? '事件录像' : '定时录像' }}</UiTag>
                 <UiTag v-if="t.builtin" color="info">内置</UiTag>
               </div>
             </div>
@@ -312,7 +313,7 @@ onMounted(() => {
         <div class="grid grid-cols-2 gap-2">
           <div
             v-for="p in ['main', 'sub']" :key="p"
-            class="flex cursor-pointer items-center gap-2.5 rounded border px-3 py-3 transition-colors"
+            class="flex cursor-pointer items-center gap-2.5 rounded-signal border px-3 py-3 transition-colors"
             :class="form.profile === p ? 'border-primary bg-primary-soft' : 'border-line hover:border-primary'"
             @click="form.profile = p"
           >
@@ -325,7 +326,7 @@ onMounted(() => {
             </div>
           </div>
         </div>
-        <div class="mt-4 rounded bg-zone px-3 py-2.5 text-xs text-muted">
+        <div class="mt-4 rounded-signal bg-zone px-3 py-2.5 text-xs text-muted">
           即将为 <span class="font-medium text-primary">{{ form.channelIds.length }}</span> 个通道创建
           <span class="font-medium text-ink">{{ templateMap[form.templateId] || '—' }}</span>
           （{{ PROFILE_MAP[form.profile] }}）录像计划

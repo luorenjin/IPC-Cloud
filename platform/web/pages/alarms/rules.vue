@@ -338,7 +338,7 @@ watch(tab, (v) => { if (v === 'templates') loadTemplates() })
           <UiButton @click="loadRules">
             <UiIcon name="refresh" :size="14" />刷新
           </UiButton>
-          <UiButton variant="secondary" @click="navigateTo('/alarms/templates')">
+          <UiButton @click="navigateTo('/alarms/templates')">
             <UiIcon name="calendar" :size="14" />管理布防模板
           </UiButton>
         </div>
@@ -379,95 +379,103 @@ watch(tab, (v) => { if (v === 'templates') loadTemplates() })
       </UiTable>
     </UiCard>
 
-    <!-- 新建告警规则：三步向导（ALM-02） -->
+    <!-- 新建告警规则（ALM-02）：触发条件/联动动作/生效时间三块内容，字段间非严格线性依赖，用 Tab 而非编号步骤器，允许自由切换 -->
     <UiDialog v-model:open="ruleDlg" title="新建告警规则" width="max-w-xl">
-      <div class="mb-5 flex justify-center">
-        <UiSteps :steps="['选择通道', '选择事件类型', '选择布防时间']" :current="step" />
-      </div>
-
-      <!-- 第一步：通道多选（分组树 + 复选） -->
-      <div v-if="step === 0">
-        <div class="mb-2 flex items-center justify-between">
-          <span class="text-xs text-muted">按设备分组，可勾选设备整组或单个通道</span>
-          <span class="text-xs text-primary">已选 {{ ruleForm.channelIds.length }} 个通道</span>
-        </div>
-        <div class="max-h-72 overflow-y-auto rounded border border-line p-2">
-          <UiTree :nodes="channelTree" @select="onTreeSelect">
-            <template #node="{ node }">
-              <span class="flex items-center gap-1.5">
-                <span
-                  class="flex h-4 w-4 shrink-0 items-center justify-center rounded-sm border bg-surface"
-                  :class="String(node.value).startsWith('dev:')
-                    ? (groupChecked(node) ? 'border-primary bg-primary text-white' : 'border-line')
-                    : (ruleForm.channelIds.includes(node.value) ? 'border-primary bg-primary text-white' : 'border-line')"
-                >
-                  <UiIcon
-                    v-if="String(node.value).startsWith('dev:') ? groupChecked(node) : ruleForm.channelIds.includes(node.value)"
-                    name="check" :size="10" :stroke="3"
-                  />
-                </span>
-                <UiIcon :name="String(node.value).startsWith('dev:') ? 'video' : 'camera'" :size="13" class="text-placeholder" />
-                <span class="truncate">{{ node.label }}</span>
-                <span v-if="String(node.value).startsWith('dev:')" class="text-xs text-placeholder">({{ node.children?.length || 0 }})</span>
-              </span>
-            </template>
-          </UiTree>
-          <div v-if="!channelTree.length" class="py-6 text-center text-sm text-placeholder">暂无通道，请先在设备管理中接入设备</div>
-        </div>
-      </div>
-
-      <!-- 第二步：事件类型复选（按能力集过滤） -->
-      <div v-else-if="step === 1">
-        <p class="mb-2 text-xs text-muted">仅所选通道全部支持的事件类型可选；灰色为设备能力不支持</p>
-        <div class="grid grid-cols-2 gap-2">
-          <div
-            v-for="o in KIND_OPTIONS" :key="o.value"
-            class="flex cursor-pointer items-center gap-2 rounded border px-3 py-2.5 text-sm transition-colors"
-            :class="[
-              !kindEnabled(o.value)
-                ? 'cursor-not-allowed border-line-soft bg-zone text-placeholder'
-                : ruleForm.kinds.includes(o.value)
-                  ? 'border-primary bg-primary-soft text-primary'
-                  : 'border-line text-body hover:border-primary'
-            ]"
-            @click="toggleKind(o.value)"
-          >
-            <span
-              class="flex h-4 w-4 shrink-0 items-center justify-center rounded-sm border bg-surface"
-              :class="ruleForm.kinds.includes(o.value) ? 'border-primary bg-primary text-white' : kindEnabled(o.value) ? 'border-line' : 'border-line-soft'"
-            >
-              <UiIcon v-if="ruleForm.kinds.includes(o.value)" name="check" :size="10" :stroke="3" />
-            </span>
-            {{ o.label }}
-            <span v-if="!kindEnabled(o.value)" class="ml-auto text-xs">不支持</span>
-          </div>
-        </div>
-      </div>
-
-      <!-- 第三步：布防模板单选 -->
-      <div v-else>
-        <p class="mb-2 text-xs text-muted">选择规则生效的布防时间段（模板可在「布防模板」页维护）</p>
-        <div class="max-h-72 space-y-2 overflow-y-auto">
-          <div
-            v-for="t in templates" :key="t.id"
-            class="flex cursor-pointer items-center gap-2.5 rounded border px-3 py-2.5 transition-colors"
-            :class="ruleForm.templateId === t.id ? 'border-primary bg-primary-soft' : 'border-line hover:border-primary'"
-            @click="ruleForm.templateId = t.id"
-          >
-            <span class="flex h-4 w-4 shrink-0 items-center justify-center rounded-full border" :class="ruleForm.templateId === t.id ? 'border-primary' : 'border-line'">
-              <span v-if="ruleForm.templateId === t.id" class="h-2 w-2 rounded-full bg-primary" />
-            </span>
-            <div class="min-w-0">
-              <div class="flex items-center gap-1.5 text-sm text-ink">
-                {{ t.name }}
-                <UiTag v-if="t.builtin" color="info">内置</UiTag>
-              </div>
-              <div class="text-xs text-placeholder">{{ fmtSchedule(t.schedule) }}</div>
+      <UiTabs
+        :model-value="String(step)"
+        :items="[
+          { label: '触发条件', value: '0' },
+          { label: '联动动作', value: '1' },
+          { label: '生效时间', value: '2' }
+        ]"
+        @update:model-value="step = Number($event)"
+      >
+        <div class="pt-4">
+          <!-- 触发条件：通道多选（分组树 + 复选） -->
+          <div v-if="step === 0">
+            <div class="mb-2 flex items-center justify-between">
+              <span class="text-xs text-muted">按设备分组，可勾选设备整组或单个通道</span>
+              <span class="text-xs text-primary">已选 {{ ruleForm.channelIds.length }} 个通道</span>
+            </div>
+            <div class="max-h-72 overflow-y-auto rounded border border-line p-2">
+              <UiTree :nodes="channelTree" @select="onTreeSelect">
+                <template #node="{ node }">
+                  <span class="flex items-center gap-1.5">
+                    <span
+                      class="flex h-4 w-4 shrink-0 items-center justify-center rounded-sm border bg-surface"
+                      :class="String(node.value).startsWith('dev:')
+                        ? (groupChecked(node) ? 'border-primary bg-primary text-white' : 'border-line')
+                        : (ruleForm.channelIds.includes(node.value) ? 'border-primary bg-primary text-white' : 'border-line')"
+                    >
+                      <UiIcon
+                        v-if="String(node.value).startsWith('dev:') ? groupChecked(node) : ruleForm.channelIds.includes(node.value)"
+                        name="check" :size="10" :stroke="3"
+                      />
+                    </span>
+                    <UiIcon :name="String(node.value).startsWith('dev:') ? 'video' : 'camera'" :size="13" class="text-placeholder" />
+                    <span class="truncate">{{ node.label }}</span>
+                    <span v-if="String(node.value).startsWith('dev:')" class="text-xs text-placeholder">({{ node.children?.length || 0 }})</span>
+                  </span>
+                </template>
+              </UiTree>
+              <div v-if="!channelTree.length" class="py-6 text-center text-sm text-placeholder">暂无通道，请先在设备管理中接入设备</div>
             </div>
           </div>
-          <div v-if="!templates.length" class="py-6 text-center text-sm text-placeholder">暂无布防模板</div>
+
+          <!-- 联动动作：事件类型复选（按能力集过滤） -->
+          <div v-else-if="step === 1">
+            <p class="mb-2 text-xs text-muted">仅所选通道全部支持的事件类型可选；灰色为设备能力不支持</p>
+            <div class="grid grid-cols-2 gap-2">
+              <div
+                v-for="o in KIND_OPTIONS" :key="o.value"
+                class="flex cursor-pointer items-center gap-2 rounded border px-3 py-2.5 text-sm transition-colors"
+                :class="[
+                  !kindEnabled(o.value)
+                    ? 'cursor-not-allowed border-line-soft bg-zone text-placeholder'
+                    : ruleForm.kinds.includes(o.value)
+                      ? 'border-primary bg-primary-soft text-primary'
+                      : 'border-line text-body hover:border-primary'
+                ]"
+                @click="toggleKind(o.value)"
+              >
+                <span
+                  class="flex h-4 w-4 shrink-0 items-center justify-center rounded-sm border bg-surface"
+                  :class="ruleForm.kinds.includes(o.value) ? 'border-primary bg-primary text-white' : kindEnabled(o.value) ? 'border-line' : 'border-line-soft'"
+                >
+                  <UiIcon v-if="ruleForm.kinds.includes(o.value)" name="check" :size="10" :stroke="3" />
+                </span>
+                {{ o.label }}
+                <span v-if="!kindEnabled(o.value)" class="ml-auto text-xs">不支持</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- 生效时间：布防模板单选 -->
+          <div v-else>
+            <p class="mb-2 text-xs text-muted">选择规则生效的布防时间段（模板可在「布防模板」页维护）</p>
+            <div class="max-h-72 space-y-2 overflow-y-auto">
+              <div
+                v-for="t in templates" :key="t.id"
+                class="flex cursor-pointer items-center gap-2.5 rounded border px-3 py-2.5 transition-colors"
+                :class="ruleForm.templateId === t.id ? 'border-primary bg-primary-soft' : 'border-line hover:border-primary'"
+                @click="ruleForm.templateId = t.id"
+              >
+                <span class="flex h-4 w-4 shrink-0 items-center justify-center rounded-full border" :class="ruleForm.templateId === t.id ? 'border-primary' : 'border-line'">
+                  <span v-if="ruleForm.templateId === t.id" class="h-2 w-2 rounded-full bg-primary" />
+                </span>
+                <div class="min-w-0">
+                  <div class="flex items-center gap-1.5 text-sm text-ink">
+                    {{ t.name }}
+                    <UiTag v-if="t.builtin" color="info">内置</UiTag>
+                  </div>
+                  <div class="text-xs text-placeholder">{{ fmtSchedule(t.schedule) }}</div>
+                </div>
+              </div>
+              <div v-if="!templates.length" class="py-6 text-center text-sm text-placeholder">暂无布防模板</div>
+            </div>
+          </div>
         </div>
-      </div>
+      </UiTabs>
 
       <template #footer>
         <div class="flex w-full items-center justify-between">

@@ -153,8 +153,8 @@ onMounted(async () => {
       </template>
 
       <!-- 筛选条件 -->
-      <div class="mb-3 flex flex-wrap items-center gap-2">
-        <span class="text-sm text-muted">时间</span>
+      <div class="mb-3 flex flex-wrap items-center gap-2 rounded-signal border border-line-soft bg-zone px-3 py-2.5">
+        <span class="flex items-center gap-1 text-xs text-placeholder"><UiIcon name="calendar" :size="13" />时间</span>
         <UiInput v-model="filters.dateFrom" type="date" size="sm" width="w-40" @enter="search" />
         <span class="text-placeholder">至</span>
         <UiInput v-model="filters.dateTo" type="date" size="sm" width="w-40" @enter="search" />
@@ -175,17 +175,22 @@ onMounted(async () => {
 
       <UiEmptyState v-if="!loading && !items.length" text="暂无操作日志" icon="history" />
       <UiTable v-else :columns="cols" :rows="items" :loading="loading">
-        <template #ts="{ row }">{{ fmtTime(row.ts) }}</template>
+        <template #ts="{ row }"><span class="font-mono text-xs text-body">{{ fmtTime(row.ts) }}</span></template>
         <template #username="{ row }">{{ row.username || '-' }}</template>
         <template #targetType="{ row }">{{ row.targetType || targetTypeOf(row.action) }}</template>
         <template #target="{ row }">
           <span class="block truncate" :title="row.target">{{ row.target || '-' }}</span>
         </template>
-        <template #action="{ row }">{{ actionLabel(row.action) }}</template>
+        <template #action="{ row }">
+          <div class="leading-tight">
+            <div class="text-body">{{ actionLabel(row.action) }}</div>
+            <div class="font-mono text-[11px] text-placeholder">{{ row.action || '-' }}</div>
+          </div>
+        </template>
         <template #result="{ row }">
           <UiTag :color="resultTag(row.result).color">{{ resultTag(row.result).text }}</UiTag>
         </template>
-        <template #ip="{ row }">{{ row.ip || '-' }}</template>
+        <template #ip="{ row }"><span class="font-mono text-xs text-muted">{{ row.ip || '-' }}</span></template>
       </UiTable>
 
       <!-- 分页 -->

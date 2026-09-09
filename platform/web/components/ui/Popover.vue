@@ -12,7 +12,7 @@ const emit = defineEmits<{ 'update:open': [v: boolean] }>()
     <PopoverPortal>
       <PopoverContent
         :side="side" :align="align" :side-offset="6"
-        class="z-50 rounded border border-line bg-surface p-3 shadow-pop ipc-anim-pop-in outline-none"
+        class="z-50 rounded-chrome border border-line bg-surface-2 p-3 shadow-pop ipc-anim-pop-in outline-none"
         :class="width"
       >
         <PopoverArrow v-if="false" />

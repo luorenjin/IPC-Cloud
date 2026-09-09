@@ -18,7 +18,7 @@ const emit = defineEmits<{ 'update:open': [v: boolean] }>()
     <DialogPortal>
       <DialogOverlay class="fixed inset-0 z-50 bg-black/45 ipc-anim-fade-in" />
       <DialogContent
-        class="fixed left-1/2 top-1/2 z-50 flex max-h-[86vh] w-[calc(100vw-32px)] -translate-x-1/2 -translate-y-1/2 flex-col rounded-md border border-line bg-surface shadow-pop ipc-anim-pop-in focus:outline-none"
+        class="fixed left-1/2 top-1/2 z-50 flex max-h-[86vh] w-[calc(100vw-32px)] -translate-x-1/2 -translate-y-1/2 flex-col rounded-chrome border border-line bg-surface-2 shadow-pop ipc-anim-pop-in focus:outline-none"
         :class="width"
       >
         <div v-if="title || $slots.header" class="flex items-center justify-between border-b border-line-soft px-5 py-3.5">
