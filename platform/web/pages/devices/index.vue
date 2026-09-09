@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// 设备列表（MGR-01/02）+ 添加设备弹窗（ADD-01~08）：严格 100% 对齐图 4 与图 5
+// 设备列表（MGR-01/02）+ 添加设备弹窗（ADD-01~08）
 const api = useApi()
 const route = useRoute()
 const router = useRouter()
@@ -88,7 +88,7 @@ const selection = ref<string[]>([])
 const expandedRow = ref<string>('')
 const cardCollapsed = ref(false)
 
-// 统计数量（对齐图 4 顶部卡片）
+// 统计数量（顶部卡片）
 const stats = ref({
   total: 2,
   online: 0,
@@ -128,7 +128,7 @@ function search() {
   load()
 }
 
-// ================= 列配置（图 4: [=] 内容按钮） =================
+// ================= 列配置（内容按钮：控制表格显示的列） =================
 const allCols = [
   { key: 'index', label: '序号' },
   { key: 'name', label: '设备名称' },
@@ -140,8 +140,6 @@ const allCols = [
   { key: 'mac', label: 'MAC地址' },
   { key: 'group', label: '所属分组' },
   { key: 'location', label: '地理位置' },
-  { key: 'duration', label: '状态持续时长' },
-  { key: 'pinned', label: '置顶' },
   { key: 'ops', label: '操作' }
 ]
 const hiddenCols = ref<string[]>([])
@@ -159,7 +157,7 @@ function toggleCol(k: string) {
 
 const showCol = (k: string) => !hiddenCols.value.includes(k)
 
-// ================= 批量操作（图 4 批量工具条） =================
+// ================= 批量操作（批量工具条） =================
 const batchMoveDlg = reactive({ show: false, groupId: '', saving: false })
 
 function openBatchMove() {
@@ -225,6 +223,27 @@ function exportCsv() {
   window.open('/api/v1/devices/export?ids=' + selection.value.join(','), '_blank')
 }
 
+const syncing = ref(false)
+async function doBatchSync() {
+  if (!selection.value.length) return toast.warning('请先勾选需要同步的设备')
+  syncing.value = true
+  try {
+    let ok = 0
+    for (const id of selection.value) {
+      try {
+        await api.post(`/devices/${id}/sync`)
+        ok++
+      } catch (e: any) {
+        toastApiError(e, `设备 ${id} 同步失败`)
+      }
+    }
+    if (ok) toast.success(`已同步 ${ok} 台设备`)
+    load()
+  } finally {
+    syncing.value = false
+  }
+}
+
 // 单台设备危险删除（MGR-11：输入设备名称二次确认）
 async function askDeleteSingle(row: any) {
   const ok = await confirmBox.ask({
@@ -283,7 +302,7 @@ async function saveEditDev() {
   }
 }
 
-// ================= 【5. 添加设备弹窗】（严格对齐图 5） =================
+// ================= 【添加设备弹窗】 =================
 const addDlg = reactive({ show: false })
 const addTab = ref('idp') // idp (设备ID添加) | gb (国标) | onvif | app | pwd | other
 const addSubTab = ref<'single' | 'batch'>('single') // 单台添加 | 批量导入ID
@@ -292,7 +311,7 @@ const addForm = reactive({
   groupId: '',
   deviceId: '',
   name: '',
-  verifyCode: '123456'
+  verifyCode: ''
 })
 
 const batchIdText = ref('')
@@ -301,6 +320,7 @@ const adding = ref(false)
 function openAddModal() {
   addForm.deviceId = ''
   addForm.name = ''
+  addForm.verifyCode = ''
   addForm.groupId = groups.value[0]?.id || ''
   batchIdText.value = ''
   addSubTab.value = 'single'
@@ -311,16 +331,14 @@ function openAddModal() {
 async function submitAdd() {
   if (addSubTab.value === 'single') {
     if (!addForm.deviceId.trim()) return toast.warning('请输入设备标贴上的设备ID')
+    if (addForm.verifyCode.trim().length < 6) return toast.warning('请输入 6 位及以上验证码')
     adding.value = true
     try {
-      await api.post('/devices', {
-        source: 'idp',
-        name: addForm.name.trim() || addForm.deviceId.trim().toUpperCase(),
+      await api.post('/devices/idp/bind', {
+        deviceId: addForm.deviceId.trim().toUpperCase(),
+        verifyCode: addForm.verifyCode.trim(),
         groupId: addForm.groupId || undefined,
-        credentials: {
-          deviceId: addForm.deviceId.trim().toUpperCase(),
-          verifyCode: addForm.verifyCode || '123456'
-        }
+        name: addForm.name.trim() || undefined
       })
       toast.success('设备添加成功！')
       addDlg.show = false
@@ -331,12 +349,17 @@ async function submitAdd() {
       adding.value = false
     }
   } else {
-    // 批量导入
+    // 批量导入：每行「设备ID,验证码」，分隔符逗号或空格
     const lines = batchIdText.value.split('\n').map((l) => l.trim()).filter(Boolean)
     if (!lines.length) return toast.warning('请在文本框中粘贴设备ID列表')
+    const items: { deviceId: string; verifyCode: string }[] = []
+    for (const line of lines) {
+      const parts = line.split(/[,\s]+/).filter(Boolean)
+      if (parts.length < 2) return toast.warning(`第 ${lines.indexOf(line) + 1} 行缺少验证码：${line}`)
+      items.push({ deviceId: parts[0].toUpperCase(), verifyCode: parts[1] })
+    }
     adding.value = true
     try {
-      const items = lines.map((id) => ({ deviceId: id.toUpperCase(), verifyCode: '123456' }))
       await api.post('/devices/idp/preadd', { items })
       toast.success(`已提交 ${items.length} 台设备的批量导入任务`)
       addDlg.show = false
@@ -427,14 +450,13 @@ onMounted(async () => {
             <Icon name="chevron-down" :size="11" class="text-placeholder" />
             <Icon name="video" :size="13" :class="selectedGroup === g.id ? 'text-primary' : ''" />{{ g.name }}
           </span>
-          <span class="text-[11px] text-placeholder">(0/1)</span>
         </div>
       </div>
     </div>
 
     <!-- 右侧：主体区 -->
     <div class="min-w-0 flex-1 space-y-3">
-      <!-- 顶部设备状态卡片（图 4：IPC 2台，离线 2，可折叠） -->
+      <!-- 顶部设备状态卡片：类型统计，可折叠 -->
       <div class="relative rounded-signal border border-line bg-surface p-4 shadow-card">
         <div v-show="!cardCollapsed" class="flex items-center gap-4">
           <div class="flex h-12 w-12 items-center justify-center rounded-signal bg-zone text-muted">
@@ -453,7 +475,7 @@ onMounted(async () => {
           </div>
         </div>
 
-        <!-- 卡片折叠收起把手（对齐图 4 居中 ^ 按钮） -->
+        <!-- 卡片折叠收起把手 -->
         <div class="flex justify-center border-t border-line-soft pt-1 mt-2">
           <button class="p-0.5 text-muted transition-colors hover:text-primary" @click="cardCollapsed = !cardCollapsed">
             <Icon :name="cardCollapsed ? 'chevron-down' : 'chevron-up'" :size="15" />
@@ -463,7 +485,7 @@ onMounted(async () => {
 
       <!-- 表格主体卡片 -->
       <div class="rounded-signal border border-line bg-surface p-4 shadow-card">
-        <!-- 主工具栏行：全部 | IPC Tab 与 添加设备按钮（严格对齐图 4） -->
+        <!-- 主工具栏行：全部 | IPC Tab 与添加设备按钮 -->
         <div class="mb-3">
           <UiTabs
             v-model="query.tab"
@@ -484,7 +506,7 @@ onMounted(async () => {
           </UiTabs>
         </div>
 
-        <!-- 批量操作与列配置条（严格对齐图 4 功能按钮阵列） -->
+        <!-- 批量操作与列配置条 -->
         <div class="mb-3 flex flex-wrap items-center justify-between gap-2 text-xs">
           <!-- 左侧操作按钮群 -->
           <div class="flex flex-wrap items-center gap-1.5">
@@ -500,19 +522,16 @@ onMounted(async () => {
               </div>
             </UiPopover>
 
-            <UiButton size="sm">网络设置配置</UiButton>
             <UiButton size="sm" :disabled="!selection.length" @click="openBatchMove">设备转移</UiButton>
             <UiButton size="sm" :disabled="!selection.length" @click="doBatchReboot">重启设备</UiButton>
             <UiButton variant="dangerText" size="sm" :disabled="!selection.length" @click="doBatchDelete">删除设备</UiButton>
-            <UiButton size="sm">设置地理位置</UiButton>
             <UiButton size="sm" @click="exportCsv">导出设备信息</UiButton>
-            <UiButton size="sm" @click="load">设备同步</UiButton>
+            <UiButton size="sm" :disabled="!selection.length || syncing" @click="doBatchSync">设备同步</UiButton>
             <UiButton size="sm" title="刷新" @click="load"><Icon name="refresh" :size="13" /></UiButton>
           </div>
 
           <!-- 右侧搜索与过滤 -->
           <div class="flex items-center gap-2">
-            <UiButton size="sm">设备升级</UiButton>
             <UiButton size="sm" @click="openAddModal">批量添加</UiButton>
             <!-- 搜索框 -->
             <UiInput v-model="query.keyword" placeholder="搜索设备名/MAC/IP" size="sm" width="w-48" @enter="search">
@@ -533,7 +552,7 @@ onMounted(async () => {
           </div>
         </div>
 
-        <!-- 表格（对齐图 4 表格所有列字段） -->
+        <!-- 设备表格 -->
         <div class="overflow-x-auto rounded-signal border border-line">
           <table class="w-full text-left text-xs text-body">
             <thead class="border-b border-line bg-zone text-muted">
@@ -554,8 +573,6 @@ onMounted(async () => {
                 <th v-if="showCol('mac')" class="py-2.5 px-3 text-right">MAC地址</th>
                 <th v-if="showCol('group')" class="py-2.5 px-3">所属分组</th>
                 <th v-if="showCol('location')" class="py-2.5 px-3">地理位置</th>
-                <th v-if="showCol('duration')" class="py-2.5 px-3">状态持续时长</th>
-                <th v-if="showCol('pinned')" class="py-2.5 px-3 text-center">置顶</th>
                 <th v-if="showCol('ops')" class="py-2.5 px-3 text-right">操作</th>
               </tr>
             </thead>
@@ -593,14 +610,12 @@ onMounted(async () => {
                       {{ row.status === 'online' ? '在线' : '离线' }}
                     </span>
                   </td>
-                  <td v-if="showCol('model')" class="py-2.5 px-3 text-muted">{{ row.model || 'TL-IPC455E-AI4' }}</td>
-                  <td v-if="showCol('ip')" class="py-2.5 px-3 text-right font-mono text-muted">{{ row.ip || '192.168.1.53' }}</td>
-                  <td v-if="showCol('mac')" class="py-2.5 px-3 text-right font-mono text-muted">{{ row.mac || '4C-10-D5-85-3B-FB' }}</td>
-                  <td v-if="showCol('group')" class="py-2.5 px-3">{{ groupMap[row.groupId] || '默认' }}</td>
-                  <td v-if="showCol('location')" class="py-2.5 px-3 text-placeholder">{{ row.location || '---' }}</td>
-                  <td v-if="showCol('duration')" class="py-2.5 px-3 text-placeholder">---</td>
-                  <td v-if="showCol('pinned')" class="py-2.5 px-3 text-center text-placeholder">否</td>
-                  <!-- 操作列（对齐图 4：远程配置、编辑、预览） -->
+                  <td v-if="showCol('model')" class="py-2.5 px-3 text-muted">{{ row.model || '—' }}</td>
+                  <td v-if="showCol('ip')" class="py-2.5 px-3 text-right font-mono text-muted">{{ row.ip || '—' }}</td>
+                  <td v-if="showCol('mac')" class="py-2.5 px-3 text-right font-mono text-muted">{{ row.mac || '—' }}</td>
+                  <td v-if="showCol('group')" class="py-2.5 px-3">{{ groupMap[row.groupId] || '—' }}</td>
+                  <td v-if="showCol('location')" class="py-2.5 px-3 text-placeholder">{{ row.location || '—' }}</td>
+                  <!-- 操作列：远程配置、编辑、预览、删除 -->
                   <td v-if="showCol('ops')" class="py-2.5 px-3 text-right">
                     <div class="flex items-center justify-end gap-1">
                       <UiButton variant="text" size="sm" @click="router.push(`/devices/${row.id}`)">远程配置</UiButton>
@@ -611,9 +626,9 @@ onMounted(async () => {
                   </td>
                 </tr>
 
-                <!-- 行展开通道子列表（图 4 / MGR-01） -->
+                <!-- 行展开通道子列表（MGR-01） -->
                 <tr v-if="expandedRow === row.id">
-                  <td colspan="14" class="border-b border-line-soft bg-zone p-3 pl-12">
+                  <td colspan="12" class="border-b border-line-soft bg-zone p-3 pl-12">
                     <div class="mb-1.5 text-xs font-semibold text-muted">通道列表：</div>
                     <div v-if="!chCache[row.id]?.length" class="text-xs text-placeholder">
                       暂无子通道数据或单通道设备
@@ -636,7 +651,7 @@ onMounted(async () => {
           </table>
         </div>
 
-        <!-- 底部分页栏（严格对齐图 4） -->
+        <!-- 底部分页栏 -->
         <div class="mt-4 flex flex-wrap items-center justify-between gap-4 text-xs text-muted">
           <div>
             共计 <span class="font-bold text-ink">{{ total }}</span> 条
@@ -668,9 +683,9 @@ onMounted(async () => {
       </div>
     </div>
 
-    <!-- ================= 【5. 添加设备弹窗】（100% 严格对齐图 5） ================= -->
+    <!-- ================= 添加设备弹窗 ================= -->
     <UiDialog v-model:open="addDlg.show" title="添加设备" width="max-w-2xl">
-      <!-- 顶部 Tab 栏（对齐图 5） -->
+      <!-- 顶部 Tab 栏 -->
       <UiTabs
         v-model="addTab"
         :items="[
@@ -683,20 +698,20 @@ onMounted(async () => {
         ]"
       />
 
-      <!-- 固定前置提示条（对齐图 5 顶部灰色背景小字） -->
+      <!-- 固定前置提示条 -->
       <div class="mt-3 rounded-signal bg-zone p-3 text-xs leading-relaxed text-muted">
         <div>请确认要添加的设备都已接入互联网，再进行添加操作。</div>
         <div class="mt-0.5 text-placeholder">* 添加AC设备后系统会自动识别并添加关联的FIT AP，无需再次添加FIT AP设备。</div>
       </div>
 
-      <!-- 二级子 Tab 分段按钮（单台添加 | 批量导入ID，对齐图 5） -->
+      <!-- 二级子 Tab 分段按钮（单台添加 | 批量导入ID） -->
       <UiSegmented
         v-model="addSubTab"
         class="mt-4"
         :items="[{ label: '单台添加', value: 'single' }, { label: '批量导入ID', value: 'batch' }]"
       />
 
-      <!-- 单台添加表单（严格对齐图 5） -->
+      <!-- 单台添加表单 -->
       <div v-if="addSubTab === 'single'" class="mt-6 space-y-4 max-w-md mx-auto">
         <!-- 所属分组 -->
         <div class="flex items-center gap-3">
@@ -715,6 +730,12 @@ onMounted(async () => {
           <UiInput v-model="addForm.deviceId" class="flex-1 uppercase" placeholder="请输入标贴上的设备ID，不区分大小写" />
         </div>
 
+        <!-- 验证码 -->
+        <div class="flex items-center gap-3">
+          <label class="w-24 text-right text-xs font-medium text-muted"><span class="text-danger">*</span> 验证码</label>
+          <UiInput v-model="addForm.verifyCode" class="flex-1" placeholder="请输入标贴上的 6 位及以上验证码" />
+        </div>
+
         <!-- 设备名称 -->
         <div class="flex items-center gap-3">
           <label class="w-24 text-right text-xs font-medium text-muted">设备名称</label>
@@ -727,7 +748,7 @@ onMounted(async () => {
             <Icon v-if="adding" name="refresh" :size="14" class="ipc-spin" />+ 添加设备
           </UiButton>
 
-          <!-- 底部帮助链接（对齐图 5 底部文字） -->
+          <!-- 底部帮助链接 -->
           <div class="mt-3 flex items-center gap-1 text-xs text-muted">
             <Icon name="help-circle" :size="13" />
             <button type="button" class="hover:text-primary hover:underline">如何查找设备ID</button>
@@ -740,12 +761,12 @@ onMounted(async () => {
       <!-- 批量导入表单 -->
       <div v-else class="mt-6 space-y-4 max-w-md mx-auto">
         <div>
-          <label class="mb-1 block text-xs font-medium text-muted">设备 ID 列表（每行一个 ID）*</label>
+          <label class="mb-1 block text-xs font-medium text-muted">设备 ID 列表（每行一台，格式「设备ID,验证码」）*</label>
           <textarea
             v-model="batchIdText"
             rows="6"
             class="w-full rounded-chrome border border-line bg-surface p-2.5 text-xs font-mono text-body outline-none focus:border-primary"
-            placeholder="A1B2C3D4E5F678901&#10;B2C3D4E5F67890123"
+            placeholder="A1B2C3D4E5F678901,123456&#10;B2C3D4E5F67890123,654321"
           />
         </div>
 
@@ -799,7 +820,7 @@ onMounted(async () => {
       </template>
     </UiDialog>
 
-    <!-- 设备预览与录像回放模态弹窗（100% 对齐商云原型图 UI/UE） -->
+    <!-- 设备预览与录像回放模态弹窗 -->
     <DevicePreviewModal
       v-model="previewModal.show"
       :device="previewModal.device"

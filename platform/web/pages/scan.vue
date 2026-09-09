@@ -148,7 +148,7 @@ async function lookupDevice() {
   lookingUp.value = true
   deviceFound.value = null
   try {
-    const res: any = await api.get('/devices/idp/lookup', { deviceId: form.deviceId })
+    const res: any = await api.post('/devices/idp/lookup', { deviceId: form.deviceId })
     deviceFound.value = res
   } catch (e: any) {
     toastApiError(e, '未找到该设备或设备未连网')
@@ -165,14 +165,11 @@ async function submitBind() {
 
   binding.value = true
   try {
-    await api.post('/devices', {
-      source: 'idp',
-      name: form.name.trim() || deviceFound.value?.model || form.deviceId,
+    await api.post('/devices/idp/bind', {
+      deviceId: form.deviceId.toUpperCase(),
+      verifyCode: form.verifyCode,
       groupId: form.groupId,
-      credentials: {
-        deviceId: form.deviceId.toUpperCase(),
-        verifyCode: form.verifyCode
-      }
+      name: form.name.trim() || undefined
     })
     toast.success('设备绑定成功！')
     router.push('/devices')

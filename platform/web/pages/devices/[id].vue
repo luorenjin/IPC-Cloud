@@ -73,14 +73,15 @@ const infoRows = computed(() => {
   ].filter((r) => r.value !== undefined && r.value !== null && r.value !== '')
 })
 
-// ================= 诊断 =================
-const diag = reactive({ loading: false, items: [] as any[] })
+// ================= 诊断（MGR-07：读取 /devices/:id/diag 的 { results, at }） =================
+const diag = reactive({ loading: false, ran: false, items: [] as any[] })
 async function runDiag() {
   diag.loading = true
   diag.items = []
   try {
     const res: any = await api.post(`/devices/${devId}/diag`)
-    diag.items = res.items || res.checks || (Array.isArray(res) ? res : [])
+    diag.items = res?.results || []
+    diag.ran = true
   } catch (e: any) {
     toastApiError(e, '诊断失败')
   } finally {
@@ -112,7 +113,8 @@ const streamSeg = computed(() => {
 })
 const diagSeg = computed(() => {
   if (diag.loading) return { color: 'warning', value: '诊断中', sub: '正在探测设备连通性…', pulse: true }
-  if (!diag.items.length) return { color: 'info', value: '尚未诊断', sub: '前往"诊断"页运行一键检测' }
+  if (!diag.ran) return { color: 'info', value: '尚未诊断', sub: '前往"诊断"页运行一键检测' }
+  if (!diag.items.length) return { color: 'info', value: '未返回诊断项', sub: '设备本次未返回任何探测结果' }
   const failCount = diag.items.filter((it: any) => it.ok === false).length
   return failCount
     ? { color: 'danger', value: `${failCount} 项异常`, sub: `共 ${diag.items.length} 项检测` }
@@ -196,7 +198,7 @@ async function saveCfg() {
 }
 
 // ================= 编辑 =================
-const editDlg = reactive({ show: false, name: '', location: '', remark: '' })
+const editDlg = reactive({ show: false, name: '', location: '', remark: '', saving: false })
 function openEdit() {
   editDlg.name = dev.value?.name || ''
   editDlg.location = dev.value?.location || ''
@@ -204,13 +206,18 @@ function openEdit() {
   editDlg.show = true
 }
 async function saveEdit() {
+  const name = editDlg.name.trim()
+  if (!name) return toast.warning('设备名称不能为空')
+  editDlg.saving = true
   try {
-    await api.put(`/devices/${devId}`, { name: editDlg.name, location: editDlg.location, remark: editDlg.remark })
+    await api.put(`/devices/${devId}`, { name, location: editDlg.location.trim(), remark: editDlg.remark.trim() })
     toast.success('已保存')
     editDlg.show = false
     load()
   } catch (e: any) {
     toastApiError(e, '保存失败')
+  } finally {
+    editDlg.saving = false
   }
 }
 
@@ -256,26 +263,6 @@ async function saveMove() {
     toastApiError(e, '转移失败')
   } finally {
     moveDlg.saving = false
-  }
-}
-
-const upgradeDlg = reactive({ show: false, version: '', file: '', saving: false })
-function openUpgrade() {
-  upgradeDlg.version = ''
-  upgradeDlg.file = ''
-  upgradeDlg.show = true
-}
-async function submitUpgrade() {
-  if (!upgradeDlg.version.trim()) return toast.warning('请输入目标固件版本号')
-  upgradeDlg.saving = true
-  try {
-    await api.post(`/devices/${devId}/upgrade`, { version: upgradeDlg.version.trim(), file: upgradeDlg.file })
-    toast.success('固件升级任务已下发至任务中心')
-    upgradeDlg.show = false
-  } catch (e: any) {
-    toastApiError(e, '固件升级触发失败')
-  } finally {
-    upgradeDlg.saving = false
   }
 }
 
@@ -337,7 +324,9 @@ onMounted(load)
           <UiButton variant="primary" @click="openEdit"><Icon name="edit" :size="13" />编辑</UiButton>
           <UiButton @click="rebootDevice"><Icon name="refresh-cw" :size="13" />重启</UiButton>
           <UiButton @click="openMoveDlg"><Icon name="folder" :size="13" />转移分组</UiButton>
-          <UiButton @click="openUpgrade"><Icon name="upload" :size="13" />固件升级</UiButton>
+          <UiTooltip label="固件升级功能尚未开放">
+            <span><UiButton disabled><Icon name="upload" :size="13" />固件升级</UiButton></span>
+          </UiTooltip>
           <UiButton variant="dangerText" @click="askDeleteDevice"><Icon name="trash" :size="13" />删除设备</UiButton>
         </div>
       </div>
@@ -491,7 +480,8 @@ onMounted(load)
           <div v-else-if="diag.loading" class="rounded-signal border border-line-soft px-3 py-6 text-center text-sm text-placeholder">
             <Icon name="activity" :size="18" class="ipc-spin mx-auto mb-2 text-primary" />正在探测设备连通性…
           </div>
-          <p v-else class="text-sm text-placeholder">点击"开始诊断"检查设备连通性与配置（诊断记录保留 7 天）</p>
+          <p v-else-if="diag.ran" class="text-sm text-placeholder">未返回诊断项</p>
+          <p v-else class="text-sm text-placeholder">点击"开始诊断"检查设备连通性与配置</p>
         </div>
 
         <!-- e) 日志 -->
@@ -531,7 +521,7 @@ onMounted(load)
       </div>
       <template #footer>
         <UiButton @click="editDlg.show = false">取消</UiButton>
-        <UiButton variant="primary" @click="saveEdit">保存</UiButton>
+        <UiButton variant="primary" :disabled="editDlg.saving" @click="saveEdit">保存</UiButton>
       </template>
     </UiDialog>
 
@@ -544,25 +534,6 @@ onMounted(load)
       <template #footer>
         <UiButton @click="moveDlg.show = false">取消</UiButton>
         <UiButton variant="primary" :loading="moveDlg.saving" @click="saveMove">确定转移</UiButton>
-      </template>
-    </UiDialog>
-
-    <!-- 固件升级弹窗 -->
-    <UiDialog v-model:open="upgradeDlg.show" title="设备固件升级" width="max-w-md">
-      <div class="space-y-3">
-        <div>
-          <label class="mb-1 block text-xs text-muted">目标固件版本 *</label>
-          <UiInput v-model="upgradeDlg.version" placeholder="如：v1.2.0-rc1" />
-        </div>
-        <div>
-          <label class="mb-1 block text-xs text-muted">升级包文件名 / URL (选填)</label>
-          <UiInput v-model="upgradeDlg.file" placeholder="固件升级包路径或包名" />
-        </div>
-        <p class="text-xs text-placeholder">升级任务提交后将由后台统一分发，进度可在全局任务中心中实时查看。</p>
-      </div>
-      <template #footer>
-        <UiButton @click="upgradeDlg.show = false">取消</UiButton>
-        <UiButton variant="primary" :loading="upgradeDlg.saving" @click="submitUpgrade">开始升级</UiButton>
       </template>
     </UiDialog>
   </UiLoading>
