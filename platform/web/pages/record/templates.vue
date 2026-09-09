@@ -50,12 +50,18 @@ async function load() {
   }
 }
 
+const refsLoadFailed = ref(false)
+
 async function loadRefs() {
   try {
     const [pRes, cRes]: any[] = await Promise.all([api.get('/record-plans'), api.get('/channels')])
     plans.value = pRes.items || []
     channels.value = cRes.items || cRes || []
-  } catch {}
+    refsLoadFailed.value = false
+  } catch (e: any) {
+    refsLoadFailed.value = true
+    toastApiError(e, '引用统计加载失败')
+  }
 }
 
 // ---------- 新建 / 编辑模板 ----------
@@ -204,7 +210,10 @@ onMounted(() => {
             <!-- 内置模板：编辑/删除真正禁用且视觉置灰 -->
             <UiButton variant="text" size="sm" :disabled="row.builtin" @click="openDlg(row)">编辑</UiButton>
             <UiButton variant="text" size="sm" @click="copy(row)">复制</UiButton>
-            <UiButton variant="dangerText" size="sm" :disabled="row.builtin" @click="del(row)">删除</UiButton>
+            <UiTooltip v-if="!row.builtin && refsLoadFailed" label="引用统计不可用，暂不能删除">
+              <span><UiButton variant="dangerText" size="sm" disabled>删除</UiButton></span>
+            </UiTooltip>
+            <UiButton v-else variant="dangerText" size="sm" :disabled="row.builtin" @click="del(row)">删除</UiButton>
           </div>
         </template>
       </UiTable>

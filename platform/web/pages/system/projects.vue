@@ -274,13 +274,21 @@ async function onNodeDrop(targetId: string) {
   const to = sibs.findIndex((g) => g.id === g2.id)
   if (from < 0 || to < 0) return
   sibs.splice(to, 0, ...sibs.splice(from, 1))
+  const updates: Array<{ g: any; sort: number }> = []
   sibs.forEach((g, i) => {
     if (g.sort !== i) {
+      updates.push({ g, sort: i })
       g.sort = i
-      api.put('/groups/' + g.id, { sort: i }).catch(() => {})
     }
   })
-  toast.success('分组顺序已更新')
+  if (!updates.length) return
+  try {
+    await Promise.all(updates.map((u) => api.put('/groups/' + u.g.id, { sort: u.sort })))
+    toast.success('分组顺序已更新')
+  } catch (e: any) {
+    toastApiError(e, '分组排序保存失败')
+    await loadGroups() // 回滚本地顺序为后端实际状态
+  }
 }
 
 /* 切换项目后刷新分组树 */

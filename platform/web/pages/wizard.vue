@@ -76,7 +76,11 @@ async function addNode() {
 async function finish() {
   step.value = 2
   if (!projectId.value) return
-  try { await api.put(`/projects/${projectId.value}`, { setupDone: true }) } catch {}
+  try {
+    await api.put(`/projects/${projectId.value}`, { setupDone: true })
+  } catch (e: any) {
+    toastApiError(e, '完成状态保存失败，下次登录仍会进入向导')
+  }
 }
 </script>
 

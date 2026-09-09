@@ -168,9 +168,22 @@ function openNodeDlg(mode: 'create' | 'edit', row?: any) {
   nodeDlg.visible = true
 }
 
-function clampPort(v: any, def: number) {
+/* 端口（1-65535 整数）；非法时提示并阻止提交，不再静默改写为默认值 */
+function isValidPort(v: any): boolean {
   const n = Number(v)
-  return isFinite(n) && n >= 1 && n <= 65535 ? Math.floor(n) : def
+  return Number.isFinite(n) && Number.isInteger(n) && n >= 1 && n <= 65535
+}
+
+/* 最大流数（≥1 整数） */
+function isValidMaxStreams(v: any): boolean {
+  const n = Number(v)
+  return Number.isFinite(n) && Number.isInteger(n) && n >= 1
+}
+
+/* 权重（1-100 整数） */
+function isValidWeight(v: any): boolean {
+  const n = Number(v)
+  return Number.isFinite(n) && Number.isInteger(n) && n >= 1 && n <= 100
 }
 
 async function saveNode() {
@@ -178,19 +191,24 @@ async function saveNode() {
   if (!f.name.trim() || !f.apiUrl.trim()) return toast.warning('请填写节点名称与 API 地址')
   if (nodeDlg.mode === 'create' && !f.secret.trim()) return toast.warning('请填写接入密钥')
   if (nodeDlg.mode === 'create' && !f.publicHost.trim()) return toast.warning('请填写公网地址')
+  if (!isValidPort(f.httpPort) || !isValidPort(f.httpsPort) || !isValidPort(f.rtmpPort) || !isValidPort(f.rtspPort)) {
+    return toast.warning('端口须为 1–65535 的整数')
+  }
+  if (!isValidMaxStreams(f.maxStreams)) return toast.warning('最大流数须为不小于 1 的整数')
+  if (!isValidWeight(f.weight)) return toast.warning('权重须为 1–100 的整数')
   nodeDlg.saving = true
   try {
     const body: any = {
       name: f.name.trim(),
       apiUrl: f.apiUrl.trim(),
       publicHost: f.publicHost.trim(),
-      rtmpPort: clampPort(f.rtmpPort, 1936),
-      httpPort: clampPort(f.httpPort, 80),
-      httpsPort: clampPort(f.httpsPort, 443),
-      rtspPort: clampPort(f.rtspPort, 554),
+      rtmpPort: Math.floor(Number(f.rtmpPort)),
+      httpPort: Math.floor(Number(f.httpPort)),
+      httpsPort: Math.floor(Number(f.httpsPort)),
+      rtspPort: Math.floor(Number(f.rtspPort)),
       rtpRange: f.rtpRange.trim(),
-      maxStreams: clampPort(f.maxStreams, 200),
-      weight: clampPort(f.weight, 100)
+      maxStreams: Math.floor(Number(f.maxStreams)),
+      weight: Math.floor(Number(f.weight))
     }
     if (f.secret.trim()) body.secret = f.secret.trim()
     if (nodeDlg.mode === 'create') {
@@ -386,21 +404,22 @@ onMounted(async () => {
               <div class="grid grid-cols-3 gap-2">
                 <div class="rounded-signal bg-zone px-2 py-1.5">
                   <div class="flex items-baseline justify-between gap-1">
-                    <span class="text-[11px] text-muted">负载</span>
+                    <span class="text-[11px] text-muted">流数占比</span>
                     <span class="font-mono text-xs" :class="row.maxStreams && row.streams >= row.maxStreams ? 'text-danger' : 'text-body'">{{ loadPct(row) }}%</span>
                   </div>
-                  <svg viewBox="0 0 64 22" class="mt-1 h-5 w-full" preserveAspectRatio="none">
+                  <svg v-if="(nodeHistory[row.id]?.load || []).length >= 2" viewBox="0 0 64 22" class="mt-1 h-5 w-full" preserveAspectRatio="none">
                     <polyline
                       :points="sparkPoints(nodeHistory[row.id]?.load || [])" fill="none" stroke="var(--color-primary)"
                       stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"
                     />
                   </svg>
+                  <div v-else class="mt-1 flex h-5 items-center text-[10px] text-placeholder">采集中</div>
                 </div>
                 <div class="rounded-signal bg-zone px-2 py-1.5">
                   <div class="flex items-baseline justify-between gap-1">
                     <span class="text-[11px] text-muted">带宽 入/出</span>
                   </div>
-                  <svg viewBox="0 0 64 22" class="mt-1 h-5 w-full" preserveAspectRatio="none">
+                  <svg v-if="(nodeHistory[row.id]?.bwIn || []).length >= 2" viewBox="0 0 64 22" class="mt-1 h-5 w-full" preserveAspectRatio="none">
                     <polyline
                       :points="sparkPoints(nodeHistory[row.id]?.bwIn || [])" fill="none" stroke="var(--color-primary)"
                       stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"
@@ -410,6 +429,7 @@ onMounted(async () => {
                       stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"
                     />
                   </svg>
+                  <div v-else class="mt-1 flex h-5 items-center text-[10px] text-placeholder">采集中</div>
                   <div class="mt-0.5 truncate font-mono text-[10px] text-placeholder">
                     {{ fmtBytes(row.bytesIn ?? row.bwIn) }} / {{ fmtBytes(row.bytesOut ?? row.bwOut) }}
                   </div>
@@ -419,12 +439,13 @@ onMounted(async () => {
                     <span class="text-[11px] text-muted">在线通道</span>
                     <span class="font-mono text-xs text-body">{{ row.playing ?? row.viewers ?? 0 }}</span>
                   </div>
-                  <svg viewBox="0 0 64 22" class="mt-1 h-5 w-full" preserveAspectRatio="none">
+                  <svg v-if="(nodeHistory[row.id]?.playing || []).length >= 2" viewBox="0 0 64 22" class="mt-1 h-5 w-full" preserveAspectRatio="none">
                     <polyline
                       :points="sparkPoints(nodeHistory[row.id]?.playing || [])" fill="none" stroke="var(--color-success)"
                       stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"
                     />
                   </svg>
+                  <div v-else class="mt-1 flex h-5 items-center text-[10px] text-placeholder">采集中</div>
                 </div>
               </div>
 
@@ -525,7 +546,7 @@ onMounted(async () => {
           <p class="mb-2 text-sm font-semibold text-ink">当前流列表</p>
           <UiTable :columns="streamCols" :rows="detail.items" :loading="detail.loading" dense empty="该节点暂无推流">
             <template #channel="{ row }">
-              <span class="block truncate" :title="row.channelName || row.channelId">{{ row.channelName || row.channelId || '—' }}</span>
+              <span class="block truncate" :title="row.channel">{{ row.channel || '—' }}</span>
             </template>
             <template #viewers="{ row }">{{ row.viewers ?? 0 }}</template>
             <template #bitrate="{ row }">

@@ -91,6 +91,9 @@ async function loadSettings() {
   await loadRecordDefaults()
 }
 
+/* 默认策略区块（录像/告警）加载状态：加载失败时禁用该区块保存按钮，直到重新加载成功 */
+const defaultsLoadFailed = ref(false)
+
 /* 默认录像策略（ADD-09）：项目级 scope，与上面的 global 设置分开读取 */
 async function loadRecordDefaults() {
   const pid = currentProject.value?.id
@@ -112,8 +115,10 @@ async function loadRecordDefaults() {
     form.alarmDefaults.enabled = !!ad.enabled
     form.alarmDefaults.templateId = String(ad.templateId || '')
     form.alarmDefaults.kinds = Array.isArray(ad.kinds) ? ad.kinds.map(String) : []
-  } catch {
-    // 无权限或接口异常时保持默认关闭，不打断其余设置项的展示
+    defaultsLoadFailed.value = false
+  } catch (e: any) {
+    defaultsLoadFailed.value = true
+    toastApiError(e, '默认策略加载失败')
   }
 }
 
@@ -204,8 +209,9 @@ async function loadIdp() {
 const crlList = ref<any[]>([])
 const crlLoading = ref(false)
 const crlQuery = ref('')
-const crlUploading = ref(false)
-const crlFileInput = ref<HTMLInputElement | null>(null)
+const crlAddVisible = ref(false)
+const crlAddText = ref('')
+const crlAdding = ref(false)
 
 async function loadCRL() {
   crlLoading.value = true
@@ -233,20 +239,19 @@ async function queryCRL() {
   }
 }
 
-/* 上传 CRL：读取 PEM 内容，逐条按设备序列号提交（后端接口 POST /idp/crl { deviceId }） */
-async function onCrlFile(e: Event) {
-  const input = e.target as HTMLInputElement
-  const file = input.files?.[0]
-  input.value = ''
-  if (!file) return
-  const text = await file.text()
-  const ids = [...text.matchAll(/-----BEGIN CERTIFICATE REVOCATION LIST-----(?:\s*)([A-Za-z0-9_:\-]+)/g)]
-    .map((m) => m[1].trim())
-  if (!ids.length) {
-    toast.warning('未解析到吊销条目：请在 PEM 文件中以"-----BEGIN CERTIFICATE REVOCATION LIST-----"后跟设备 ID 的格式登记')
-    return
-  }
-  crlUploading.value = true
+/* 新增吊销设备：按行输入设备 ID，逐条提交（后端接口 POST /idp/crl { deviceId }） */
+function openCrlAddDlg() {
+  crlAddText.value = ''
+  crlAddVisible.value = true
+}
+
+async function submitCrlAdd() {
+  const ids = crlAddText.value
+    .split('\n')
+    .map((s) => s.trim())
+    .filter(Boolean)
+  if (!ids.length) return toast.warning('请输入至少一个设备 ID')
+  crlAdding.value = true
   let done = 0
   let failed = 0
   for (const id of ids) {
@@ -257,9 +262,10 @@ async function onCrlFile(e: Event) {
       failed++
     }
   }
-  crlUploading.value = false
-  if (done) toast.success('已上传 ' + done + ' 条吊销记录' + (failed ? '，' + failed + ' 条失败' : ''))
-  else toast.error({ title: 'CRL 上传失败', suggest: '共 ' + failed + ' 条提交失败，请检查设备 ID 与网络后重试。' })
+  crlAdding.value = false
+  if (done) toast.success('已吊销 ' + done + ' 台设备' + (failed ? '，' + failed + ' 台失败' : ''))
+  else toast.error({ title: 'CRL 提交失败', suggest: '共 ' + failed + ' 条提交失败，请检查设备 ID 与网络后重试。' })
+  if (done) crlAddVisible.value = false
   await loadCRL()
 }
 
@@ -403,7 +409,10 @@ onMounted(async () => {
 
         <div class="flex items-center justify-end gap-2 pb-2">
           <UiButton @click="resetForm">重置</UiButton>
-          <UiButton variant="primary" :disabled="saving || loading" @click="saveSettings">
+          <UiTooltip v-if="defaultsLoadFailed" label="默认策略加载失败，重新加载成功后才能保存">
+            <span><UiButton variant="primary" disabled>保存设置</UiButton></span>
+          </UiTooltip>
+          <UiButton v-else variant="primary" :disabled="saving || loading" @click="saveSettings">
             {{ saving ? '保存中…' : '保存设置' }}
           </UiButton>
         </div>
@@ -448,9 +457,8 @@ onMounted(async () => {
                 <UiIcon name="search" :size="13" />查询
               </UiButton>
               <div class="ml-auto flex items-center gap-2">
-                <input ref="crlFileInput" type="file" accept=".pem,.txt,.crl,.list" class="hidden" @change="onCrlFile" />
-                <UiButton variant="primary" size="sm" :disabled="crlUploading" @click="crlFileInput?.click()">
-                  <UiIcon name="upload" :size="13" />{{ crlUploading ? '上传中…' : '上传 CRL' }}
+                <UiButton variant="primary" size="sm" @click="openCrlAddDlg">
+                  <UiIcon name="plus" :size="13" />添加吊销设备
                 </UiButton>
               </div>
             </div>
@@ -460,11 +468,28 @@ onMounted(async () => {
               <template #reason="{ row }">{{ row.reason || '手动吊销' }}</template>
             </UiTable>
             <p class="mt-2 text-xs text-placeholder">
-              上传格式：PEM 文本，每条以 "-----BEGIN CERTIFICATE REVOCATION LIST-----" 开头、下一行为设备 ID。吊销后的设备将无法再接入。
+              设备 ID 一经吊销将无法再接入 IDP 服务。
             </p>
           </div>
         </UiCard>
       </template>
     </div>
+
+    <!-- 添加吊销设备对话框 -->
+    <UiDialog v-model:open="crlAddVisible" title="添加吊销设备" width="max-w-md">
+      <div class="space-y-2">
+        <p class="text-sm text-body">输入吊销设备 ID（多行，每行一个）</p>
+        <textarea
+          v-model="crlAddText"
+          rows="6"
+          placeholder="设备 ID，每行一个"
+          class="w-full rounded-chrome border border-line bg-surface px-3 py-2 font-mono text-sm text-ink outline-none focus-visible:border-primary"
+        />
+      </div>
+      <template #footer>
+        <UiButton @click="crlAddVisible = false">取消</UiButton>
+        <UiButton variant="primary" :disabled="crlAdding" @click="submitCrlAdd">{{ crlAdding ? '提交中…' : '确定' }}</UiButton>
+      </template>
+    </UiDialog>
   </div>
 </template>
