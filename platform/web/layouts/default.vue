@@ -23,8 +23,8 @@ onMounted(async () => {
 async function refreshBadges() {
   const api = useApi()
   try {
-    const res: any = await api.get('/alarms', { unread: 1, pageSize: 1 })
-    unread.value = res?.total ?? 0
+    const res: any = await api.get('/alarms', { pageSize: 1 })
+    unread.value = res?.unread ?? 0
   } catch {}
   try {
     const res: any = await api.get('/devices/gb28181/pending')
@@ -181,7 +181,7 @@ function onUserMenu(v: string) {
     <!-- 主区 -->
     <div class="flex min-w-0 flex-1 flex-col">
       <header class="flex h-13 shrink-0 items-center gap-3 border-b border-line bg-surface px-4" style="height: 52px">
-        <!-- 返回首页按钮（严格对齐图 4 顶栏左侧） -->
+        <!-- 返回首页按钮 -->
         <button
           v-if="route.path !== '/'"
           type="button"

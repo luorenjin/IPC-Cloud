@@ -67,13 +67,22 @@ const curCell = computed(() => cells.value[selected.value] || cells.value[0])
 // 通道树"信号灯"：标记当前已上屏（在任意画面格中播放）的通道，纯展示用，复用侧栏激活态手法
 const onScreenIds = computed(() => new Set(cells.value.filter((c) => c.channel).map((c) => c.channel!.id)))
 
+function stopChannel(ch: Channel | null) {
+  if (!ch) return
+  api.post(`/channels/${ch.id}/stop`).catch((e: any) => console.warn('停流失败', ch.id, e))
+}
+
 function applyGrid(g: 1 | 4 | 9) {
   const old = cells.value
   if (g === 1) {
     const keep = old.slice(0, 1)
+    // 缩减为单屏时，被移出的格子对应通道需停流
+    old.slice(1).forEach((c) => stopChannel(c.channel))
     cells.value = [keep[0] || blank()]
   } else {
     cells.value = Array.from({ length: g }, (_, i) => old[i] || blank())
+    // 格数减少时，被移除的格子对应通道需停流
+    old.slice(g).forEach((c) => stopChannel(c.channel))
     // 多分屏时新接入默认选择子码流以保护性能
     cells.value.forEach((c) => { if (!c.channel) c.profile = 'sub' })
   }
@@ -162,6 +171,7 @@ function switchProfile(cell: Cell, v: any) {
 }
 
 function closeCell(cell: Cell) {
+  stopChannel(cell.channel)
   cell.channel = null
   cell.url = ''
   saveLayout()
@@ -177,7 +187,7 @@ function doSnapshot() {
   else toast.warning('当前画面不可截图')
 }
 function closeAll() {
-  cells.value.forEach((c) => { c.channel = null; c.url = '' })
+  cells.value.forEach((c) => { stopChannel(c.channel); c.channel = null; c.url = '' })
   saveLayout()
 }
 

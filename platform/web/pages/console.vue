@@ -14,18 +14,21 @@ const search = ref('')
 const projectStats = ref<Record<string, { total: number; offline: number }>>({})
 
 async function loadProjectStats() {
-  for (const p of projects.value) {
-    try {
-      const res: any = await api.get('/devices', { projectId: p.id, pageSize: 1 })
-      // 统计数据拉取
-      const total = res?.total || 0
-      const offlineRes: any = await api.get('/devices', { projectId: p.id, status: 'offline', pageSize: 1 })
-      const offline = offlineRes?.total || 0
-      projectStats.value[p.id] = { total, offline }
-    } catch {
-      projectStats.value[p.id] = { total: 0, offline: 0 }
-    }
-  }
+  await Promise.all(
+    projects.value.map(async (p: any) => {
+      try {
+        const [res, offlineRes]: any[] = await Promise.all([
+          api.get('/devices', { projectId: p.id, pageSize: 1 }),
+          api.get('/devices', { projectId: p.id, status: 'offline', pageSize: 1 })
+        ])
+        const total = res?.total || 0
+        const offline = offlineRes?.total || 0
+        projectStats.value[p.id] = { total, offline }
+      } catch {
+        projectStats.value[p.id] = { total: 0, offline: 0 }
+      }
+    })
+  )
 }
 
 function onlineRatio(id: string) {
@@ -41,7 +44,7 @@ const filteredProjects = computed(() => {
   return projects.value.filter((p: any) => p.name.toLowerCase().includes(q))
 })
 
-// 进入项目首页（对齐图 3）
+// 进入项目首页
 function enterProject(p: any) {
   switchProject(p)
   router.push('/')
@@ -103,7 +106,7 @@ onMounted(async () => {
           <div class="min-w-0 flex-1">
             <h3 class="truncate text-sm font-medium text-ink group-hover:text-primary">{{ p.name }}</h3>
             <div class="mt-1 flex items-center gap-3 text-xs text-muted">
-              <span>{{ projectStats[p.id]?.total ?? 0 }} 通道</span>
+              <span>{{ projectStats[p.id]?.total ?? 0 }} 台设备</span>
               <span v-if="projectStats[p.id]?.offline" class="text-danger">{{ projectStats[p.id].offline }} 台离线</span>
               <span v-else class="text-success">全部在线</span>
             </div>
