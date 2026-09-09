@@ -391,7 +391,8 @@ const previewModal = reactive({
 })
 
 // 打开预览弹窗前解析出真实通道对象：显式传入 channel 时直接用；否则取该设备缓存中第一个
-// 未禁用的通道，缓存未命中时现拉一次；设备确无可预览通道则不开弹窗，提示用户
+// 未禁用的通道，缓存未命中时现拉一次；请求失败与"设备确无通道"是两种不同状态，不可合并：
+// 失败不写入缓存（避免把失败结果当"确无通道"缓存下来），只有请求成功且为空数组才提示无通道
 async function openPreview(row: any, channel?: any, tab: 'preview' | 'playback' = 'preview') {
   let ch = channel || null
   if (!ch) {
@@ -399,8 +400,9 @@ async function openPreview(row: any, channel?: any, tab: 'preview' | 'playback' 
       try {
         const res: any = await api.get(`/devices/${row.id}/channels`)
         chCache[row.id] = res?.items || res?.channels || []
-      } catch {
-        chCache[row.id] = []
+      } catch (e: any) {
+        toastApiError(e, '通道列表加载失败')
+        return
       }
     }
     ch = chCache[row.id]?.find((c: any) => c.enabled !== false) || null

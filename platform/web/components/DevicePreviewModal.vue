@@ -104,7 +104,7 @@ async function fetchLiveStream() {
   liveStreamUrl.value = ''
   try {
     const res: any = await api.post(`/channels/${curChannel.value.id}/play`, { profile: profile.value })
-    liveStreamUrl.value = res.wssFlv || res.wsFlv || res.flv || res.url || ''
+    liveStreamUrl.value = pickFlv(res)
   } catch (e: any) {
     liveStreamUrl.value = ''
     toastApiError(e, '起流失败')

@@ -124,11 +124,7 @@ onMounted(async () => {
 })
 
 // ---------- 播放：点/拖拽/双击通道起流 ----------
-function pickFlv(res: any): string {
-  const https = location.protocol === 'https:'
-  return https ? res.wssFlv || res.wsFlv || '' : res.wsFlv || res.wssFlv || ''
-}
-
+// pickFlv：按页面协议选择流地址，定义于 utils/stream.ts（Nuxt 自动导入），与预览弹窗共用
 async function playInto(cell: Cell, ch: Channel) {
   try {
     const res: any = await api.post(`/channels/${ch.id}/play`, { profile: cell.profile })
