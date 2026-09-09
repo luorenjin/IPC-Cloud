@@ -42,6 +42,8 @@ func Router(hub *wshub.Hub) *gin.Engine {
 		v1.GET("/projects", AuthMiddleware(), handleListProjects)
 		v1.POST("/projects", AuthMiddleware(), handleCreateProject)
 		v1.PUT("/projects/:id", AuthMiddleware(), requirePerm("config"), handleUpdateProject)
+		// 删除权限在 handler 内按目标项目校验（见 handleDeleteProject），故此处不挂 requirePerm
+		v1.DELETE("/projects/:id", AuthMiddleware(), handleDeleteProject)
 
 		// 设备接入端点（接入规范 §9）
 		v1.POST("/devices/idp/bind", AuthMiddleware(), requireProjectID(), requirePerm("config"), handleIdpBind)

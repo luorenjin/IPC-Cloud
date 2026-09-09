@@ -269,6 +269,8 @@ func (a *Adapter) ensureChannel(dev *models.Device, idx int, name, gbChannelID s
 		CreatedAt: models.NowMilli(), UpdatedAt: models.NowMilli(),
 	}
 	store.DB.Create(&ch)
+	devsvc.ApplyDefaultRecordPlan(ch.ID, dev.ProjectID) // ADD-09
+	devsvc.ApplyDefaultAlarmRule(ch.ID, dev.ProjectID)  // ADD-09
 	return &ch
 }
 

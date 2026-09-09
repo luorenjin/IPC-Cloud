@@ -337,6 +337,12 @@ type AlarmRule struct {
 	UpdatedAt  int64       `json:"updatedAt"`
 }
 
+// DeviceSideAlarmKinds ALM-03 设备侧智能事件类型全集。
+//
+// 单一事实来源：engine 的通道规则判定、store 的存量迁移、api 的新项目默认策略
+// 三处共用。任何一处各自维护一份都会导致三者行为不一致。
+var DeviceSideAlarmKinds = []string{"motion", "humanoid", "intrusion", "linecross", "tamper", "io"}
+
 type AlarmEvent struct {
 	ID          string `gorm:"primaryKey;size:48" json:"id"`
 	ProjectID   string `gorm:"index;size:40" json:"projectId"`

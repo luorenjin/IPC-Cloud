@@ -2,7 +2,9 @@ package api
 
 import (
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 
+	"github.com/jetscam/ipccloud/server/internal/devsvc"
 	"github.com/jetscam/ipccloud/server/internal/errs"
 	"github.com/jetscam/ipccloud/server/internal/models"
 	"github.com/jetscam/ipccloud/server/internal/store"
@@ -40,6 +42,17 @@ func handleCreateProject(c *gin.Context) {
 	if ctx != nil {
 		store.DB.Create(&models.UserRole{UserID: ctx.UserID, RoleID: "role_admin", ProjectID: p.ID})
 	}
+	// 内置录像/布防模板 + 默认策略（ADD-09）：新项目开箱即用。
+	// 存量项目不写这两个设置，因而保持关闭，不会因升级而突然录像或改变告警行为。
+	if tplID := store.SeedRecordTemplates(p.ID); tplID != "" {
+		store.DB.Create(&models.Setting{Scope: p.ID, Key: devsvc.RecordDefaultsKey,
+			Value: models.JSONB{"enabled": true, "templateId": tplID, "profile": "main"}})
+	}
+	if tplID := store.SeedAlarmTemplates(p.ID); tplID != "" {
+		store.DB.Create(&models.Setting{Scope: p.ID, Key: devsvc.AlarmDefaultsKey,
+			Value: models.JSONB{"enabled": true, "templateId": tplID,
+				"kinds": models.DeviceSideAlarmKinds}})
+	}
 	ok(c, p)
 }
 
@@ -75,6 +88,92 @@ func handleUpdateProject(c *gin.Context) {
 	var p models.Project
 	store.DB.First(&p, "id = ?", id)
 	ok(c, p)
+}
+
+// handleDeleteProject 删除项目（PRD §8 接口清单 DELETE /projects）。
+//
+// 只允许删除"空项目"——项目下仍有**存活**设备/通道时拒绝，与 handleDeleteGroup 的
+// "含设备的分组须先转移"保持同一范式。两处守卫都以 devices.deleted_at = 0 为准：
+// 设备删除是软删且不连带删通道，若按原始行数判断，项目一旦接入过设备便再也删不掉。
+// 软删设备及其残留通道、录像计划与索引，均由下面的级联清除。
+func handleDeleteProject(c *gin.Context) {
+	id := c.Param("id")
+	ctx := getCtx(c)
+	if ctx == nil {
+		fail(c, errs.EUnauthorized)
+		return
+	}
+	// 先判存在性再判权限：handleListProjects 本就把全部项目返回给任意已登录用户，
+	// 项目是否存在并非机密，据此换取"项目不存在"与"无权限"两种准确提示。
+	var p models.Project
+	if err := store.DB.First(&p, "id = ?", id).Error; err != nil {
+		fail(c, errs.ENotFound.WithMsg("项目不存在"))
+		return
+	}
+	// 权限按"待删除的目标项目"校验，而非请求头里的当前会话项目：
+	// 否则在 A 项目具备 delete 权限即可删掉 B 项目。
+	if !roleHasAction(loadRole(ctx.UserID, id), "delete") {
+		fail(c, errs.EForbid.WithMsg("无该项目的删除权限"))
+		return
+	}
+	var devCnt int64
+	store.DB.Model(&models.Device{}).Where("project_id = ? AND deleted_at = 0", id).Count(&devCnt)
+	if devCnt > 0 {
+		fail(c, errs.EBadRequest.WithMsg("项目下存在 "+itoa(int(devCnt))+" 台设备，请先删除或转移后再删除项目"))
+		return
+	}
+	// 通道守卫只统计"存活设备"的通道：设备删除是软删（handleDeleteDevice 仅置 deleted_at，
+	// 不删通道），若把残留通道也计入，项目一旦接入过设备就永远删不掉——而产品并未提供
+	// 单独清理通道的入口。这些残留由下面的级联一并清除。
+	var chCnt int64
+	store.DB.Model(&models.Channel{}).
+		Joins("JOIN devices ON devices.id = channels.device_id").
+		Where("channels.project_id = ? AND devices.deleted_at = 0", id).Count(&chCnt)
+	if chCnt > 0 {
+		fail(c, errs.EBadRequest.WithMsg("项目下存在 "+itoa(int(chCnt))+" 个通道，请先清理后再删除项目"))
+		return
+	}
+	var total int64
+	store.DB.Model(&models.Project{}).Count(&total)
+	if total <= 1 {
+		fail(c, errs.EBadRequest.WithMsg("至少需要保留一个项目"))
+		return
+	}
+
+	// 级联清理项目级数据；audit_logs 不清除——审计留痕不随业务数据删除。
+	err := store.DB.Transaction(func(tx *gorm.DB) error {
+		// 录像计划与索引以 channel_id 关联，须在删通道之前清理（含软删设备残留的通道）
+		var chIDs []string
+		tx.Model(&models.Channel{}).Where("project_id = ?", id).Pluck("id", &chIDs)
+		if len(chIDs) > 0 {
+			for _, m := range []any{&models.RecordPlan{}, &models.RecordIndex{}} {
+				if e := tx.Where("channel_id IN ?", chIDs).Delete(m).Error; e != nil {
+					return e
+				}
+			}
+		}
+		for _, m := range []any{
+			&models.Channel{}, &models.Device{},
+			&models.DeviceGroup{}, &models.Role{}, &models.UserRole{},
+			&models.RecordTemplate{}, &models.AlarmTemplate{}, &models.AlarmRule{},
+			&models.AlarmEvent{}, &models.IdpPreadd{}, &models.GbWhitelist{}, &models.GbPending{},
+		} {
+			if e := tx.Where("project_id = ?", id).Delete(m).Error; e != nil {
+				return e
+			}
+		}
+		// 项目级设置（scope = 项目 ID），如 ADD-09 的 recordDefaults
+		if e := tx.Where("scope = ?", id).Delete(&models.Setting{}).Error; e != nil {
+			return e
+		}
+		return tx.Delete(&models.Project{}, "id = ?", id).Error
+	})
+	if err != nil {
+		fail(c, errs.EServerInternal.WithMsg(err.Error()))
+		return
+	}
+	// 操作日志由 AuditMiddleware 统一记录（action=delete、target=project:<id>），此处不重复写入。
+	ok(c, nil)
 }
 
 // ---------- 分组 ACC-04 ----------

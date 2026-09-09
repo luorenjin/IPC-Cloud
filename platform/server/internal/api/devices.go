@@ -11,6 +11,7 @@ import (
 
 	"github.com/jetscam/ipccloud/server/internal/adapter"
 	"github.com/jetscam/ipccloud/server/internal/adapter/onvif"
+	"github.com/jetscam/ipccloud/server/internal/devsvc"
 	"github.com/jetscam/ipccloud/server/internal/errs"
 	"github.com/jetscam/ipccloud/server/internal/models"
 	"github.com/jetscam/ipccloud/server/internal/store"
@@ -619,6 +620,8 @@ func handleGbConfirm(c *gin.Context) {
 		CreatedAt:    models.NowMilli(), UpdatedAt: models.NowMilli(),
 	}
 	store.DB.Create(&ch)
+	devsvc.ApplyDefaultRecordPlan(ch.ID, ctx.ProjectID) // ADD-09
+	devsvc.ApplyDefaultAlarmRule(ch.ID, ctx.ProjectID)  // ADD-09
 	store.DB.Delete(&p)
 	ok(c, gin.H{"deviceId": dev.ID})
 }
@@ -732,6 +735,8 @@ func handleOnvifAdd(c *gin.Context) {
 		CreatedAt: models.NowMilli(), UpdatedAt: models.NowMilli(),
 	}
 	store.DB.Create(&ch)
+	devsvc.ApplyDefaultRecordPlan(ch.ID, ctx.ProjectID) // ADD-09
+	devsvc.ApplyDefaultAlarmRule(ch.ID, ctx.ProjectID)  // ADD-09
 	ok(c, deviceJSON(dev))
 }
 
@@ -784,6 +789,8 @@ func handleRtspAdd(c *gin.Context) {
 		CreatedAt: models.NowMilli(), UpdatedAt: models.NowMilli(),
 	}
 	store.DB.Create(&ch)
+	devsvc.ApplyDefaultRecordPlan(ch.ID, ctx.ProjectID) // ADD-09
+	devsvc.ApplyDefaultAlarmRule(ch.ID, ctx.ProjectID)  // ADD-09
 	ok(c, deviceJSON(dev))
 }
 

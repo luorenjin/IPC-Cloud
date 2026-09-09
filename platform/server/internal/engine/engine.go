@@ -340,8 +340,13 @@ func (e *Engine) platformEvent(ev bus.Event, kind string) {
 	if kind == "" {
 		return
 	}
-	enabled := e.policyEnabled(ev.ProjectID, kind)
-	if !enabled {
+	// 第一层：项目级类型开关（ALM-05），缺省全开
+	if !e.policyEnabled(ev.ProjectID, kind) {
+		return
+	}
+	// 第二层：仅 ALM-03 设备侧智能事件受通道规则与布防时段约束；
+	// 平台侧事件（设备离线/节点离线等）与通道无关，未列举类型一律放行。
+	if isDeviceSideKind(kind) && !channelRuleAllows(ev.ProjectID, ev.ChannelID, kind) {
 		return
 	}
 	createAlarmEvent(ev.ProjectID, ev.DeviceID, ev.ChannelID, kind, "warn", ev.Data, "")
