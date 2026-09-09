@@ -390,9 +390,27 @@ const previewModal = reactive({
   tab: 'preview' as 'preview' | 'playback'
 })
 
-function openPreview(row: any, channel?: any, tab: 'preview' | 'playback' = 'preview') {
+// 打开预览弹窗前解析出真实通道对象：显式传入 channel 时直接用；否则取该设备缓存中第一个
+// 未禁用的通道，缓存未命中时现拉一次；设备确无可预览通道则不开弹窗，提示用户
+async function openPreview(row: any, channel?: any, tab: 'preview' | 'playback' = 'preview') {
+  let ch = channel || null
+  if (!ch) {
+    if (!chCache[row.id]) {
+      try {
+        const res: any = await api.get(`/devices/${row.id}/channels`)
+        chCache[row.id] = res?.items || res?.channels || []
+      } catch {
+        chCache[row.id] = []
+      }
+    }
+    ch = chCache[row.id]?.find((c: any) => c.enabled !== false) || null
+  }
+  if (!ch) {
+    toast.warning('该设备暂无可预览的通道')
+    return
+  }
   previewModal.device = row
-  previewModal.channel = channel || null
+  previewModal.channel = ch
   previewModal.tab = tab
   previewModal.show = true
 }
