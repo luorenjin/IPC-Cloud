@@ -97,15 +97,27 @@ function saveLayout() {
   try {
     localStorage.setItem('ipc_live_layout', String(grid.value))
     localStorage.setItem('ipc_live_cells', JSON.stringify(cells.value.map((c) => ({ ch: c.channel?.id || '', p: c.profile }))))
-  } catch {}
+  } catch {
+    // 隐私模式下不可用：布局记不住，但不影响本次观看
+  }
 }
 watch(grid, (g) => { applyGrid(g); saveLayout() })
+
+
+/* 实时状态（E8）：通道树按设备分组，设备上下线要即时反映在树上 */
+useWs((ev: any) => {
+  if (ev.type !== 'device.online' && ev.type !== 'device.offline') return
+  const d = devices.value.find((x: any) => x.id === ev.deviceId)
+  if (d) d.status = ev.type === 'device.online' ? 'online' : 'offline'
+})
 
 onMounted(async () => {
   try {
     const saved = Number(localStorage.getItem('ipc_live_layout'))
     if ([1, 4, 9].includes(saved)) grid.value = saved as any
-  } catch {}
+  } catch {
+    // 读不到就用默认布局
+  }
   applyGrid(grid.value)
   await loadTree()
   // 恢复上次通道
@@ -118,7 +130,9 @@ onMounted(async () => {
         if (idx >= 0) { cells.value[idx].profile = s.p || 'main'; playInto(cells.value[idx], ch) }
       }
     }
-  } catch {}
+  } catch {
+    // 恢复上次画面失败（记录损坏或通道已删除）：留空画面等用户自己选，不打扰
+  }
   // 支持从设备列表跳转直接播放（/live?channel=xxx）
   if (route.query.channel) {
     const ch = channels.value.find((c) => c.id === route.query.channel)

@@ -306,6 +306,10 @@ onMounted(async () => {
 })
 
 watch(tab, (v) => { if (v === 'templates') loadTemplates() })
+
+/* 客户端分页（E7）：该列表接口一次性返回全部数据，此前全量渲染。
+   服务端分页需后端配合，属后续工作。 */
+const { page: pgPage, pageSize: pgSize, total: pgTotal, pageItems: pgItems } = useClientPage(rules)
 </script>
 
 <template>
@@ -334,7 +338,7 @@ watch(tab, (v) => { if (v === 'templates') loadTemplates() })
           { key: 'enabled', label: '启用', width: '70px', align: 'center' },
           { key: 'ops', label: '操作', width: '150px', align: 'center', ellipsis: false }
         ]"
-        :rows="rules" :loading="rulesLoading" :row-key="'id'" empty="暂无告警规则，点击「新建规则」开始配置"
+        :rows="pgItems" :loading="rulesLoading" :row-key="'id'" empty="暂无告警规则，点击「新建规则」开始配置"
       >
         <template #channel="{ row }">{{ channelMap[row.channelId] || row.channelId }}</template>
         <template #kinds="{ row }">
@@ -358,6 +362,13 @@ watch(tab, (v) => { if (v === 'templates') loadTemplates() })
           </div>
         </template>
       </UiTable>
+      <div v-if="pgTotal > pgSize" class="mt-3 flex justify-end">
+        <UiPagination
+          v-model:page="pgPage"
+          v-model:page-size="pgSize"
+          :total="pgTotal"
+        />
+      </div>
     </UiCard>
 
     <!-- 新建告警规则（ALM-02）：触发条件/联动动作/生效时间三块内容，字段间非严格线性依赖，用 Tab 而非编号步骤器，允许自由切换 -->

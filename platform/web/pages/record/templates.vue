@@ -155,6 +155,10 @@ onMounted(() => {
   load()
   loadRefs()
 })
+
+/* 客户端分页（E7）：该列表接口一次性返回全部数据，此前全量渲染。
+   服务端分页需后端配合，属后续工作。 */
+const { page: pgPage, pageSize: pgSize, total: pgTotal, pageItems: pgItems } = useClientPage(items)
 </script>
 
 <template>
@@ -179,7 +183,7 @@ onMounted(() => {
           { key: 'ref', label: '通道引用数', width: '110px', align: 'center' },
           { key: 'ops', label: '操作', width: '180px', align: 'center', ellipsis: false }
         ]"
-        :rows="items" :loading="loading" :row-key="'id'" empty="暂无录像模板，点击「新建模板」开始配置"
+        :rows="pgItems" :loading="loading" :row-key="'id'" empty="暂无录像模板，点击「新建模板」开始配置"
       >
         <template #kind="{ row }">
           <!-- 录像三色语义（REC-02）：定时=primary/信号青，事件=success/绿，与 playback.vue 一致 -->
@@ -205,6 +209,13 @@ onMounted(() => {
           </div>
         </template>
       </UiTable>
+      <div v-if="pgTotal > pgSize" class="mt-3 flex justify-end">
+        <UiPagination
+          v-model:page="pgPage"
+          v-model:page-size="pgSize"
+          :total="pgTotal"
+        />
+      </div>
     </UiCard>
 
     <!-- 新建 / 编辑模板 -->

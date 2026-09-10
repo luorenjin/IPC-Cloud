@@ -217,7 +217,9 @@ async function openMoveDlg() {
   try {
     const res: any = await api.get('/groups')
     groups.value = res?.items || []
-  } catch {}
+  } catch (e: any) {
+    toastApiError(e, '分组列表加载失败，暂时无法选择分组')
+  }
   moveDlg.groupId = dev.value?.groupId || ''
   moveDlg.show = true
 }
@@ -276,6 +278,16 @@ async function load() {
     loading.value = false
   }
 }
+
+/* 实时状态（E8）：只关心当前这台设备的事件 */
+useWs((ev: any) => {
+  if (!dev.value || ev.deviceId !== dev.value.id) return
+  if (ev.type === 'device.online' || ev.type === 'device.offline') {
+    dev.value.status = ev.type === 'device.online' ? 'online' : 'offline'
+    dev.value.lastSeenAt = ev.ts || Date.now()
+  }
+})
+
 onMounted(load)
 </script>
 

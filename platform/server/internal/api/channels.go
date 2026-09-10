@@ -320,9 +320,16 @@ func nextPresetIndex(chID string) int {
 // handleListChannels 通道列表（预览树用）。
 func handleListChannels(c *gin.Context) {
 	ctx := getCtx(c)
+	q := store.DB.Where("project_id = ? AND enabled = ?", ctx.ProjectID, true)
+	// ids 精确筛选：供首页告警流按需取通道名，避免为几个名字全量拉取
+	if ids := c.Query("ids"); ids != "" {
+		q = q.Where("id IN ?", splitComma(ids))
+	}
+	if dev := c.Query("deviceId"); dev != "" {
+		q = q.Where("device_id = ?", dev)
+	}
 	var chs []models.Channel
-	store.DB.Where("project_id = ? AND enabled = ?", ctx.ProjectID, true).
-		Order("device_id ASC, idx ASC").Find(&chs)
+	q.Order("device_id ASC, idx ASC").Find(&chs)
 	ok(c, gin.H{"items": chs})
 }
 

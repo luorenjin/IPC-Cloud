@@ -39,7 +39,10 @@ async function loadCapability() {
   try {
     const d: any = await api.get(`/devices/${deviceId.value}`)
     canDevice.value = (d.capabilities || []).includes('record.device.query')
-  } catch {}
+  } catch (e: any) {
+    // 能力探测失败会让"设备录像"入口静默消失，需说明原因
+    toastApiError(e, '设备能力查询失败，暂时只能检索平台录像')
+  }
   if (!canDevice.value && source.value === 'device') source.value = 'platform'
 }
 
@@ -288,6 +291,7 @@ async function closeSession() {
   curTs.value = 0
   pendingVideoSeek = 0
   stopDeviceTick()
+  // 尽力关闭服务端会话；失败也不能阻塞组件卸载，服务端有超时回收兜底
   try { await api.del(`/playback/${sid}`) } catch {}
 }
 onBeforeUnmount(() => { closeSession() })
@@ -313,7 +317,9 @@ const platformUrl = computed(() => {
   try {
     const p = new URL(u)
     if (p.pathname.startsWith('/record/')) return '/media' + p.pathname + p.search
-  } catch {}
+  } catch {
+    // 地址不是合法 URL：回落用原始地址，交给播放器判断
+  }
   return u
 })
 

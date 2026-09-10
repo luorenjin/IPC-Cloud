@@ -43,7 +43,11 @@ async function loadRefs() {
     const [rRes, cRes]: any[] = await Promise.all([api.get('/alarm-rules'), api.get('/channels')])
     rules.value = rRes.items || []
     channels.value = cRes.items || cRes || []
-  } catch {}
+  } catch (e: any) {
+    // 引用计数取不到会让"被引用中"的模板看起来可以随意删除（删除保护失效），
+    // 必须让用户知道这份数据不可靠。
+    toastApiError(e, '引用关系加载失败，模板引用数可能不准确')
+  }
 }
 
 // ---------- 新建 / 编辑 ----------
@@ -126,6 +130,10 @@ onMounted(() => {
   load()
   loadRefs()
 })
+
+/* 客户端分页（E7）：该列表接口一次性返回全部数据，此前全量渲染。
+   服务端分页需后端配合，属后续工作。 */
+const { page: pgPage, pageSize: pgSize, total: pgTotal, pageItems: pgItems } = useClientPage(items)
 </script>
 
 <template>
@@ -153,7 +161,7 @@ onMounted(() => {
           { key: 'builtin', label: '内置', width: '90px', align: 'center' },
           { key: 'ops', label: '操作', width: '150px', align: 'center', ellipsis: false }
         ]"
-        :rows="items"
+        :rows="pgItems"
         :loading="loading"
         :row-key="'id'"
         empty="暂无布防模板"
@@ -181,6 +189,13 @@ onMounted(() => {
           </div>
         </template>
       </UiTable>
+      <div v-if="pgTotal > pgSize" class="mt-3 flex justify-end">
+        <UiPagination
+          v-model:page="pgPage"
+          v-model:page-size="pgSize"
+          :total="pgTotal"
+        />
+      </div>
     </UiCard>
 
     <!-- 编辑抽屉/对话框 -->

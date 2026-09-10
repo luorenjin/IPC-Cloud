@@ -145,7 +145,9 @@ function toggleCol(k: string) {
   }
   try {
     localStorage.setItem('ipc_dev_hidden_cols', JSON.stringify(hiddenCols.value))
-  } catch {}
+  } catch {
+    // 隐私模式下 localStorage 不可用：列显隐不被记住，但本次操作已生效
+  }
 }
 
 const showCol = (k: string) => !hiddenCols.value.includes(k)
@@ -604,11 +606,29 @@ async function openPreview(row: any, channel?: any, tab: 'preview' | 'playback' 
   previewModal.show = true
 }
 
+/* 实时状态（E8）：设备上下线是值班员的核心关注点。
+   只就地改这一行的状态字段，不整表重拉——否则会打断勾选与滚动位置。 */
+useWs((ev: any) => {
+  if (ev.type !== 'device.online' && ev.type !== 'device.offline') return
+  const id = ev.deviceId
+  if (!id) return
+  const row = devices.value.find((d: any) => d.id === id)
+  if (row) {
+    row.status = ev.type === 'device.online' ? 'online' : 'offline'
+    row.lastSeenAt = ev.ts || Date.now()
+  } else {
+    // 新接入的设备不在当前页，拉一次让它出现
+    load()
+  }
+})
+
 onMounted(async () => {
   try {
     const savedCols = localStorage.getItem('ipc_dev_hidden_cols')
     if (savedCols) hiddenCols.value = JSON.parse(savedCols)
-  } catch {}
+  } catch {
+    // 读不到或内容损坏：用默认列配置
+  }
   await loadGroups()
   load()
   if (route.query.add === '1') openAddModal()

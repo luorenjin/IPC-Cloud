@@ -26,7 +26,9 @@ async function loadGroups() {
   try {
     const res: any = await api.get('/groups')
     groups.value = res.items || []
-  } catch {}
+  } catch (e: any) {
+    toastApiError(e, '分组列表加载失败，暂时无法选择分组')
+  }
 }
 
 // 确认入组

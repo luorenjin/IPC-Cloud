@@ -48,7 +48,10 @@ async function loadBase() {
     const [dRes, cRes]: any[] = await Promise.all([api.get('/devices'), api.get('/channels')])
     devices.value = dRes.items || dRes || []
     channels.value = cRes.items || cRes || []
-  } catch {}
+  } catch {
+    // 仅用于把 deviceId/channelId 显示成名称；取不到就回落显示 ID，
+    // 不影响告警列表本身，故不打扰用户。
+  }
 }
 
 async function load() {

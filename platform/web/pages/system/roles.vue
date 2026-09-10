@@ -483,6 +483,11 @@ onMounted(async () => {
   if (!currentProject.value) await loadMe()
   await Promise.all([loadRoles(), loadUsers()])
 })
+
+/* 客户端分页（E7）：角色/成员接口一次性返回全部数据，此前全量渲染。
+   服务端分页需后端配合，属后续工作。 */
+const { page: rolePage, pageSize: roleSize, total: roleTotal, pageItems: roleItems } = useClientPage(roles)
+const { page: userPage, pageSize: userSize, total: userTotal, pageItems: userItems } = useClientPage(users)
 </script>
 
 <template>
@@ -500,7 +505,7 @@ onMounted(async () => {
                 <UiIcon name="refresh" :size="14" />刷新
               </UiButton>
             </div>
-            <UiTable :columns="roleCols" :rows="roles" :loading="rolesLoading" empty="暂无角色">
+            <UiTable :columns="roleCols" :rows="roleItems" :loading="rolesLoading" empty="暂无角色">
               <template #builtin="{ row }">
                 <UiTag v-if="row.builtin" color="warning">内置</UiTag>
                 <UiTag v-else color="default">自定义</UiTag>
@@ -529,6 +534,9 @@ onMounted(async () => {
                 <UiButton variant="primary" @click="openRoleDlg('create')">新建角色</UiButton>
               </template>
             </UiTable>
+            <div v-if="roleTotal > roleSize" class="mt-3 flex justify-end">
+              <UiPagination v-model:page="rolePage" v-model:page-size="roleSize" :total="roleTotal" />
+            </div>
           </div>
 
           <!-- 成员管理 -->
@@ -541,7 +549,7 @@ onMounted(async () => {
                 <UiIcon name="refresh" :size="14" />刷新
               </UiButton>
             </div>
-            <UiTable :columns="userCols" :rows="users" :loading="usersLoading" empty="暂无成员">
+            <UiTable :columns="userCols" :rows="userItems" :loading="usersLoading" empty="暂无成员">
               <template #name="{ row }">{{ row.name || '-' }}</template>
               <template #contact="{ row }">{{ row.contact || '-' }}</template>
               <template #roleId="{ row }">
@@ -574,6 +582,9 @@ onMounted(async () => {
                 <UiButton variant="primary" @click="openUserDlg">添加成员</UiButton>
               </template>
             </UiTable>
+            <div v-if="userTotal > userSize" class="mt-3 flex justify-end">
+              <UiPagination v-model:page="userPage" v-model:page-size="userSize" :total="userTotal" />
+            </div>
           </div>
         </div>
       </UiTabs>

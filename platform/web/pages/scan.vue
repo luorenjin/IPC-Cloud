@@ -42,7 +42,9 @@ async function loadGroups() {
     const res: any = await api.get('/groups')
     groups.value = res?.items || []
     if (groups.value.length) form.groupId = groups.value[0].id
-  } catch {}
+  } catch (e: any) {
+    toastApiError(e, '分组列表加载失败，将添加到默认分组')
+  }
 }
 
 let stream: MediaStream | null = null
@@ -89,7 +91,9 @@ if (hasBarcodeDetector) {
   try {
     // @ts-ignore
     detector = new window.BarcodeDetector({ formats: ['qr_code', 'code_128', 'data_matrix'] })
-  } catch {}
+  } catch {
+    // 浏览器不支持这些码制：detector 保持 null，下方会回落到手动输入
+  }
 }
 
 async function startDetection() {
@@ -105,7 +109,9 @@ async function startDetection() {
           handleQrResult(text)
           return
         }
-      } catch {}
+      } catch {
+        // 逐帧识别，单帧失败继续下一帧即可
+      }
     }
   }
 

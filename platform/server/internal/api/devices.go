@@ -23,6 +23,10 @@ import (
 // deviceFilters 把设备列表的筛选条件（groupId/status/source/keyword/bulk）应用到查询上。
 // 列表与 CSV 导出共用同一实现，避免两处筛选逻辑漂移（MGR-13：导出必须与当前列表一致）。
 func deviceFilters(c *gin.Context, q *gorm.DB) *gorm.DB {
+	// ids 精确筛选优先于其他条件：调用方已明确要哪几台
+	if ids := c.Query("ids"); ids != "" {
+		return q.Where("id IN ?", splitComma(ids))
+	}
 	if g := c.Query("groupId"); g != "" {
 		q = q.Where("group_id = ?", g)
 	}
