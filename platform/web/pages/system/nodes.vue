@@ -20,13 +20,11 @@ async function loadNodes() {
   }
 }
 
-/* 状态标签：节点自身运行状态灯——在线=信号青（primary）、离线=警戒红；
-   区别于设备业务在线态的 success 绿（本页规格明确要求信号青，见设计方案） */
+/* 状态标签：映射见 utils/enums.ts 的 NODE_STATUS_MAP——节点在线用信号青（primary），
+   区别于设备业务在线态的 success 绿（两者刻意不同，勿合并） */
 function statusTag(s: string) {
-  if (s === 'online') return { text: '在线', color: 'primary' as const }
-  if (s === 'offline') return { text: '离线', color: 'danger' as const }
-  if (s === 'disabled') return { text: '已禁用', color: 'info' as const }
-  return { text: s || '未知', color: 'warning' as const }
+  const info = nodeStatusInfo(s)
+  return { text: info.label, color: info.color }
 }
 
 /* 状态灯点样式（纯展示，复用 statusTag 的语义色） */
@@ -40,32 +38,6 @@ function nodeLamp(row: any) {
   if (row.disabled) return { ...LAMP_STYLE.info, label: '已禁用' }
   const t = statusTag(row.status)
   return { ...(LAMP_STYLE[t.color] || LAMP_STYLE.info), label: t.text }
-}
-
-/* 相对时间 */
-const ago = (ts: any) => {
-  if (!ts) return '—'
-  const t = typeof ts === 'string' ? Date.parse(ts) : ts
-  const s = Math.floor((Date.now() - t) / 1000)
-  if (!isFinite(s) || s < 0) return '—'
-  return s < 60
-    ? '刚刚'
-    : s < 3600
-      ? Math.floor(s / 60) + '分钟前'
-      : s < 86400
-        ? Math.floor(s / 3600) + '小时前'
-        : Math.floor(s / 86400) + '天前'
-}
-
-/* 带宽格式化（bytes） */
-const fmtBytes = (b: any) => {
-  const n = Number(b || 0)
-  if (!n) return '0 B/s'
-  const units = ['B/s', 'KB/s', 'MB/s', 'GB/s']
-  let i = 0
-  let v = n
-  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++ }
-  return v.toFixed(i === 0 ? 0 : 1) + ' ' + units[i]
 }
 
 /* 负载：以流数/上限占用率表示（后端未提供 CPU/负载指标，取现有字段派生，纯展示） */
@@ -351,8 +323,6 @@ const streamCols = [
   { key: 'ops', label: '操作', width: '70px', align: 'center' as const }
 ]
 
-const fmtTime = (ts: any) =>
-  ts ? new Date(typeof ts === 'string' ? Date.parse(ts) : ts).toLocaleString() : '-'
 
 /* WebSocket 实时刷新：节点状态变化事件 */
 useWs((ev: any) => {
@@ -435,7 +405,7 @@ onMounted(async () => {
                   </svg>
                   <div v-else class="mt-1 flex h-5 items-center text-[10px] text-placeholder">采集中</div>
                   <div class="mt-0.5 truncate font-mono text-[10px] text-placeholder">
-                    {{ fmtBytes(row.bytesIn ?? row.bwIn) }} / {{ fmtBytes(row.bytesOut ?? row.bwOut) }}
+                    {{ fmtRate(row.bytesIn ?? row.bwIn) }} / {{ fmtRate(row.bytesOut ?? row.bwOut) }}
                   </div>
                 </div>
                 <div class="rounded-signal bg-zone px-2 py-1.5">

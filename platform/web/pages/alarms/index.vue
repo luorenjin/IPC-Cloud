@@ -3,21 +3,9 @@
 const api = useApi()
 const toast = useToast()
 
-// 类型中文映射（设备事件 + 平台事件）
-const KIND_MAP: Record<string, string> = {
-  motion: '移动侦测',
-  humanoid: '人形侦测',
-  intrusion: '区域入侵',
-  linecross: '越界侦测',
-  tamper: '视频遮挡',
-  io: 'IO报警',
-  device_offline: '设备离线',
-  node_offline: '节点离线',
-  stream_lost: '流中断',
-  disk_full: '存储不足',
-  tf_error: 'TF卡异常'
-}
-const DEVICE_KINDS = ['motion', 'humanoid', 'intrusion', 'linecross', 'tamper', 'io', 'tf_error']
+// 类型中文映射见 utils/enums.ts（全站唯一来源）
+const KIND_MAP = ALARM_KIND_MAP
+const DEVICE_KINDS = DEVICE_ALARM_KINDS
 const PLATFORM_KINDS = ['device_offline', 'node_offline', 'stream_lost', 'disk_full']
 // 级别汉化（A16：不显示英文 warn/info）：error 严重 / warn 警告 / info 提示
 const LEVEL_MAP: Record<string, { label: string; color: string }> = {

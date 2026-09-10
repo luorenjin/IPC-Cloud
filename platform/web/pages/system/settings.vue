@@ -275,8 +275,6 @@ const crlCols = [
   { key: 'reason', label: '原因', width: '140px' }
 ]
 
-const fmtTime = (ts: any) =>
-  ts ? new Date(typeof ts === 'string' ? Date.parse(ts) : ts).toLocaleString() : '-'
 
 watch(currentProject, () => loadGbParams())
 

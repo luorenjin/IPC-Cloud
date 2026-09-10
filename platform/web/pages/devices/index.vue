@@ -22,14 +22,7 @@ const groupMap = computed(() => {
 })
 const groupOptions = computed(() => groups.value.map((g: any) => ({ value: g.id, label: g.name })))
 
-// 协议来源四色语义（PRD §9.1，与 devices/[id].vue 保持一致映射，不改语义）
-const srcMap: Record<string, { label: string; color: string }> = {
-  idp: { label: '自有', color: 'idp' },
-  gb28181: { label: '国标', color: 'gb' },
-  onvif: { label: 'ONVIF', color: 'onvif' },
-  rtsp: { label: 'RTSP', color: 'rtsp' }
-}
-function srcInfo(s?: string) { return srcMap[s || ''] || { label: s || '—', color: 'default' } }
+// 来源展示名/颜色见 utils/enums.ts SOURCE_MAP（全站唯一来源，PRD §9.1）
 
 async function loadGroups() {
   try {
@@ -633,7 +626,7 @@ onMounted(async () => {
                     </div>
                   </td>
                   <td v-if="showCol('type')" class="py-2.5 px-3">{{ row.type || 'IPC' }}</td>
-                  <td v-if="showCol('source')" class="py-2.5 px-3"><UiTag :color="srcInfo(row.source).color">{{ srcInfo(row.source).label }}</UiTag></td>
+                  <td v-if="showCol('source')" class="py-2.5 px-3"><UiTag :color="sourceInfo(row.source).color">{{ sourceInfo(row.source).label }}</UiTag></td>
                   <td v-if="showCol('status')" class="py-2.5 px-3">
                     <span class="flex items-center gap-1.5" :class="row.status === 'online' ? 'text-primary' : 'text-muted'">
                       <span class="h-2 w-2 rounded-full transition-colors" :class="row.status === 'online' ? 'bg-primary' : 'bg-muted'" />

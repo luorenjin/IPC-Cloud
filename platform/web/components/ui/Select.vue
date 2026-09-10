@@ -20,9 +20,10 @@ const open = ref(false)
 const heights = { sm: 'h-7 text-xs', md: 'h-8 text-sm' }
 
 // Reka SelectItem 不允许空字符串 value：用哨兵值映射（PRD 中"全部/未分组"等选项 value 为 ''）
-const EMPTY = '__ipc_empty__'
-function enc(v: any) { return v === '' || v == null ? EMPTY : String(v) }
-function dec(v: any) { return v === EMPTY ? '' : v }
+// 哨兵名不用 EMPTY——那是 utils/format 里的空值占位符 '—'，语义完全不同
+const EMPTY_SENTINEL = '__ipc_empty__'
+function enc(v: any) { return v === '' || v == null ? EMPTY_SENTINEL : String(v) }
+function dec(v: any) { return v === EMPTY_SENTINEL ? '' : v }
 const inner = computed(() => enc(props.modelValue))
 const opts = computed(() => (props.options || []).map((o) => ({ ...o, _v: enc(o.value) })))
 function onModel(v: any) { emit('update:modelValue', dec(v)) }

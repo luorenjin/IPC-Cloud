@@ -460,8 +460,6 @@ async function saveUser() {
   }
 }
 
-const fmtTime = (ts: any) =>
-  ts ? new Date(typeof ts === 'string' ? Date.parse(ts) : ts).toLocaleString() : '-'
 
 const roleCols = [
   { key: 'name', label: '名称', width: '180px' },

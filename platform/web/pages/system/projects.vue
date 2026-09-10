@@ -294,8 +294,6 @@ async function onNodeDrop(targetId: string) {
 /* 切换项目后刷新分组树 */
 watch(currentProject, () => loadGroups())
 
-const fmtTime = (ts: any) =>
-  ts ? new Date(typeof ts === 'string' ? Date.parse(ts) : ts).toLocaleString() : '-'
 
 // 停流等待时长换算为迷你数据条百分比（有效范围 5-600 秒，纯展示用）
 function idlePct(p: any) {

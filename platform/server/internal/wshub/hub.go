@@ -79,15 +79,28 @@ func (h *Hub) Handler(c *gin.Context) {
 	go func() {
 		ping := time.NewTicker(25 * time.Second)
 		defer ping.Stop()
+		defer ws.Close()
 		for {
-			msg, ok := <-cl.send
-			if !ok {
-				return
+			select {
+			case msg, ok := <-cl.send:
+				if !ok {
+					return
+				}
+				// 写超时必须在写之前设置。此前写在 WriteJSON 之后，
+				// 相当于把上一条消息的截止时间留给下一条：首条之后
+				// 截止时间早已过期，后续每次写都失败并悄悄退出写泵，
+				// 表现为"连接还开着但只收得到第一条消息"。
+				_ = ws.SetWriteDeadline(time.Now().Add(10 * time.Second))
+				if err := ws.WriteJSON(msg); err != nil {
+					return
+				}
+			case <-ping.C:
+				// 心跳保活：穿过中间代理的空闲连接需要定期有流量
+				_ = ws.SetWriteDeadline(time.Now().Add(10 * time.Second))
+				if err := ws.WriteMessage(websocket.PingMessage, nil); err != nil {
+					return
+				}
 			}
-			if err := ws.WriteJSON(msg); err != nil {
-				return
-			}
-			ws.SetWriteDeadline(time.Now().Add(10 * time.Second))
 		}
 	}()
 	cl.send <- map[string]any{"type": "connected", "ts": time.Now().UnixMilli()}

@@ -120,14 +120,11 @@ async function exportLogs() {
   }
 }
 
-const fmtTime = (ts: any) =>
-  ts ? new Date(typeof ts === 'string' ? Date.parse(ts) : ts).toLocaleString() : '-'
 
-/* 结果标签：success 绿 / fail 红 */
+/* 结果标签映射见 utils/enums.ts */
 function resultTag(r: string) {
-  if (r === 'success') return { text: '成功', color: 'success' as const }
-  if (r === 'fail') return { text: '失败', color: 'danger' as const }
-  return { text: r || '-', color: 'info' as const }
+  const i = resultInfo(r)
+  return { text: i.label, color: i.color }
 }
 
 const cols = [

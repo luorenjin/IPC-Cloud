@@ -4,28 +4,9 @@ const api = useApi()
 const toast = useToast()
 const confirm = useConfirm()
 
-const DAY_NAMES = ['周一', '周二', '周三', '周四', '周五', '周六', '周日']
-// 事件类型（ALM-02：六类，按通道能力集过滤置灰）
-const KIND_OPTIONS = [
-  { value: 'motion', label: '移动侦测' },
-  { value: 'humanoid', label: '人形侦测' },
-  { value: 'intrusion', label: '区域入侵' },
-  { value: 'linecross', label: '越界侦测' },
-  { value: 'tamper', label: '视频遮挡' },
-  { value: 'io', label: '外接IO' }
-]
-const kindName = (k: string) => KIND_OPTIONS.find((o) => o.value === k)?.label || k
-
-// schedule 摘要：{days:[1,2],ranges:[["00:00","24:00"]]} → "周一、周二 00:00-24:00"
-function fmtSchedule(s: any) {
-  if (!s || !s.days?.length) return '未布防'
-  const days = [...s.days]
-    .sort((a: number, b: number) => a - b)
-    .map((d: number) => DAY_NAMES[d - 1] || d)
-    .join('、')
-  const ranges = (s.ranges || []).map((r: string[]) => `${r[0]}-${r[1]}`).join('、')
-  return `${days} ${ranges}`
-}
+// 事件类型（ALM-02：六类，按通道能力集过滤置灰）映射见 utils/enums.ts
+const KIND_OPTIONS = ALARM_KIND_OPTIONS
+const kindName = (k: string) => alarmKindName(k)
 
 // ---------- 基础数据（设备 / 通道 / 模板映射） ----------
 const devices = ref<any[]>([])
@@ -364,7 +345,7 @@ watch(tab, (v) => { if (v === 'templates') loadTemplates() })
         <template #template="{ row }">
           <div>
             <div class="text-body">{{ templateMap[row.templateId] || row.templateId || '—' }}</div>
-            <div class="text-xs text-placeholder">{{ fmtSchedule(templates.find(t => t.id === row.templateId)?.schedule) }}</div>
+            <div class="text-xs text-placeholder">{{ fmtSchedule(templates.find(t => t.id === row.templateId)?.schedule, '未布防') }}</div>
           </div>
         </template>
         <template #enabled="{ row }">
@@ -468,7 +449,7 @@ watch(tab, (v) => { if (v === 'templates') loadTemplates() })
                     {{ t.name }}
                     <UiTag v-if="t.builtin" color="info">内置</UiTag>
                   </div>
-                  <div class="text-xs text-placeholder">{{ fmtSchedule(t.schedule) }}</div>
+                  <div class="text-xs text-placeholder">{{ fmtSchedule(t.schedule, '未布防') }}</div>
                 </div>
               </div>
               <div v-if="!templates.length" class="py-6 text-center text-sm text-placeholder">暂无布防模板</div>
@@ -502,7 +483,7 @@ watch(tab, (v) => { if (v === 'templates') loadTemplates() })
         </div>
         <div>
           <p class="mb-1.5 text-sm text-muted">布防模板</p>
-          <UiSelect v-model="editRuleDlg.templateId" placeholder="选择布防模板" :options="templates.map(t => ({ label: `${t.name}（${fmtSchedule(t.schedule)}）`, value: t.id }))" />
+          <UiSelect v-model="editRuleDlg.templateId" placeholder="选择布防模板" :options="templates.map(t => ({ label: `${t.name}（${fmtSchedule(t.schedule, '未布防')}）`, value: t.id }))" />
         </div>
       </div>
       <template #footer>

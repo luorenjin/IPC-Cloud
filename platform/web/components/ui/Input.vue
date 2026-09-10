@@ -11,9 +11,13 @@ const props = withDefaults(defineProps<{
   maxlength?: number
   width?: string
   autocomplete?: string
-}>(), { type: 'text', size: 'md', disabled: false, clearable: false, width: 'w-full' })
+  /** 错误态：红色描边，配合 UiField 的错误文案（useForm） */
+  invalid?: boolean
+  id?: string
+  ariaDescribedby?: string
+}>(), { type: 'text', size: 'md', disabled: false, clearable: false, width: 'w-full', invalid: false })
 
-const emit = defineEmits<{ 'update:modelValue': [v: string]; enter: []; clear: [] }>()
+const emit = defineEmits<{ 'update:modelValue': [v: string]; enter: []; clear: []; blur: []; focus: [] }>()
 const focused = ref(false)
 const heights = { sm: 'h-7 text-xs', md: 'h-8 text-sm', lg: 'h-10 text-sm' }
 </script>
@@ -23,16 +27,20 @@ const heights = { sm: 'h-7 text-xs', md: 'h-8 text-sm', lg: 'h-10 text-sm' }
     class="group/ipc flex items-center rounded-chrome border bg-surface px-2.5 transition-colors"
     :class="[
       width, heights[size],
-      focused ? 'border-primary ring-1 ring-primary/25' : 'border-line hover:border-placeholder',
+      invalid
+        ? 'border-danger ring-1 ring-danger/25'
+        : focused ? 'border-primary ring-1 ring-primary/25' : 'border-line hover:border-placeholder',
       disabled ? 'bg-zone cursor-not-allowed opacity-60' : ''
     ]"
   >
     <slot name="prefix" />
     <input
+      :id="id"
       class="w-full min-w-0 bg-transparent outline-none text-body placeholder:text-placeholder disabled:cursor-not-allowed"
       :type="type" :value="modelValue" :placeholder="placeholder" :disabled="disabled" :readonly="readonly" :maxlength="maxlength" :autocomplete="autocomplete"
+      :aria-invalid="invalid || undefined" :aria-describedby="ariaDescribedby"
       @input="emit('update:modelValue', ($event.target as HTMLInputElement).value)"
-      @focus="focused = true" @blur="focused = false"
+      @focus="focused = true; emit('focus')" @blur="focused = false; emit('blur')"
       @keyup.enter="emit('enter')"
     />
     <button

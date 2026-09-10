@@ -5,18 +5,6 @@ const toast = useToast()
 const confirm = useConfirm()
 
 const KIND_MAP: Record<string, string> = { timer: '定时录像', event: '事件录像' }
-const DAY_NAMES = ['周一', '周二', '周三', '周四', '周五', '周六', '周日']
-
-// schedule 摘要：{days:[1,2],ranges:[["00:00","24:00"]]} → "周一、周二 00:00-24:00"
-function fmtSchedule(s: any) {
-  if (!s || !s.days?.length) return '未设置'
-  const days = [...s.days]
-    .sort((a: number, b: number) => a - b)
-    .map((d: number) => DAY_NAMES[d - 1] || d)
-    .join('、')
-  const ranges = (s.ranges || []).map((r: string[]) => `${r[0]}-${r[1]}`).join('、')
-  return `${days} ${ranges}`
-}
 
 // ---------- 列表 ----------
 const items = ref<any[]>([])

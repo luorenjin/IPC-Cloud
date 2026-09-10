@@ -19,43 +19,13 @@ function hasCap(prefix: string) {
   return caps.value.some((c) => c.startsWith(prefix))
 }
 
-const srcMap: Record<string, { label: string; color: string }> = {
-  idp: { label: '自有', color: 'idp' },
-  gb28181: { label: '国标', color: 'gb' },
-  onvif: { label: 'ONVIF', color: 'onvif' },
-  rtsp: { label: 'RTSP', color: 'rtsp' }
-}
-function srcInfo(s?: string) { return srcMap[s || ''] || { label: s || '—', color: 'default' } }
-function statusInfo(s?: string) {
-  if (s === 'online') return { label: '在线', color: 'success' }
-  if (s === 'pending') return { label: '待确认', color: 'warning' }
-  if (s === 'error') return { label: '错误', color: 'danger' }
-  return { label: '离线', color: 'info' }
-}
-function streamInfo(ch: any) {
-  const s = ch.streamStatus ?? ch.status ?? ''
-  if (s === 'online' || s === 'live') return { label: '推流中', color: 'success' }
-  if (s === 'offline' || s === '') return { label: '未推流', color: 'info' }
-  return { label: String(s), color: 'warning' }
-}
-function ago(ts?: number) {
-  if (!ts) return '—'
-  const s = Math.floor((Date.now() - ts) / 1000)
-  if (s < 60) return '刚刚'
-  if (s < 3600) return Math.floor(s / 60) + ' 分钟前'
-  if (s < 86400) return Math.floor(s / 3600) + ' 小时前'
-  return Math.floor(s / 86400) + ' 天前'
-}
-function pct(v: any) {
-  if (v == null) return '—'
-  const n = typeof v === 'number' ? v : parseFloat(v)
-  return isNaN(n) ? String(v) : n + '%'
-}
-function temp(v: any) {
-  if (v == null) return '—'
-  const n = typeof v === 'number' ? v : parseFloat(v)
-  return isNaN(n) ? String(v) : n + '℃'
-}
+// 来源展示名/颜色见 utils/enums.ts SOURCE_MAP（全站唯一来源，PRD §9.1）
+// 设备/推流状态映射见 utils/enums.ts
+const statusInfo = (s?: string) => deviceStatusInfo(s)
+const streamInfo = (ch: any) => streamStatusInfo(ch.streamStatus ?? ch.status ?? '')
+// 相对时间/百分比/温度格式化见 utils/format.ts
+const pct = (v: any) => fmtPercent(v)
+const temp = (v: any) => fmtTemp(v)
 
 // 概览字段（空字段隐藏，修复审计 B7）
 const infoRows = computed(() => {
@@ -319,7 +289,7 @@ onMounted(load)
         </button>
         <span class="text-base font-bold text-ink">{{ dev?.name || '设备详情' }}</span>
         <UiTag v-if="dev" :color="statusInfo(dev.status).color as any" dot>{{ statusInfo(dev.status).label }}</UiTag>
-        <UiTag :color="srcInfo(dev?.source).color as any" plain>{{ srcInfo(dev?.source).label }}</UiTag>
+        <UiTag :color="sourceInfo(dev?.source).color as any" plain>{{ sourceInfo(dev?.source).label }}</UiTag>
         <div class="ml-auto flex flex-wrap items-center gap-2">
           <UiButton variant="primary" @click="openEdit"><Icon name="edit" :size="13" />编辑</UiButton>
           <UiButton @click="rebootDevice"><Icon name="refresh-cw" :size="13" />重启</UiButton>
@@ -434,7 +404,7 @@ onMounted(load)
             <div class="min-h-40 space-y-4">
               <div v-if="dev?.source !== 'idp'" class="flex items-center gap-2 rounded-signal border border-line bg-zone px-3 py-2.5 text-sm text-muted">
                 <Icon name="info" :size="15" class="text-placeholder" />
-                该设备来源（{{ srcInfo(dev?.source).label }}）不支持远程配置，功能已禁用。
+                该设备来源（{{ sourceInfo(dev?.source).label }}）不支持远程配置，功能已禁用。
               </div>
               <template v-else>
                 <div class="grid grid-cols-1 gap-x-8 gap-y-3 md:grid-cols-2">

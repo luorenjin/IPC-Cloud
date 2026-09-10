@@ -3,28 +3,23 @@
 const api = useApi()
 const router = useRouter()
 const { currentProject } = useAuth()
-const dash = ref<any>(null)
+// 变量名不用 dash——会遮蔽 utils/format 自动导入的 dash() 空值兜底函数
+const dashboard = ref<any>(null)
 
-// 来源分布（PRD §9.1 四色语义固定，勿改映射）
-const srcMeta: Record<string, { label: string; color: string; tag: string }> = {
-  idp: { label: '自有设备', color: 'var(--color-src-idp)', tag: 'idp' },
-  gb28181: { label: '国标', color: 'var(--color-src-gb)', tag: 'gb' },
-  onvif: { label: 'ONVIF', color: 'var(--color-src-onvif)', tag: 'onvif' },
-  rtsp: { label: 'RTSP', color: 'var(--color-src-rtsp)', tag: 'rtsp' }
-}
 // 附加 pct：迷你分布条的相对宽度（相对最大类目），纯展示用，最小 6% 保证非零占比可见
 const srcRows = computed(() => {
-  const rows = Object.keys(srcMeta).map((k) => ({
-    key: k, label: srcMeta[k].label, color: srcMeta[k].color, tag: srcMeta[k].tag,
-    count: dash.value?.bySource?.[k] ?? 0
+  // 来源展示名/颜色见 utils/enums.ts SOURCE_MAP（PRD §9.1 四色语义固定）
+  const rows = SOURCES.map((k) => ({
+    key: k, label: SOURCE_MAP[k].longLabel, color: SOURCE_MAP[k].cssVar, tag: SOURCE_MAP[k].color,
+    count: dashboard.value?.bySource?.[k] ?? 0
   }))
   const max = Math.max(1, ...rows.map((r) => r.count))
   return rows.map((r) => ({ ...r, pct: r.count ? Math.max(6, Math.round((r.count / max) * 100)) : 0 }))
 })
 
 const onlineRate = computed(() => {
-  const t = dash.value?.deviceTotal || 0
-  const o = dash.value?.deviceOnline || 0
+  const t = dashboard.value?.deviceTotal || 0
+  const o = dashboard.value?.deviceOnline || 0
   return t ? ((o / t) * 100).toFixed(1) + '%' : '-'
 })
 
@@ -33,8 +28,8 @@ const GAUGE_R = 80
 const GAUGE_PATH = 'M20 100 A80 80 0 1 1 180 100'
 const GAUGE_CIRC = Math.PI * GAUGE_R
 const onlineFrac = computed(() => {
-  const t = dash.value?.deviceTotal || 0
-  const o = dash.value?.deviceOnline || 0
+  const t = dashboard.value?.deviceTotal || 0
+  const o = dashboard.value?.deviceOnline || 0
   return t ? Math.min(1, o / t) : 0
 })
 const gaugeOffset = computed(() => GAUGE_CIRC * (1 - onlineFrac.value))
@@ -45,14 +40,8 @@ const gaugeColor = computed(() => {
   return 'var(--color-danger)'
 })
 
-// 告警事件类型中文映射（与消息中心页一致，见 pages/alarms/index.vue KIND_MAP）
-const ALARM_KIND_MAP: Record<string, string> = {
-  motion: '移动侦测', humanoid: '人形侦测', intrusion: '区域入侵', linecross: '越界侦测',
-  tamper: '视频遮挡', io: 'IO报警', device_offline: '设备离线', node_offline: '节点离线',
-  stream_lost: '流中断', disk_full: '存储不足', tf_error: 'TF卡异常'
-}
-const LEVEL_BAR: Record<string, string> = { error: 'var(--color-danger)', warn: 'var(--color-warning)', info: 'var(--color-info)' }
-function levelBar(level: string) { return LEVEL_BAR[level] || LEVEL_BAR.info }
+// 告警类型与级别映射见 utils/enums.ts（全站唯一来源）
+function levelBar(level: string) { return alarmLevelInfo(level).cssVar }
 
 // 设备/通道名称映射：/dashboard 的 recentAlarms 只带 deviceId/channelId，需要另查名称用于告警流展示
 const deviceNameMap = ref<Record<string, string>>({})
@@ -65,29 +54,17 @@ async function loadNames() {
   } catch {}
 }
 
-const alarmRows = computed(() => (dash.value?.recentAlarms || []).slice(0, 8).map((a: any) => ({
+const alarmRows = computed(() => (dashboard.value?.recentAlarms || []).slice(0, 8).map((a: any) => ({
   id: a.id,
   level: a.level || 'info',
-  msg: a.data?.error?.msg || a.data?.name || ALARM_KIND_MAP[a.kind] || a.kind || '告警事件',
+  msg: a.data?.error?.msg || a.data?.name || alarmKindName(a.kind) || '告警事件',
   src: channelNameMap.value[a.channelId] || deviceNameMap.value[a.deviceId] || '通道',
   ts: a.ts || 0
 })))
 
-function ago(ts: number) {
-  if (!ts) return '—'
-  const s = Math.floor((Date.now() - ts) / 1000)
-  if (s < 60) return '刚刚'
-  if (s < 3600) return Math.floor(s / 60) + ' 分钟前'
-  if (s < 86400) return Math.floor(s / 3600) + ' 小时前'
-  return Math.floor(s / 86400) + ' 天前'
-}
-function hm(ts: number) {
-  if (!ts) return '--:--'
-  return new Date(Number(ts)).toLocaleTimeString('zh-CN', { hour12: false, hour: '2-digit', minute: '2-digit' })
-}
 
 async function load() {
-  try { dash.value = await api.get('/dashboard') } catch (e: any) { useToast().error({ title: e.msg || '加载失败' }) }
+  try { dashboard.value = await api.get('/dashboard') } catch (e: any) { useToast().error({ title: e.msg || '加载失败' }) }
 }
 onMounted(() => {
   load()
@@ -185,7 +162,7 @@ const apps = [
       <div v-else class="max-h-72 divide-y divide-line-soft overflow-y-auto">
         <div v-for="a in alarmRows" :key="a.id" class="flex items-center gap-3 px-4 py-2.5 text-xs">
           <span class="h-6 w-1 shrink-0 rounded-full" :style="{ background: levelBar(a.level) }" />
-          <span class="w-11 shrink-0 font-mono text-placeholder">{{ hm(a.ts) }}</span>
+          <span class="w-11 shrink-0 font-mono text-placeholder">{{ fmtHm(a.ts) }}</span>
           <span class="w-28 shrink-0 truncate font-medium text-ink">{{ a.src }}</span>
           <span class="min-w-0 flex-1 truncate text-body">{{ a.msg }}</span>
           <span class="shrink-0 text-placeholder">{{ ago(a.ts) }}</span>
