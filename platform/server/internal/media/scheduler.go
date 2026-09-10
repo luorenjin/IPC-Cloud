@@ -41,15 +41,24 @@ func (s *Scheduler) Pick(channelID, profile string) (*models.MediaNode, error) {
 		return nil, fmt.Errorf("E4001 无可用媒体节点")
 	}
 	// 2. 最小负载
+	return pickLeastLoaded(nodes), nil
+}
+
+// pickLeastLoaded 返回负载最小的节点。抽成纯函数以便脱离 DB 覆盖测试。
+// 注意：不可写 `for i := range nodes[1:]`，那样 i 从 0 起而 nodes[i] 取的是
+// 原切片，既错位又漏掉最后一个节点（历史 bug）。
+func pickLeastLoaded(nodes []models.MediaNode) *models.MediaNode {
+	if len(nodes) == 0 {
+		return nil
+	}
 	best := &nodes[0]
 	bestScore := loadScore(*best)
-	for i := range nodes[1:] {
-		sc := loadScore(nodes[i])
-		if sc < bestScore {
+	for i := 1; i < len(nodes); i++ {
+		if sc := loadScore(nodes[i]); sc < bestScore {
 			best, bestScore = &nodes[i], sc
 		}
 	}
-	return best, nil
+	return best
 }
 
 func loadScore(n models.MediaNode) float64 {

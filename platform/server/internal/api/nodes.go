@@ -214,10 +214,12 @@ func selfCheckNode(id string) {
 	}
 	zlm := mediaForNode(&n)
 	_, err := zlm.GetMediaList(context.Background())
-	status := "offline"
-	if err == nil {
-		status = "online"
+	status, reason := "online", ""
+	if err != nil {
+		// ACC-02：保留具体原因（连接被拒 / 超时 / secret 错误），前端据此给出可操作提示。
+		status, reason = "offline", err.Error()
 	}
-	store.DB.Model(&n).Updates(map[string]any{"status": status, "last_keepalive": models.NowMilli()})
+	store.DB.Model(&n).Updates(map[string]any{
+		"status": status, "status_reason": reason, "last_keepalive": models.NowMilli()})
 	enginePublishNodeStatus(id, status)
 }

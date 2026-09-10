@@ -159,9 +159,13 @@ func handleExportAuditLogs(c *gin.Context) {
 
 // ---------- 任务中心 ----------
 
+// 任务归属项目记录在 Result.projectId 里（Task 表本身无 project_id 列），
+// 两个读取端点都必须按它过滤，否则会跨项目泄露其他租户的任务。
 func handleGetTask(c *gin.Context) {
+	ctx := getCtx(c)
 	var t models.Task
-	if err := store.DB.First(&t, "id = ?", c.Param("id")).Error; err != nil {
+	if err := store.DB.Where("id = ? AND result->>'projectId' = ?",
+		c.Param("id"), ctx.ProjectID).First(&t).Error; err != nil {
 		fail(c, errs.ENotFound)
 		return
 	}
@@ -169,8 +173,13 @@ func handleGetTask(c *gin.Context) {
 }
 
 func handleListTasks(c *gin.Context) {
+	ctx := getCtx(c)
 	var items []models.Task
-	store.DB.Order("created_at DESC").Limit(100).Find(&items)
+	q := store.DB.Where("result->>'projectId' = ?", ctx.ProjectID)
+	if s := c.Query("status"); s != "" {
+		q = q.Where("status = ?", s)
+	}
+	q.Order("created_at DESC").Limit(100).Find(&items)
 	ok(c, gin.H{"items": items})
 }
 

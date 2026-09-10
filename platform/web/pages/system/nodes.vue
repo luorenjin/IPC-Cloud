@@ -239,8 +239,12 @@ async function selfcheck(row: any) {
       checkingId.value = null
       const fresh = nodes.value.find((n) => n.id === row.id)
       if (!fresh) return
-      if (fresh.status === 'online') toast.success('自检通过：节点「' + fresh.name + '」在线')
-      else toast.error({ title: '自检失败：节点「' + fresh.name + '」不可达', suggest: '请检查 API 地址与端口是否正确、节点服务是否启动、网络是否连通。' })
+      if (fresh.status === 'online') { toast.success('自检通过：节点「' + fresh.name + '」在线'); return }
+      // ACC-02：后端自检失败会带回具体原因（statusReason），优先呈现它而非泛化猜测
+      toast.error({
+        title: '自检失败：节点「' + fresh.name + '」不可达',
+        suggest: fresh.statusReason || '请检查 API 地址与端口是否正确、节点服务是否启动、网络是否连通。'
+      })
     }, 1500)
   } catch (e: any) {
     checkingId.value = null
@@ -538,6 +542,11 @@ onMounted(async () => {
             <div class="flex gap-2"><span class="shrink-0 text-placeholder">权重</span><span class="text-body">{{ detail.node?.weight ?? 100 }}</span></div>
             <div class="flex gap-2"><span class="shrink-0 text-placeholder">状态</span><UiTag :color="statusTag(detail.node?.status).color" dot>{{ statusTag(detail.node?.status).text }}</UiTag></div>
             <div class="flex gap-2"><span class="shrink-0 text-placeholder">最近心跳</span><span class="text-body">{{ ago(detail.node?.lastKeepalive) }}</span></div>
+            <!-- ACC-02：仅离线且后端带回原因时呈现，占整行避免长文本挤压相邻字段 -->
+            <div v-if="detail.node?.status !== 'online' && detail.node?.statusReason" class="col-span-2 flex gap-2">
+              <span class="shrink-0 text-placeholder">离线原因</span>
+              <span class="text-danger">{{ detail.node.statusReason }}</span>
+            </div>
           </div>
         </div>
 

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 
 	"github.com/jetscam/ipccloud/server/internal/adapter"
 	"github.com/jetscam/ipccloud/server/internal/adapter/onvif"
@@ -19,10 +20,9 @@ import (
 
 // ---------- 设备列表 MGR-01/02 ----------
 
-func handleListDevices(c *gin.Context) {
-	ctx := getCtx(c)
-	page, size := pageParams(c)
-	q := store.DB.Model(&models.Device{}).Where("project_id = ? AND deleted_at = 0", ctx.ProjectID)
+// deviceFilters 把设备列表的筛选条件（groupId/status/source/keyword/bulk）应用到查询上。
+// 列表与 CSV 导出共用同一实现，避免两处筛选逻辑漂移（MGR-13：导出必须与当前列表一致）。
+func deviceFilters(c *gin.Context, q *gorm.DB) *gorm.DB {
 	if g := c.Query("groupId"); g != "" {
 		q = q.Where("group_id = ?", g)
 	}
@@ -45,6 +45,14 @@ func handleListDevices(c *gin.Context) {
 				lines, lines, lines)
 		}
 	}
+	return q
+}
+
+func handleListDevices(c *gin.Context) {
+	ctx := getCtx(c)
+	page, size := pageParams(c)
+	q := deviceFilters(c, store.DB.Model(&models.Device{}).
+		Where("project_id = ? AND deleted_at = 0", ctx.ProjectID))
 	var total int64
 	q.Count(&total)
 	var devs []models.Device
@@ -85,10 +93,18 @@ func safeMeta(m models.JSONB) models.JSONB {
 }
 
 // handleExportDevices MGR-13 CSV 导出（不含凭据）。
+// 筛选条件与列表页一致——导出的是"我现在看到的这批设备"，不是全量。
 func handleExportDevices(c *gin.Context) {
 	ctx := getCtx(c)
+	q := store.DB.Model(&models.Device{}).Where("project_id = ? AND deleted_at = 0", ctx.ProjectID)
+	// 勾选了具体行就只导这些行；否则按当前筛选条件导出。
+	if ids := c.Query("ids"); ids != "" {
+		q = q.Where("id IN ?", strings.Split(ids, ","))
+	} else {
+		q = deviceFilters(c, q)
+	}
 	var devs []models.Device
-	store.DB.Where("project_id = ? AND deleted_at = 0", ctx.ProjectID).Find(&devs)
+	q.Order("created_at DESC").Find(&devs)
 	c.Header("Content-Disposition", "attachment; filename=devices.csv")
 	c.Header("Content-Type", "text/csv; charset=utf-8")
 	w := csv.NewWriter(c.Writer)

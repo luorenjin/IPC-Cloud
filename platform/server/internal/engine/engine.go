@@ -352,7 +352,65 @@ func (e *Engine) platformEvent(ev bus.Event, kind string) {
 	createAlarmEvent(ev.ProjectID, ev.DeviceID, ev.ChannelID, kind, "warn", ev.Data, "")
 }
 
-func (e *Engine) taskProgress(ev bus.Event) {}
+// taskProgress 把设备上报的 ota.progress 归集为任务中心的一条任务（P-18）。
+// 设备只报"我升到百分之几"，不带任务号，因此按 设备+固件版本 复用同一条任务记录，
+// 避免每来一帧进度就新建一条。注意：平台侧尚无 OTA 下发端点（MGR-10），
+// 这里只负责持久化设备主动上报的进度，不代表升级可由平台发起。
+func (e *Engine) taskProgress(ev bus.Event) {
+	if ev.DeviceID == "" {
+		return
+	}
+	progress := 0
+	switch v := ev.Data["progress"].(type) {
+	case float64:
+		progress = int(v)
+	case int:
+		progress = v
+	}
+	if progress < 0 {
+		progress = 0
+	} else if progress > 100 {
+		progress = 100
+	}
+
+	// 设备侧状态归一化到任务状态；未知一律按进行中处理。
+	status := "running"
+	switch s, _ := ev.Data["status"].(string); s {
+	case "success", "done", "finished":
+		status, progress = "success", 100
+	case "failed", "error":
+		status = "failed"
+	}
+	errMsg, _ := ev.Data["error"].(string)
+	version, _ := ev.Data["version"].(string)
+
+	var dev models.Device
+	if store.DB.First(&dev, "id = ?", ev.DeviceID).Error != nil {
+		return
+	}
+	title := "固件升级：" + dev.Name
+	result := models.JSONB{"projectId": ev.ProjectID, "deviceId": ev.DeviceID,
+		"title": title, "version": version, "detail": errMsg}
+
+	// 同一设备同一目标版本的进行中任务视为同一条
+	var t models.Task
+	found := store.DB.Where("type = ? AND status = ? AND result->>'deviceId' = ?",
+		"ota", "running", ev.DeviceID).Order("created_at DESC").First(&t).Error == nil
+	if found {
+		t.Status, t.Progress, t.Result, t.UpdatedAt = status, progress, result, models.NowMilli()
+		store.DB.Save(&t)
+	} else {
+		t = models.Task{ID: "tk_" + models.NewID(), Type: "ota", Status: status,
+			Progress: progress, Result: result,
+			CreatedAt: models.NowMilli(), UpdatedAt: models.NowMilli()}
+		store.DB.Create(&t)
+	}
+
+	bus.Default.Publish(bus.Event{Type: "task.progress", ProjectID: ev.ProjectID,
+		DeviceID: ev.DeviceID, Data: map[string]any{
+			"taskId": t.ID, "type": "ota", "status": status, "progress": progress,
+			"title": title, "detail": errMsg}})
+}
 
 func (e *Engine) policyEnabled(projectID, kind string) bool {
 	if projectID == "" {

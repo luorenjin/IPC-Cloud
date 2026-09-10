@@ -263,6 +263,9 @@ type MediaNode struct {
 	Disabled      bool   `gorm:"default:false" json:"disabled"` // 禁用（不参与调度）
 	Weight        int    `gorm:"default:100" json:"weight"`
 	Status        string `gorm:"size:16;default:offline" json:"status"`
+	// StatusReason ACC-02：自检/保活判定为 offline 时的具体原因（连接被拒、超时、secret 错误等），
+	// online 时清空。前端节点页据此呈现失败原因而非只显示"不可达"。
+	StatusReason  string `gorm:"size:256" json:"statusReason"`
 	LastKeepalive int64  `json:"lastKeepalive"`
 	CreatedAt     int64  `json:"createdAt"`
 }
