@@ -45,7 +45,8 @@ const heights = { sm: 'h-7 text-xs', md: 'h-8 text-sm', lg: 'h-10 text-sm' }
     />
     <button
       v-if="clearable && modelValue !== '' && modelValue != null" type="button"
-      class="ml-1 hidden text-placeholder hover:text-body group-hover/ipc:block"
+      aria-label="清空"
+      class="ml-1 hidden rounded-chrome text-placeholder hover:text-body group-hover/ipc:block focus-visible:block"
       @click="emit('update:modelValue', ''); emit('clear')"
     >
       <Icon name="x" :size="13" />

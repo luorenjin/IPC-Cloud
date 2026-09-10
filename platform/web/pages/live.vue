@@ -1,4 +1,7 @@
 <script setup lang="ts">
+// 通道树收起状态：窄屏下画面优先，树可整体收起为一条竖边（响应式，PRD 无固定宽度要求）
+const treeCollapsed = ref(false)
+
 // 实时预览（LIVE-01~07）：通道树（搜索/拖拽/双击）+ 1/4 分屏 + 清晰度 + 抓图 + PTZ（含预置位）
 const api = useApi()
 const toast = useToast()
@@ -190,15 +193,16 @@ function closeAll() {
 // ---------- PTZ 云台控制（LIVE-07） ----------
 const ptzPanel = ref(true)
 const ptzSpeed = ref(4)
+// label 供读屏与 aria-label 使用（纯图标按钮必须有可访问名称）
 const dirs = [
-  { icon: 'arrow-up', rot: -45, pan: -1, tilt: 1, cls: 'nw' },
-  { icon: 'arrow-up', rot: 0, pan: 0, tilt: 1, cls: 'n' },
-  { icon: 'arrow-up', rot: 45, pan: 1, tilt: 1, cls: 'ne' },
-  { icon: 'arrow-left', rot: 0, pan: -1, tilt: 0, cls: 'w' },
-  { icon: 'arrow-right', rot: 0, pan: 1, tilt: 0, cls: 'e' },
-  { icon: 'arrow-down', rot: 45, pan: -1, tilt: -1, cls: 'sw' },
-  { icon: 'arrow-down', rot: 0, pan: 0, tilt: -1, cls: 's' },
-  { icon: 'arrow-down', rot: -45, pan: 1, tilt: -1, cls: 'se' }
+  { icon: 'arrow-up', rot: -45, pan: -1, tilt: 1, cls: 'nw', label: '左上' },
+  { icon: 'arrow-up', rot: 0, pan: 0, tilt: 1, cls: 'n', label: '上' },
+  { icon: 'arrow-up', rot: 45, pan: 1, tilt: 1, cls: 'ne', label: '右上' },
+  { icon: 'arrow-left', rot: 0, pan: -1, tilt: 0, cls: 'w', label: '左' },
+  { icon: 'arrow-right', rot: 0, pan: 1, tilt: 0, cls: 'e', label: '右' },
+  { icon: 'arrow-down', rot: 45, pan: -1, tilt: -1, cls: 'sw', label: '左下' },
+  { icon: 'arrow-down', rot: 0, pan: 0, tilt: -1, cls: 's', label: '下' },
+  { icon: 'arrow-down', rot: -45, pan: 1, tilt: -1, cls: 'se', label: '右下' }
 ]
 // 摇杆九宫格：显式声明方向→网格坐标，贴合真实云台控制器方向布局，不依赖 dirs 数组书写顺序（纯展示）
 const dirGridPos: Record<string, { col: number; row: number }> = {
@@ -268,9 +272,32 @@ async function delPreset(p: any) {
 <template>
   <div class="flex h-[calc(100vh-84px)] gap-3">
     <!-- 左：通道树（搜索 + 在线圆点 + 拖拽 + 上屏信号灯） -->
-    <div class="flex w-58 shrink-0 flex-col overflow-hidden rounded-signal border border-line bg-surface" style="width: 232px">
+    <!-- 收起态只留一条窄边，点击展开；展开态窄屏用较窄宽度 -->
+    <button
+      v-if="treeCollapsed"
+      type="button"
+      class="flex w-8 shrink-0 flex-col items-center justify-center gap-2 rounded-signal border border-line bg-surface text-muted transition-colors hover:border-primary hover:text-primary"
+      aria-label="展开通道列表"
+      :aria-expanded="false"
+      @click="treeCollapsed = false"
+    >
+      <Icon name="chevron-right" :size="14" />
+      <span class="text-[11px] [writing-mode:vertical-rl]">通道</span>
+    </button>
+    <div v-else class="flex w-48 shrink-0 flex-col overflow-hidden rounded-signal border border-line bg-surface lg:w-tree">
       <div class="border-b border-line-soft p-3">
-        <p class="mb-2 text-sm font-semibold text-ink">通道列表</p>
+        <div class="mb-2 flex items-center justify-between">
+          <p class="text-sm font-semibold text-ink">通道列表</p>
+          <button
+            type="button"
+            class="rounded-chrome p-0.5 text-placeholder transition-colors hover:text-primary"
+            aria-label="收起通道列表"
+            :aria-expanded="true"
+            @click="treeCollapsed = true"
+          >
+            <Icon name="chevron-left" :size="14" />
+          </button>
+        </div>
         <UiInput v-model="treeSearch" placeholder="搜索通道" size="sm" clearable><template #prefix><Icon name="search" :size="13" class="text-placeholder" /></template></UiInput>
       </div>
       <div class="min-h-0 flex-1 overflow-y-auto p-2">
@@ -319,7 +346,7 @@ async function delPreset(p: any) {
             <!-- 标题条（LIVE-01：通道名 + 码流 + 关闭） -->
             <div v-if="cell.channel" class="absolute inset-x-0 top-0 flex items-center justify-between bg-gradient-to-b from-black/60 to-transparent px-2.5 py-1.5 opacity-0 transition-opacity group-hover/cell:opacity-100" :class="i === selected ? 'opacity-100' : ''">
               <span class="truncate text-xs text-white">{{ cell.channel.name }}<span class="ml-1.5 text-white/70">{{ cell.profile === 'main' ? '主码流' : '子码流' }}</span></span>
-              <button class="rounded-chrome p-0.5 text-white/70 hover:bg-white/15 hover:text-white" @click.stop="closeCell(cell)">
+              <button type="button" class="rounded-chrome p-0.5 text-white/70 hover:bg-white/15 hover:text-white" :aria-label="`关闭 ${cell.channel.name} 画面`" @click.stop="closeCell(cell)">
                 <Icon name="x" :size="13" />
               </button>
             </div>
@@ -330,21 +357,25 @@ async function delPreset(p: any) {
         <div v-if="ptzPanel && curCell?.channel" class="absolute right-3 top-3 z-10 w-44 rounded-chrome border border-line bg-surface-2 p-3 shadow-pop">
           <div class="mb-2 flex items-center justify-between">
             <span class="truncate text-xs font-medium text-ink">云台 · {{ curCell.channel.name }}</span>
-            <button class="text-placeholder hover:text-body" @click="ptzPanel = false"><Icon name="x" :size="13" /></button>
+            <button type="button" class="rounded-chrome text-placeholder hover:text-body" aria-label="关闭云台面板" @click="ptzPanel = false"><Icon name="x" :size="13" /></button>
           </div>
           <!-- 摇杆：圆形裁切 + 3x3 显式坐标，贴合真实云台控制器方向布局；中心为停止钮 -->
           <div class="mx-auto grid h-28 w-28 grid-cols-3 grid-rows-3 overflow-hidden rounded-full border border-line bg-canvas">
             <button
               v-for="d in dirs" :key="d.cls"
+              type="button"
               class="flex items-center justify-center border border-line-soft/70 text-muted transition-colors hover:bg-primary-soft hover:text-primary active:bg-primary active:text-white"
               :style="{ gridColumn: dirGridPos[d.cls].col, gridRow: dirGridPos[d.cls].row }"
+              :aria-label="`云台向${d.label}`"
               @mousedown.prevent="ptzStart(d)" @mouseup="ptzStop()" @mouseleave="ptzStop()"
             >
               <Icon :name="d.icon" :size="13" :style="{ transform: `rotate(${d.rot}deg)` }" />
             </button>
             <button
+              type="button"
               class="flex items-center justify-center border border-line-soft/70 bg-surface text-primary transition-colors hover:bg-primary-soft active:bg-primary active:text-white"
               style="grid-column: 2; grid-row: 2"
+              aria-label="停止云台"
               title="停止"
               @click="ptzStop()"
             >
@@ -372,7 +403,7 @@ async function delPreset(p: any) {
             <ul v-else class="max-h-24 space-y-0.5 overflow-y-auto">
               <li v-for="p in presets" :key="p.id ?? p.index" class="flex items-center gap-1 rounded-chrome px-1 py-0.5 text-[11px] hover:bg-zone">
                 <button class="min-w-0 flex-1 truncate text-left text-body hover:text-primary" @click="gotoPreset(p)">{{ p.name || ('预置位' + (p.index ?? p.id)) }}</button>
-                <button class="text-placeholder hover:text-danger" @click="delPreset(p)"><Icon name="trash" :size="11" /></button>
+                <button type="button" class="rounded-chrome text-placeholder hover:text-danger" :aria-label="`删除预置位 ${p.name || p.id}`" @click="delPreset(p)"><Icon name="trash" :size="11" /></button>
               </li>
             </ul>
           </div>

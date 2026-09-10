@@ -15,7 +15,7 @@ const emit = defineEmits<{ 'update:modelValue': [v: string] }>()
     <TabsList class="inline-flex items-center rounded-chrome border border-line bg-zone p-0.5">
       <TabsTrigger
         v-for="it in items" :key="it.value" :value="it.value"
-        class="rounded-chrome px-3 py-1 text-xs text-muted outline-none transition-colors data-[state=active]:bg-primary data-[state=active]:text-white data-[state=active]:shadow-sm"
+        class="rounded-chrome px-3 py-1 text-xs text-muted outline-none ipc-focus-ring transition-colors data-[state=active]:bg-primary data-[state=active]:text-white data-[state=active]:shadow-sm"
       >{{ it.label }}</TabsTrigger>
     </TabsList>
     <slot />

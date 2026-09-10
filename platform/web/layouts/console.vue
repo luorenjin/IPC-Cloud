@@ -24,7 +24,7 @@ function onUserMenu(v: string) {
 <template>
   <div class="flex min-h-screen flex-col bg-canvas">
     <!-- 顶栏：仅保留品牌标识与用户菜单，私有化运维工具不需要营销导航 -->
-    <header class="flex h-13 shrink-0 items-center justify-between border-b border-line bg-surface px-6" style="height: 52px">
+    <header class="flex h-bar shrink-0 items-center justify-between border-b border-line bg-surface px-6">
       <div class="flex items-center gap-2.5">
         <span class="flex h-7 w-7 items-center justify-center rounded-signal bg-primary text-sidebar">
           <Icon name="video" :size="16" />

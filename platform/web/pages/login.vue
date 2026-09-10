@@ -69,7 +69,7 @@ async function doLogin() {
             placeholder="请输入密码"
             autocomplete="current-password"
           />
-          <button type="button" class="ml-2 text-placeholder hover:text-body" @click="showPwd = !showPwd">
+          <button type="button" class="ml-2 rounded-chrome text-placeholder hover:text-body" :aria-label="showPwd ? '隐藏密码' : '显示密码'" @click="showPwd = !showPwd">
             <Icon :name="showPwd ? 'eye-off' : 'eye'" :size="16" />
           </button>
         </div>

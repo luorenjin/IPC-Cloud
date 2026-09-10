@@ -1,4 +1,7 @@
 <script setup lang="ts">
+// 通道树收起状态：窄屏下画面优先，树可整体收起为一条竖边（响应式，PRD 无固定宽度要求）
+const treeCollapsed = ref(false)
+
 // 录像回放（REC-01~04/08）：通道树 + 日期(录像高亮) + 存储位置 + 24h 时间轴(三色/缩放/框选下载) + 双源控制
 const api = useApi()
 const route = useRoute()
@@ -371,9 +374,32 @@ onMounted(async () => {
 <template>
   <div class="flex h-[calc(100vh-84px)] gap-3">
     <!-- 左：通道树 -->
-    <div class="flex w-58 shrink-0 flex-col overflow-hidden rounded-signal border border-line bg-surface" style="width: 232px">
+    <!-- 收起态只留一条窄边，点击展开；展开态窄屏用较窄宽度 -->
+    <button
+      v-if="treeCollapsed"
+      type="button"
+      class="flex w-8 shrink-0 flex-col items-center justify-center gap-2 rounded-signal border border-line bg-surface text-muted transition-colors hover:border-primary hover:text-primary"
+      aria-label="展开通道列表"
+      :aria-expanded="false"
+      @click="treeCollapsed = false"
+    >
+      <Icon name="chevron-right" :size="14" />
+      <span class="text-[11px] [writing-mode:vertical-rl]">通道</span>
+    </button>
+    <div v-else class="flex w-48 shrink-0 flex-col overflow-hidden rounded-signal border border-line bg-surface lg:w-tree">
       <div class="border-b border-line-soft p-3">
-        <p class="mb-2 text-sm font-semibold text-ink">选择通道</p>
+        <div class="mb-2 flex items-center justify-between">
+          <p class="text-sm font-semibold text-ink">选择通道</p>
+          <button
+            type="button"
+            class="rounded-chrome p-0.5 text-placeholder transition-colors hover:text-primary"
+            aria-label="收起通道列表"
+            :aria-expanded="true"
+            @click="treeCollapsed = true"
+          >
+            <Icon name="chevron-left" :size="14" />
+          </button>
+        </div>
         <UiInput v-model="treeSearch" placeholder="搜索通道" size="sm" clearable>
           <template #prefix><Icon name="search" :size="13" class="text-placeholder" /></template>
         </UiInput>
@@ -391,7 +417,7 @@ onMounted(async () => {
       <div class="flex flex-wrap items-center gap-3 rounded-signal border border-line bg-surface px-3 py-2">
         <span class="text-sm font-semibold text-ink">{{ curChannelName }}</span>
         <div class="flex items-center gap-1">
-          <button class="flex h-7 w-7 items-center justify-center rounded-chrome border border-line text-muted hover:border-primary hover:text-primary" @click="shiftDay(-1)"><Icon name="chevron-left" :size="14" /></button>
+          <button type="button" class="flex h-7 w-7 items-center justify-center rounded-chrome border border-line text-muted hover:border-primary hover:text-primary" aria-label="前一天" @click="shiftDay(-1)"><Icon name="chevron-left" :size="14" /></button>
           <UiPopover v-model:open="calOpen" width="w-64">
             <template #trigger>
               <button class="flex h-7 items-center gap-1.5 rounded-chrome border border-line bg-surface px-2.5 text-sm text-body hover:border-primary">
@@ -400,9 +426,9 @@ onMounted(async () => {
             </template>
             <div>
               <div class="mb-1 flex items-center justify-between">
-                <button class="rounded-chrome p-1 text-muted hover:bg-zone" @click="calMonth = new Date(calMonth.getFullYear(), calMonth.getMonth() - 1, 1)"><Icon name="chevron-left" :size="14" /></button>
+                <button type="button" class="rounded-chrome p-1 text-muted hover:bg-zone" aria-label="上个月" @click="calMonth = new Date(calMonth.getFullYear(), calMonth.getMonth() - 1, 1)"><Icon name="chevron-left" :size="14" /></button>
                 <span class="text-sm font-medium text-ink">{{ calMonth.getFullYear() }} 年 {{ calMonth.getMonth() + 1 }} 月</span>
-                <button class="rounded-chrome p-1 text-muted hover:bg-zone" @click="calMonth = new Date(calMonth.getFullYear(), calMonth.getMonth() + 1, 1)"><Icon name="chevron-right" :size="14" /></button>
+                <button type="button" class="rounded-chrome p-1 text-muted hover:bg-zone" aria-label="下个月" @click="calMonth = new Date(calMonth.getFullYear(), calMonth.getMonth() + 1, 1)"><Icon name="chevron-right" :size="14" /></button>
               </div>
               <div class="grid grid-cols-7 gap-0.5 text-center text-[11px] text-placeholder">
                 <span v-for="w in ['一', '二', '三', '四', '五', '六', '日']" :key="w" class="py-1">{{ w }}</span>
@@ -426,7 +452,7 @@ onMounted(async () => {
               </p>
             </div>
           </UiPopover>
-          <button class="flex h-7 w-7 items-center justify-center rounded-chrome border border-line text-muted hover:border-primary hover:text-primary" @click="shiftDay(1)"><Icon name="chevron-right" :size="14" /></button>
+          <button type="button" class="flex h-7 w-7 items-center justify-center rounded-chrome border border-line text-muted hover:border-primary hover:text-primary" aria-label="后一天" @click="shiftDay(1)"><Icon name="chevron-right" :size="14" /></button>
         </div>
         <UiSegmented
           :model-value="source" @update:model-value="source = $event as any"

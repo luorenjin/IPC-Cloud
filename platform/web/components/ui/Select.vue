@@ -32,7 +32,7 @@ function onModel(v: any) { emit('update:modelValue', dec(v)) }
 <template>
   <SelectRoot :model-value="inner" :disabled="disabled" :open="open" @update:open="open = $event" @update:model-value="onModel">
     <SelectTrigger
-      class="flex items-center gap-1 rounded-chrome border bg-surface px-2.5 text-left outline-none transition-colors data-[state=open]:border-primary data-[state=open]:ring-1 data-[state=open]:ring-primary/25 disabled:bg-zone disabled:cursor-not-allowed disabled:opacity-60"
+      class="flex items-center gap-1 rounded-chrome border bg-surface px-2.5 text-left outline-none transition-colors ipc-focus-ring data-[state=open]:border-primary data-[state=open]:ring-1 data-[state=open]:ring-primary/25 disabled:bg-zone disabled:cursor-not-allowed disabled:opacity-60"
       :class="[width, heights[size], open ? 'border-primary' : 'border-line hover:border-placeholder']"
     >
       <SelectValue class="truncate text-body data-[placeholder]:text-placeholder" :placeholder="placeholder" />
@@ -46,7 +46,7 @@ function onModel(v: any) { emit('update:modelValue', dec(v)) }
         <SelectViewport class="p-1 max-h-72 overflow-y-auto">
           <SelectItem
             v-for="o in opts" :key="o._v" :value="o._v" :disabled="o.disabled"
-            class="relative flex cursor-pointer select-none items-center rounded py-1.5 pl-7 pr-2 text-sm text-body outline-none data-[highlighted]:bg-primary-soft data-[highlighted]:text-primary data-[disabled]:opacity-45 data-[disabled]:cursor-not-allowed"
+            class="relative flex cursor-pointer select-none items-center rounded py-1.5 pl-7 pr-2 text-sm text-body outline-none ipc-focus-inset data-[highlighted]:bg-primary-soft data-[highlighted]:text-primary data-[disabled]:opacity-45 data-[disabled]:cursor-not-allowed"
           >
             <span class="absolute left-1.5 flex w-4 items-center text-primary">
               <SelectItemIndicator><Icon name="check" :size="13" /></SelectItemIndicator>

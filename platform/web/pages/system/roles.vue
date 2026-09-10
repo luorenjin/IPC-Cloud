@@ -556,6 +556,7 @@ onMounted(async () => {
               <template #status="{ row }">
                 <UiSwitch
                   :model-value="row.status === 'active'" size="sm" :disabled="isSuper(row)"
+                  :aria-label="`启用用户 ${row.username || row.name || row.id}`"
                   @update:model-value="(v: boolean) => toggleUser(row, v)"
                 />
               </template>

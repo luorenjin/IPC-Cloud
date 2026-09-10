@@ -15,7 +15,7 @@ const emit = defineEmits<{ 'update:modelValue': [v: string] }>()
     <TabsList class="flex items-center gap-1 border-b border-line-soft">
       <TabsTrigger
         v-for="it in items" :key="it.value" :value="it.value"
-        class="flex items-center gap-1.5 border-b-2 border-transparent px-3.5 pb-2.5 pt-2 text-sm text-muted outline-none transition-colors hover:text-ink data-[state=active]:border-primary data-[state=active]:font-medium data-[state=active]:text-primary"
+        class="flex items-center gap-1.5 border-b-2 border-transparent px-3.5 pb-2.5 pt-2 text-sm text-muted outline-none ipc-focus-ring transition-colors hover:text-ink data-[state=active]:border-primary data-[state=active]:font-medium data-[state=active]:text-primary"
       >
         {{ it.label }}
         <span v-if="it.badge" class="rounded-full bg-danger px-1.5 text-[10px] leading-4 text-white">{{ it.badge }}</span>

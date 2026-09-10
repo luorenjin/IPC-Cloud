@@ -349,7 +349,7 @@ watch(tab, (v) => { if (v === 'templates') loadTemplates() })
           </div>
         </template>
         <template #enabled="{ row }">
-          <UiSwitch :model-value="!!row.enabled" size="sm" @update:model-value="toggleRule(row, $event)" />
+          <UiSwitch :model-value="!!row.enabled" size="sm" :aria-label="`启用告警规则 ${channelMap[row.channelId] || row.id}`" @update:model-value="toggleRule(row, $event)" />
         </template>
         <template #ops="{ row }">
           <div class="flex items-center justify-center gap-1">

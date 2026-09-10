@@ -24,7 +24,7 @@ const open = ref(false)
           <DropdownMenuSeparator v-if="it.divided" class="my-1 h-px bg-line-soft" />
           <DropdownMenuItem
             :disabled="it.disabled"
-            class="flex cursor-pointer items-center gap-2 rounded px-2.5 py-1.5 text-sm outline-none transition-colors data-[disabled]:cursor-not-allowed data-[disabled]:opacity-45"
+            class="flex cursor-pointer items-center gap-2 rounded px-2.5 py-1.5 text-sm outline-none ipc-focus-inset transition-colors data-[disabled]:cursor-not-allowed data-[disabled]:opacity-45"
             :class="it.danger ? 'text-danger data-[highlighted]:bg-danger-soft' : 'text-body data-[highlighted]:bg-primary-soft data-[highlighted]:text-primary'"
             @select="emit('select', it.value)"
           >{{ it.label }}</DropdownMenuItem>

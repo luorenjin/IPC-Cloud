@@ -375,7 +375,7 @@ onMounted(async () => {
             </div>
 
             <div class="mt-3 flex flex-wrap items-center gap-2 border-t border-line-soft pt-2.5">
-              <UiSwitch :model-value="!!p.enabled" size="sm" @update:model-value="(v: boolean) => toggleProject(p, v)" />
+              <UiSwitch :model-value="!!p.enabled" size="sm" :aria-label="`启用项目 ${p.name || p.id}`" @update:model-value="(v: boolean) => toggleProject(p, v)" />
               <UiButton variant="text" size="sm" class="ml-auto" @click="openProjDlg('edit', p)">重命名</UiButton>
               <UiButton v-if="p.id !== currentProject?.id" variant="text" size="sm" @click="useProject(p)">切换到此项目</UiButton>
               <UiButton

@@ -428,7 +428,7 @@ onMounted(async () => {
       <div class="mb-3 flex items-center justify-between">
         <span class="text-sm font-bold text-ink">设备分组</span>
         <div class="flex items-center gap-1">
-          <button class="rounded-chrome p-1 text-muted transition-colors hover:bg-zone hover:text-primary" title="新增分组" @click="openAddGroup">
+          <button type="button" class="rounded-chrome p-1 text-muted transition-colors hover:bg-zone hover:text-primary" aria-label="新增分组" title="新增分组" @click="openAddGroup">
             <Icon name="plus" :size="15" />
           </button>
           <button
@@ -500,7 +500,7 @@ onMounted(async () => {
 
         <!-- 卡片折叠收起把手 -->
         <div class="flex justify-center border-t border-line-soft pt-1 mt-2">
-          <button class="p-0.5 text-muted transition-colors hover:text-primary" @click="cardCollapsed = !cardCollapsed">
+          <button type="button" class="rounded-chrome p-0.5 text-muted transition-colors hover:text-primary" :aria-label="cardCollapsed ? '展开统计卡片' : '收起统计卡片'" :aria-expanded="!cardCollapsed" @click="cardCollapsed = !cardCollapsed">
             <Icon :name="cardCollapsed ? 'chevron-down' : 'chevron-up'" :size="15" />
           </button>
         </div>
@@ -583,6 +583,7 @@ onMounted(async () => {
                 <th class="py-2.5 px-3 w-8">
                   <UiCheckbox
                     :model-value="selection.length > 0 && selection.length === devices.length"
+                    :aria-label="selection.length === devices.length ? '取消全选' : '全选本页设备'"
                     @update:model-value="selection = selection.length === devices.length ? [] : devices.map(d => d.id)"
                   />
                 </th>
@@ -605,6 +606,7 @@ onMounted(async () => {
                   <td class="py-2.5 px-3">
                     <UiCheckbox
                       :model-value="selection.includes(row.id)"
+                      :aria-label="`选择设备 ${row.name || row.id}`"
                       @update:model-value="selection.includes(row.id) ? selection = selection.filter(id => id !== row.id) : selection.push(row.id)"
                     />
                   </td>
@@ -615,6 +617,8 @@ onMounted(async () => {
                         type="button"
                         class="rounded-chrome p-0.5 text-placeholder transition-transform hover:bg-zone"
                         :class="expandedRow === row.id ? 'rotate-90 text-primary' : ''"
+                        :aria-label="`${expandedRow === row.id ? '收起' : '展开'} ${row.name} 的通道列表`"
+                        :aria-expanded="expandedRow === row.id"
                         title="展开通道列表"
                         @click.stop="toggleExpand(row)"
                       >
@@ -741,7 +745,7 @@ onMounted(async () => {
           <label class="w-24 text-right text-xs font-medium text-muted"><span class="text-danger">*</span> 所属分组</label>
           <div class="flex items-center gap-2 flex-1 text-sm">
             <span class="font-bold text-ink">{{ groupMap[addForm.groupId] || '默认' }}</span>
-            <button class="text-primary hover:text-primary-deep" title="修改所属分组" @click="openAddGroup">
+            <button type="button" class="rounded-chrome text-primary hover:text-primary-deep" aria-label="修改所属分组" title="修改所属分组" @click="openAddGroup">
               <Icon name="edit" :size="13" />
             </button>
           </div>

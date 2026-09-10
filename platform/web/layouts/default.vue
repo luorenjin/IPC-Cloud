@@ -108,6 +108,52 @@ const menu = computed(() => [
   }
 ])
 
+/* ---------------- 侧栏三档形态 ----------------
+ * full  —— 宽屏默认：220px 展开，文字+图标
+ * mini  —— 手动收起：56px 仅图标，靠 title/aria-label 提供名称
+ * drawer—— 窄屏(<1024px)：抽屉浮层，点遮罩或选中条目后关闭
+ * 用户的手动选择记在 localStorage，但窄屏一律走 drawer，不受记忆影响。
+ */
+const sidebarMini = ref(false)
+const drawerOpen = ref(false)
+const isNarrow = ref(false)
+
+let mq: MediaQueryList | null = null
+function syncNarrow(e: { matches: boolean }) {
+  isNarrow.value = e.matches
+  if (!e.matches) drawerOpen.value = false // 回到宽屏时关掉抽屉，避免残留遮罩
+}
+onMounted(() => {
+  try {
+    sidebarMini.value = localStorage.getItem('ipc_sidebar_mini') === '1'
+  } catch {
+    // 隐私模式下 localStorage 可能抛错，用默认展开即可
+  }
+  mq = window.matchMedia('(max-width: 1023px)')
+  syncNarrow(mq)
+  mq.addEventListener('change', syncNarrow)
+})
+onBeforeUnmount(() => mq?.removeEventListener('change', syncNarrow))
+
+function toggleSidebar() {
+  if (isNarrow.value) {
+    drawerOpen.value = !drawerOpen.value
+    return
+  }
+  sidebarMini.value = !sidebarMini.value
+  try {
+    localStorage.setItem('ipc_sidebar_mini', sidebarMini.value ? '1' : '0')
+  } catch {
+    // 记不住就下次重来，不影响本次使用
+  }
+}
+/** 仅在窄屏抽屉态下，选中条目后需要收起抽屉 */
+function afterNavigate() {
+  if (isNarrow.value) drawerOpen.value = false
+}
+/** mini 档不显示文字，分组也无法展开，点击直接进入首个子项 */
+const collapsed = computed(() => sidebarMini.value && !isNarrow.value)
+
 const expanded = reactive<Record<string, boolean>>({})
 function toggleGroup(label: string) { expanded[label] = !expanded[label] }
 function groupActive(m: any) {
@@ -133,45 +179,94 @@ function onUserMenu(v: string) {
 </script>
 
 <template>
-  <div class="flex h-screen overflow-hidden bg-canvas">
+  <div class="flex h-screen overflow-hidden bg-canvas" @keydown.esc="drawerOpen = false">
+    <!-- 键盘用户跳过导航直达正文 -->
+    <a href="#ipc-main" class="ipc-skip-link">跳转到主内容</a>
+
     <!-- 侧栏 -->
-    <aside class="flex w-55 shrink-0 flex-col bg-sidebar" style="width: 220px">
-      <div class="flex h-13 items-center gap-2 border-b border-line px-5" style="height: 52px">
-        <span class="flex h-6 w-6 items-center justify-center rounded-signal bg-primary text-sidebar"><Icon name="video" :size="14" /></span>
-        <span class="text-[17px] font-bold tracking-wide text-ink">IpcCloud</span>
+    <!-- 窄屏抽屉遮罩：点击关闭；Esc 由 @keydown.esc 在根容器处理 -->
+    <div
+      v-if="isNarrow && drawerOpen"
+      class="fixed inset-0 z-40 bg-black/60"
+      @click="drawerOpen = false"
+    />
+
+    <!-- 侧栏：宽屏 full/mini 两档，窄屏为抽屉浮层 -->
+    <aside
+      class="flex shrink-0 flex-col bg-sidebar transition-[width] duration-200"
+      :class="[
+        isNarrow
+          ? ['fixed inset-y-0 left-0 z-50 w-sidebar shadow-pop', drawerOpen ? '' : '-translate-x-full']
+          : (collapsed ? 'w-sidebar-mini' : 'w-sidebar')
+      ]"
+      :inert="isNarrow && !drawerOpen ? true : undefined"
+    >
+      <div class="flex h-bar items-center gap-2 border-b border-line" :class="collapsed ? 'justify-center px-0' : 'px-5'">
+        <span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-signal bg-primary text-sidebar"><Icon name="video" :size="14" /></span>
+        <span v-if="!collapsed" class="text-[17px] font-bold tracking-wide text-ink">IpcCloud</span>
       </div>
-      <nav class="flex-1 overflow-y-auto py-2">
+      <nav class="flex-1 overflow-y-auto py-2" aria-label="主导航">
         <template v-for="m in menu" :key="m.label">
-          <div
+          <!-- 单条目：语义上是"去某处"，用链接而非按钮 -->
+          <NuxtLink
             v-if="!m.children"
-            class="relative mx-2 flex cursor-pointer items-center gap-2.5 rounded-signal px-3 py-2 text-sm transition-colors"
-            :class="isActive(m.path) ? 'bg-sidebar-hover font-medium text-ink' : 'text-sidebar-text hover:bg-sidebar-hover hover:text-ink'"
-            @click="navigateTo(m.path)"
+            :to="m.path"
+            :title="collapsed ? m.label : undefined"
+            :aria-label="collapsed ? m.label : undefined"
+            :aria-current="isActive(m.path) ? 'page' : undefined"
+            class="relative mx-2 flex items-center gap-2.5 rounded-signal py-2 text-sm transition-colors"
+            :class="[
+              collapsed ? 'justify-center px-0' : 'px-3',
+              isActive(m.path) ? 'bg-sidebar-hover font-medium text-ink' : 'text-sidebar-text hover:bg-sidebar-hover hover:text-ink'
+            ]"
+            @click="afterNavigate"
           >
             <span class="absolute left-0 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-full bg-primary transition-opacity" :class="isActive(m.path) ? 'opacity-100' : 'opacity-0'" />
-            <Icon :name="m.icon" :size="16" :class="isActive(m.path) ? 'text-primary' : ''" />{{ m.label }}
-            <span v-if="m.badge" class="ml-auto rounded-full bg-danger px-1.5 text-[10px] leading-4 text-white">{{ m.badge > 99 ? '99+' : m.badge }}</span>
-          </div>
-          <template v-else>
-            <div
-              class="mx-2 flex cursor-pointer items-center gap-2.5 rounded-signal px-3 py-2 text-sm transition-colors"
-              :class="groupActive(m) ? 'text-ink' : 'text-sidebar-text hover:bg-sidebar-hover hover:text-ink'"
-              @click="toggleGroup(m.label)"
+            <Icon :name="m.icon" :size="16" :class="isActive(m.path) ? 'text-primary' : ''" />
+            <template v-if="!collapsed">{{ m.label }}</template>
+            <span
+              v-if="m.badge"
+              class="rounded-full bg-danger text-[10px] leading-4 text-white"
+              :class="collapsed ? 'absolute right-1 top-1 h-1.5 w-1.5 p-0' : 'ml-auto px-1.5'"
             >
-              <Icon :name="m.icon" :size="16" :class="groupActive(m) ? 'text-primary' : ''" />{{ m.label }}
-              <Icon name="chevron-down" :size="13" class="ml-auto transition-transform" :class="expanded[m.label] ? '' : '-rotate-90'" />
-            </div>
-            <div v-show="expanded[m.label]" class="mb-1 ml-4 border-l border-line pl-2">
-              <div
+              <template v-if="!collapsed">{{ m.badge > 99 ? '99+' : m.badge }}</template>
+              <span v-else class="sr-only">{{ m.badge }} 项待办</span>
+            </span>
+          </NuxtLink>
+
+          <template v-else>
+            <!-- 分组头：展开/收起是状态切换，用按钮并声明 aria-expanded -->
+            <button
+              type="button"
+              class="mx-2 flex w-[calc(100%-1rem)] items-center gap-2.5 rounded-signal py-2 text-sm transition-colors"
+              :class="[
+                collapsed ? 'justify-center px-0' : 'px-3',
+                groupActive(m) ? 'text-ink' : 'text-sidebar-text hover:bg-sidebar-hover hover:text-ink'
+              ]"
+              :title="collapsed ? m.label : undefined"
+              :aria-label="collapsed ? m.label : undefined"
+              :aria-expanded="collapsed ? undefined : !!expanded[m.label]"
+              @click="collapsed ? navigateTo(m.children[0].path) : toggleGroup(m.label)"
+            >
+              <Icon :name="m.icon" :size="16" :class="groupActive(m) ? 'text-primary' : ''" />
+              <template v-if="!collapsed">
+                {{ m.label }}
+                <Icon name="chevron-down" :size="13" class="ml-auto transition-transform" :class="expanded[m.label] ? '' : '-rotate-90'" />
+              </template>
+            </button>
+            <div v-show="expanded[m.label] && !collapsed" class="mb-1 ml-4 border-l border-line pl-2">
+              <NuxtLink
                 v-for="s in m.children" :key="s.path"
-                class="relative flex cursor-pointer items-center justify-between rounded-signal px-3 py-1.5 text-[13px] transition-colors"
+                :to="s.path"
+                :aria-current="isActive(s.path) ? 'page' : undefined"
+                class="relative flex items-center justify-between rounded-signal px-3 py-1.5 text-[13px] transition-colors"
                 :class="isActive(s.path) ? 'bg-sidebar-hover font-medium text-ink' : 'text-sidebar-text hover:bg-sidebar-hover hover:text-ink'"
-                @click="navigateTo(s.path)"
+                @click="afterNavigate"
               >
                 <span class="absolute -left-2 top-1/2 h-3.5 w-0.5 -translate-y-1/2 rounded-full bg-primary transition-opacity" :class="isActive(s.path) ? 'opacity-100' : 'opacity-0'" />
                 <span>{{ s.label }}</span>
                 <span v-if="s.badge" class="rounded-full bg-danger px-1.5 text-[10px] leading-4 text-white">{{ s.badge > 99 ? '99+' : s.badge }}</span>
-              </div>
+              </NuxtLink>
             </div>
           </template>
         </template>
@@ -180,15 +275,16 @@ function onUserMenu(v: string) {
 
     <!-- 主区 -->
     <div class="flex min-w-0 flex-1 flex-col">
-      <header class="flex h-13 shrink-0 items-center gap-3 border-b border-line bg-surface px-4" style="height: 52px">
-        <!-- 返回首页按钮 -->
+      <header class="flex h-bar shrink-0 items-center gap-3 border-b border-line bg-surface px-4">
+        <!-- 侧栏开关：宽屏切 mini/full，窄屏开合抽屉 -->
         <button
-          v-if="route.path !== '/'"
           type="button"
-          class="flex items-center gap-1 rounded-chrome border border-line bg-surface px-2.5 py-1 text-xs text-muted hover:border-primary hover:text-primary transition-colors"
-          @click="navigateTo('/')"
+          class="rounded-chrome p-1.5 text-muted transition-colors hover:bg-zone hover:text-primary"
+          :aria-label="isNarrow ? (drawerOpen ? '关闭导航' : '打开导航') : (collapsed ? '展开侧栏' : '收起侧栏')"
+          :aria-expanded="isNarrow ? drawerOpen : !collapsed"
+          @click="toggleSidebar"
         >
-          <Icon name="chevron-left" :size="13" />返回首页
+          <Icon name="panel-left" :size="17" />
         </button>
 
         <div class="flex items-center gap-1.5">
@@ -200,6 +296,7 @@ function onUserMenu(v: string) {
           <button
             type="button"
             class="p-1.5 rounded-chrome text-muted hover:bg-zone hover:text-primary"
+            aria-label="所有企业及项目"
             title="所有企业及项目"
             @click="navigateTo('/console')"
           >
@@ -216,15 +313,16 @@ function onUserMenu(v: string) {
             />
           </div>
           <div v-if="searchOpen && searchResults.length" class="absolute left-0 top-9 z-50 w-72 rounded-chrome border border-line bg-surface-2 p-1 shadow-pop">
-            <div
+            <button
               v-for="(r, i) in searchResults" :key="i"
-              class="flex cursor-pointer items-center gap-2 rounded px-2.5 py-1.5 text-sm hover:bg-primary-soft"
+              type="button"
+              class="flex w-full items-center gap-2 rounded px-2.5 py-1.5 text-left text-sm hover:bg-primary-soft"
               @click="goto(r)"
             >
               <Icon name="video" :size="14" class="text-placeholder" />
               <span class="truncate">{{ r.label }}</span>
               <span v-if="r.sub" class="ml-auto text-xs text-placeholder">{{ r.sub }}</span>
-            </div>
+            </button>
           </div>
         </div>
 
@@ -238,14 +336,14 @@ function onUserMenu(v: string) {
           </UiTooltip>
           <!-- 任务中心 -->
           <UiTooltip :label="t('nav.tasks')">
-            <button class="relative text-muted transition-colors hover:text-primary" @click="taskOpen = true">
+            <button type="button" class="relative rounded-chrome text-muted transition-colors hover:text-primary" :aria-label="t('nav.tasks')" @click="taskOpen = true">
               <Icon name="list" :size="18" />
               <span v-if="runningTasks()" class="absolute -right-1 -top-1 h-2 w-2 rounded-full bg-primary" />
             </button>
           </UiTooltip>
           <!-- 消息 -->
           <UiBadge :value="unread" class="mt-1">
-            <button class="text-muted transition-colors hover:text-primary" @click="navigateTo('/alarms')">
+            <button type="button" class="rounded-chrome text-muted transition-colors hover:text-primary" :aria-label="unread ? t('nav.messageCenter') + '，' + unread + ' 条未读' : t('nav.messageCenter')" @click="navigateTo('/alarms')">
               <Icon name="bell" :size="18" />
             </button>
           </UiBadge>
@@ -259,7 +357,7 @@ function onUserMenu(v: string) {
         </div>
       </header>
 
-      <main class="min-h-0 flex-1 overflow-auto p-4"><slot /></main>
+      <main id="ipc-main" tabindex="-1" class="min-h-0 flex-1 overflow-auto p-4"><slot /></main>
     </div>
 
     <!-- 任务中心抽屉（P-18） -->

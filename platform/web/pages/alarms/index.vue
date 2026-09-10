@@ -262,7 +262,12 @@ onMounted(() => {
               <span class="mx-auto block h-5 w-1 rounded-full" :class="levelBarClass(row.level)" />
             </template>
             <template #snapshot="{ row }">
-              <img v-if="row.snapshotUrl" :src="row.snapshotUrl" class="h-6 w-9 rounded-signal object-cover cursor-pointer hover:opacity-80 mx-auto" @click.stop="openDetail(row)" alt="抓拍" />
+              <button
+                v-if="row.snapshotUrl" type="button" class="mx-auto block rounded-signal"
+                aria-label="查看告警详情" @click.stop="openDetail(row)"
+              >
+                <img :src="row.snapshotUrl" class="h-6 w-9 rounded-signal object-cover hover:opacity-80" alt="告警抓拍" />
+              </button>
               <span v-else class="text-xs text-placeholder">—</span>
             </template>
             <template #ts="{ row }">{{ fmt(row.ts) }}</template>

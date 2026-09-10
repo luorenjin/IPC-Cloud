@@ -20,9 +20,16 @@ const props = withDefaults(defineProps<{
   selection?: any[]
   empty?: string
   dense?: boolean
-}>(), { rowKey: 'id', loading: false, selectable: false, empty: '暂无数据', dense: false })
+  /** 行的可读名称字段，用于复选框的可访问名称（读屏会念"选择 摄像头A"） */
+  rowLabelKey?: string
+}>(), { rowKey: 'id', loading: false, selectable: false, empty: '暂无数据', dense: false, rowLabelKey: 'name' })
 
 const emit = defineEmits<{ 'update:selection': [v: any[]] }>()
+
+/** 行名称：优先 rowLabelKey 指定字段，缺失时退回主键，保证复选框始终有名称 */
+function rowLabel(row: any): string {
+  return String(row?.[props.rowLabelKey] ?? row?.[props.rowKey] ?? '该行')
+}
 
 const selected = computed(() => props.selection || [])
 const allChecked = computed(() => props.rows.length > 0 && selected.value.length === props.rows.length)
@@ -47,7 +54,8 @@ function toggleAll() {
           <th v-if="selectable" class="w-10 border-b border-line px-3 py-2.5">
             <CheckboxRoot
               :model-value="allChecked ? true : someChecked ? 'indeterminate' : false"
-              class="flex h-4 w-4 items-center justify-center rounded-sm border border-line bg-surface outline-none transition-colors data-[state=checked]:border-primary data-[state=checked]:bg-primary data-[state=indeterminate]:border-primary"
+              :aria-label="allChecked ? '取消全选' : '全选本页'"
+              class="flex h-4 w-4 items-center justify-center rounded-sm border border-line bg-surface outline-none ipc-focus-ring transition-colors data-[state=checked]:border-primary data-[state=checked]:bg-primary data-[state=indeterminate]:border-primary"
               @update:model-value="toggleAll"
             >
               <CheckboxIndicator class="text-white">
@@ -69,7 +77,8 @@ function toggleAll() {
           <td v-if="selectable" class="border-b border-line-soft px-3" :class="dense ? 'py-1.5' : 'py-2.5'">
             <CheckboxRoot
               :model-value="isChecked(row)"
-              class="flex h-4 w-4 items-center justify-center rounded-sm border border-line bg-surface outline-none transition-colors data-[state=checked]:border-primary data-[state=checked]:bg-primary"
+              :aria-label="`选择 ${rowLabel(row)}`"
+              class="flex h-4 w-4 items-center justify-center rounded-sm border border-line bg-surface outline-none ipc-focus-ring transition-colors data-[state=checked]:border-primary data-[state=checked]:bg-primary"
               @update:model-value="toggleRow(row)"
             >
               <CheckboxIndicator class="text-white"><Icon name="check" :size="11" :stroke="3" /></CheckboxIndicator>

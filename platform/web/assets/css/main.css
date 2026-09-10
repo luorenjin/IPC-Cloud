@@ -65,6 +65,14 @@
   --radius-chrome: 6px;
   --radius-signal: 2px;
 
+  /* 壳体尺寸：此前写成 w-55 / w-58 / h-13 —— 这三个类在 Tailwind v4 默认
+     spacing 中并不存在，全靠紧随其后的 inline style 兜底，样式来源分裂。
+     改为真实令牌后 w-sidebar / h-bar / w-tree 即可直接使用。 */
+  --spacing-sidebar: 220px;   /* 侧栏展开宽 */
+  --spacing-sidebar-mini: 56px; /* 侧栏图标档宽 */
+  --spacing-bar: 52px;        /* 顶栏 / 侧栏头高 */
+  --spacing-tree: 232px;      /* 直播/回放通道树宽 */
+
   /* 深底阴影基本不可见，改用描边 + 极轻内部高光表达层级；弹层用更强的黑色扩散阴影表达"浮起" */
   --shadow-card: inset 0 1px 0 rgba(255, 255, 255, 0.03);
   --shadow-pop: 0 12px 32px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.04);
@@ -143,3 +151,90 @@ body {
 .ipc-anim-slide-right-out { animation: ipc-slide-right-out 0.18s ease-in both; }
 .ipc-anim-toast-in { animation: ipc-toast-in 0.18s ease-out; }
 .ipc-spin { animation: ipc-spin 0.8s linear infinite; }
+
+/* ---------------- 可访问性 ---------------- */
+
+/*
+ * 键盘焦点环。深色控制室场景下值班员大量使用键盘，看不见焦点即不可用，
+ * 因此这不只是合规要求。
+ *
+ * 组件普遍写了 outline-none 去掉浏览器默认焦点框（因为默认框与描边体系冲突），
+ * 但没有补替代样式。这里给所有可交互元素兜底一个信号色焦点环：
+ * 用 :focus-visible 而非 :focus，鼠标点击不会触发，只在键盘导航时出现。
+ *
+ * box-shadow 而非 outline：深底上 outline 会被相邻元素的边框裁切，
+ * 且无法跟随 rounded-chrome/rounded-signal 的圆角。
+ */
+:where(a, button, input, select, textarea, summary, [tabindex]):focus-visible,
+:where([role='button'], [role='menuitem'], [role='option'], [role='tab'], [role='switch'], [role='checkbox'], [role='radio']):focus-visible {
+  outline: none;
+  box-shadow:
+    0 0 0 1px var(--color-canvas),
+    0 0 0 3px var(--color-primary);
+  border-radius: inherit;
+}
+
+/*
+ * 显式焦点环工具类。
+ * 上面的 :where() 兜底规则优先级为 0，容易被组件自身的 focus 样式覆盖；
+ * Reka 组件渲染出的元素也不一定命中上述选择器。对确实需要焦点可见的
+ * 交互控件（复选框、开关、下拉项、标签页、滑块…）显式加这个类。
+ */
+.ipc-focus-ring:focus-visible {
+  outline: none;
+  box-shadow:
+    0 0 0 1px var(--color-canvas),
+    0 0 0 3px var(--color-primary);
+}
+/* 弹层内部条目：外层已有描边，用内嵌环避免与弹层边界叠加显得脏 */
+.ipc-focus-inset:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--color-primary);
+}
+
+/* 跳转到主内容：键盘用户不必每次都 Tab 过整个侧栏 */
+.ipc-skip-link {
+  position: fixed;
+  top: 8px;
+  left: 8px;
+  z-index: 100;
+  transform: translateY(-200%);
+  padding: 8px 14px;
+  border-radius: var(--radius-chrome);
+  background: var(--color-primary);
+  color: #04211f;
+  font-size: 13px;
+  font-weight: 500;
+}
+.ipc-skip-link:focus {
+  transform: translateY(0);
+}
+
+/* 仅供读屏：视觉隐藏但保留在无障碍树中 */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border-width: 0;
+}
+
+/*
+ * 尊重系统的"减少动态效果"设置：前庭功能障碍用户会因位移/缩放动画不适。
+ * 保留极短时长而非 0s——完全去掉过渡会让状态切换显得突兀，
+ * 也会让某些依赖 animationend 的组件（Reka 弹层退出）无法收到事件。
+ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

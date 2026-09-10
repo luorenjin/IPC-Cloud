@@ -318,7 +318,7 @@ onMounted(async () => {
               </div>
               <span class="text-right text-sm text-body">默认录像策略</span>
               <div class="flex flex-wrap items-center gap-2">
-                <UiSwitch v-model="form.recordDefaults.enabled" />
+                <UiSwitch v-model="form.recordDefaults.enabled" aria-label="新设备默认开启录像" />
                 <span class="text-xs text-placeholder">新接入设备的通道自动套用录像计划（ADD-09），仅对本项目生效</span>
                 <template v-if="form.recordDefaults.enabled">
                   <div class="flex w-full items-center gap-2 pt-1">
@@ -341,7 +341,7 @@ onMounted(async () => {
               </div>
               <span class="text-right text-sm text-body">默认告警策略</span>
               <div class="flex flex-wrap items-center gap-2">
-                <UiSwitch v-model="form.alarmDefaults.enabled" />
+                <UiSwitch v-model="form.alarmDefaults.enabled" aria-label="新设备默认开启告警" />
                 <span class="text-xs text-placeholder">新接入设备的通道自动套用告警规则（ADD-09），仅对本项目生效</span>
                 <template v-if="form.alarmDefaults.enabled">
                   <div class="flex w-full flex-wrap items-center gap-2 pt-1">

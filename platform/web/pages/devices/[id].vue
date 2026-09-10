@@ -384,7 +384,7 @@ onMounted(load)
           >
             <template #no="{ row }">{{ row.channelNo ?? row.num ?? row.channel ?? '—' }}</template>
             <template #enabled="{ row }">
-              <UiSwitch :model-value="!!row.enabled" size="sm" @update:model-value="toggleCh(row, $event)" />
+              <UiSwitch :model-value="!!row.enabled" size="sm" :aria-label="`启用通道 ${row.name || row.id}`" @update:model-value="toggleCh(row, $event)" />
             </template>
             <template #stream="{ row }"><UiTag :color="streamInfo(row).color as any">{{ streamInfo(row).label }}</UiTag></template>
             <template #cover="{ row }">

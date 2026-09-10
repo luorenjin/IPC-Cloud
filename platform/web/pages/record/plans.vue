@@ -232,7 +232,7 @@ onMounted(() => {
           <UiTag :color="row.profile === 'sub' ? 'info' : 'primary'" plain>{{ PROFILE_MAP[row.profile] || row.profile }}</UiTag>
         </template>
         <template #enabled="{ row }">
-          <UiSwitch :model-value="!!row.enabled" size="sm" @update:model-value="togglePlan(row, $event)" />
+          <UiSwitch :model-value="!!row.enabled" size="sm" :aria-label="`启用录像计划 ${row.name || row.id}`" @update:model-value="togglePlan(row, $event)" />
         </template>
         <template #ops="{ row }">
           <div class="flex items-center justify-center gap-1">
