@@ -6,6 +6,7 @@ const treeCollapsed = ref(false)
 const api = useApi()
 const toast = useToast()
 const route = useRoute()
+const { t } = useI18n()
 
 // ---------- 通道树数据（两级：设备 → 通道） ----------
 interface Channel {
@@ -47,7 +48,7 @@ async function loadTree() {
     devices.value = dRes.items || dRes || []
     channels.value = cRes.items || cRes || []
   } catch (e: any) {
-    toastApiError(e, '通道加载失败')
+    toastApiError(e, t('live.msg.treeLoadFailed'))
   }
 }
 
@@ -151,7 +152,7 @@ async function playInto(cell: Cell, ch: Channel) {
   } catch (e: any) {
     cell.channel = null
     cell.url = ''
-    toastApiError(e, '起流失败')
+    toastApiError(e, t('live.msg.playFailed'))
   }
 }
 
@@ -197,7 +198,7 @@ function fullscreen() {
 function doSnapshot() {
   const p = players.value[selected.value]
   if (p?.snapshot) p.snapshot()
-  else toast.warning('当前画面不可截图')
+  else toast.warning(t('live.msg.snapshotUnavailable'))
 }
 function closeAll() {
   cells.value.forEach((c) => { stopChannel(c.channel); c.channel = null; c.url = '' })
@@ -209,14 +210,14 @@ const ptzPanel = ref(true)
 const ptzSpeed = ref(4)
 // label 供读屏与 aria-label 使用（纯图标按钮必须有可访问名称）
 const dirs = [
-  { icon: 'arrow-up', rot: -45, pan: -1, tilt: 1, cls: 'nw', label: '左上' },
-  { icon: 'arrow-up', rot: 0, pan: 0, tilt: 1, cls: 'n', label: '上' },
-  { icon: 'arrow-up', rot: 45, pan: 1, tilt: 1, cls: 'ne', label: '右上' },
-  { icon: 'arrow-left', rot: 0, pan: -1, tilt: 0, cls: 'w', label: '左' },
-  { icon: 'arrow-right', rot: 0, pan: 1, tilt: 0, cls: 'e', label: '右' },
-  { icon: 'arrow-down', rot: 45, pan: -1, tilt: -1, cls: 'sw', label: '左下' },
-  { icon: 'arrow-down', rot: 0, pan: 0, tilt: -1, cls: 's', label: '下' },
-  { icon: 'arrow-down', rot: -45, pan: 1, tilt: -1, cls: 'se', label: '右下' }
+  { icon: 'arrow-up', rot: -45, pan: -1, tilt: 1, cls: 'nw', label: 'live.ptz.upLeft' },
+  { icon: 'arrow-up', rot: 0, pan: 0, tilt: 1, cls: 'n', label: 'live.ptz.up' },
+  { icon: 'arrow-up', rot: 45, pan: 1, tilt: 1, cls: 'ne', label: 'live.ptz.upRight' },
+  { icon: 'arrow-left', rot: 0, pan: -1, tilt: 0, cls: 'w', label: 'live.ptz.left' },
+  { icon: 'arrow-right', rot: 0, pan: 1, tilt: 0, cls: 'e', label: 'live.ptz.right' },
+  { icon: 'arrow-down', rot: 45, pan: -1, tilt: -1, cls: 'sw', label: 'live.ptz.downLeft' },
+  { icon: 'arrow-down', rot: 0, pan: 0, tilt: -1, cls: 's', label: 'live.ptz.down' },
+  { icon: 'arrow-down', rot: -45, pan: 1, tilt: -1, cls: 'se', label: 'live.ptz.downRight' }
 ]
 // 摇杆九宫格：显式声明方向→网格坐标，贴合真实云台控制器方向布局，不依赖 dirs 数组书写顺序（纯展示）
 const dirGridPos: Record<string, { col: number; row: number }> = {
@@ -231,7 +232,7 @@ async function ptzCmd(body: any) {
   try {
     await api.post(`/channels/${ch.id}/ptz`, body)
   } catch (e: any) {
-    toastApiError(e, '云台指令失败')
+    toastApiError(e, t('live.msg.ptzFailed'))
   }
 }
 function ptzStart(d: any) {
@@ -263,23 +264,23 @@ async function addPreset() {
   const ch = curCell.value?.channel
   if (!ch) return
   try {
-    await api.post(`/channels/${ch.id}/ptz/presets`, { name: presetName.value || ('预置位' + (presets.value.length + 1)) })
-    toast.success('预置位已保存')
+    await api.post(`/channels/${ch.id}/ptz/presets`, { name: presetName.value || t('live.ptz.presetDefaultName', { n: presets.value.length + 1 }) })
+    toast.success(t('live.msg.presetSaved'))
     presetName.value = ''
     loadPresets()
-  } catch (e: any) { toastApiError(e, '保存失败') }
+  } catch (e: any) { toastApiError(e, t('live.msg.presetSaveFailed')) }
 }
 async function gotoPreset(p: any) {
   const ch = curCell.value?.channel
   if (!ch) return
-  try { await api.post(`/channels/${ch.id}/ptz/preset/goto`, { id: p.id ?? p.index }) } catch (e: any) { toastApiError(e, '调用失败') }
+  try { await api.post(`/channels/${ch.id}/ptz/preset/goto`, { id: p.id ?? p.index }) } catch (e: any) { toastApiError(e, t('live.msg.presetGotoFailed')) }
 }
 async function delPreset(p: any) {
   const ch = curCell.value?.channel
   if (!ch) return
-  const ok = await useConfirm().ask({ title: '删除预置位', message: `确定删除「${p.name || p.id}」？`, danger: true })
+  const ok = await useConfirm().ask({ title: t('live.ptz.presetDeleteTitle'), message: t('live.ptz.presetDeleteConfirm', { name: p.name || p.id }), danger: true })
   if (!ok) return
-  try { await api.request(`/channels/${ch.id}/ptz/presets/${p.id ?? p.index}`, { method: 'DELETE' }); loadPresets() } catch (e: any) { toastApiError(e, '删除失败') }
+  try { await api.request(`/channels/${ch.id}/ptz/presets/${p.id ?? p.index}`, { method: 'DELETE' }); loadPresets() } catch (e: any) { toastApiError(e, t('live.msg.presetDeleteFailed')) }
 }
 </script>
 
@@ -291,28 +292,28 @@ async function delPreset(p: any) {
       v-if="treeCollapsed"
       type="button"
       class="flex w-8 shrink-0 flex-col items-center justify-center gap-2 rounded-signal border border-line bg-surface text-muted transition-colors hover:border-primary hover:text-primary"
-      aria-label="展开通道列表"
+      :aria-label="t('live.tree.expand')"
       :aria-expanded="false"
       @click="treeCollapsed = false"
     >
       <Icon name="chevron-right" :size="14" />
-      <span class="text-[11px] [writing-mode:vertical-rl]">通道</span>
+      <span class="text-[11px] [writing-mode:vertical-rl]">{{ t('live.tree.collapsedLabel') }}</span>
     </button>
     <div v-else class="flex w-48 shrink-0 flex-col overflow-hidden rounded-signal border border-line bg-surface lg:w-tree">
       <div class="border-b border-line-soft p-3">
         <div class="mb-2 flex items-center justify-between">
-          <p class="text-sm font-semibold text-ink">通道列表</p>
+          <p class="text-sm font-semibold text-ink">{{ t('live.tree.title') }}</p>
           <button
             type="button"
             class="rounded-chrome p-0.5 text-placeholder transition-colors hover:text-primary"
-            aria-label="收起通道列表"
+            :aria-label="t('live.tree.collapse')"
             :aria-expanded="true"
             @click="treeCollapsed = true"
           >
             <Icon name="chevron-left" :size="14" />
           </button>
         </div>
-        <UiInput v-model="treeSearch" placeholder="搜索通道" size="sm" clearable><template #prefix><Icon name="search" :size="13" class="text-placeholder" /></template></UiInput>
+        <UiInput v-model="treeSearch" :placeholder="t('live.tree.searchPlaceholder')" size="sm" clearable><template #prefix><Icon name="search" :size="13" class="text-placeholder" /></template></UiInput>
       </div>
       <div class="min-h-0 flex-1 overflow-y-auto p-2">
         <UiTree :nodes="treeData" :search="treeSearch" @select="onNodeClick">
@@ -332,7 +333,7 @@ async function delPreset(p: any) {
             </span>
           </template>
         </UiTree>
-        <UiEmptyState v-if="!treeData.length" text="暂无通道" icon="video" />
+        <UiEmptyState v-if="!treeData.length" :text="t('live.tree.empty')" icon="video" />
       </div>
     </div>
 
@@ -354,13 +355,13 @@ async function delPreset(p: any) {
             />
             <div v-else class="flex h-full flex-col items-center justify-center gap-2 text-placeholder">
               <Icon name="video" :size="30" :stroke="1.4" />
-              <span class="text-xs">双击左侧通道或拖拽到此处播放</span>
+              <span class="text-xs">{{ t('live.player.dropHint') }}</span>
             </div>
 
             <!-- 标题条（LIVE-01：通道名 + 码流 + 关闭） -->
             <div v-if="cell.channel" class="absolute inset-x-0 top-0 flex items-center justify-between bg-gradient-to-b from-black/60 to-transparent px-2.5 py-1.5 opacity-0 transition-opacity group-hover/cell:opacity-100" :class="i === selected ? 'opacity-100' : ''">
-              <span class="truncate text-xs text-white">{{ cell.channel.name }}<span class="ml-1.5 text-white/70">{{ cell.profile === 'main' ? '主码流' : '子码流' }}</span></span>
-              <button type="button" class="rounded-chrome p-0.5 text-white/70 hover:bg-white/15 hover:text-white" :aria-label="`关闭 ${cell.channel.name} 画面`" @click.stop="closeCell(cell)">
+              <span class="truncate text-xs text-white">{{ cell.channel.name }}<span class="ml-1.5 text-white/70">{{ cell.profile === 'main' ? t('live.player.mainStream') : t('live.player.subStream') }}</span></span>
+              <button type="button" class="rounded-chrome p-0.5 text-white/70 hover:bg-white/15 hover:text-white" :aria-label="t('live.player.closeCell', { name: cell.channel.name })" @click.stop="closeCell(cell)">
                 <Icon name="x" :size="13" />
               </button>
             </div>
@@ -370,8 +371,8 @@ async function delPreset(p: any) {
         <!-- PTZ 浮动面板：九宫格摇杆造型 -->
         <div v-if="ptzPanel && curCell?.channel" class="absolute right-3 top-3 z-10 w-44 rounded-chrome border border-line bg-surface-2 p-3 shadow-pop">
           <div class="mb-2 flex items-center justify-between">
-            <span class="truncate text-xs font-medium text-ink">云台 · {{ curCell.channel.name }}</span>
-            <button type="button" class="rounded-chrome text-placeholder hover:text-body" aria-label="关闭云台面板" @click="ptzPanel = false"><Icon name="x" :size="13" /></button>
+            <span class="truncate text-xs font-medium text-ink">{{ t('live.ptz.panelTitle', { name: curCell.channel.name }) }}</span>
+            <button type="button" class="rounded-chrome text-placeholder hover:text-body" :aria-label="t('live.ptz.closePanel')" @click="ptzPanel = false"><Icon name="x" :size="13" /></button>
           </div>
           <!-- 摇杆：圆形裁切 + 3x3 显式坐标，贴合真实云台控制器方向布局；中心为停止钮 -->
           <div class="mx-auto grid h-28 w-28 grid-cols-3 grid-rows-3 overflow-hidden rounded-full border border-line bg-canvas">
@@ -380,7 +381,7 @@ async function delPreset(p: any) {
               type="button"
               class="flex items-center justify-center border border-line-soft/70 text-muted transition-colors hover:bg-primary-soft hover:text-primary active:bg-primary active:text-white"
               :style="{ gridColumn: dirGridPos[d.cls].col, gridRow: dirGridPos[d.cls].row }"
-              :aria-label="`云台向${d.label}`"
+              :aria-label="t('live.ptz.moveTo', { dir: t(d.label) })"
               @mousedown.prevent="ptzStart(d)" @mouseup="ptzStop()" @mouseleave="ptzStop()"
             >
               <Icon :name="d.icon" :size="13" :style="{ transform: `rotate(${d.rot}deg)` }" />
@@ -389,35 +390,35 @@ async function delPreset(p: any) {
               type="button"
               class="flex items-center justify-center border border-line-soft/70 bg-surface text-primary transition-colors hover:bg-primary-soft active:bg-primary active:text-white"
               style="grid-column: 2; grid-row: 2"
-              aria-label="停止云台"
-              title="停止"
+              :aria-label="t('live.ptz.stop')"
+              :title="t('live.ptz.stopShort')"
               @click="ptzStop()"
             >
               <Icon name="crosshair" :size="14" />
             </button>
           </div>
           <div class="mt-2 grid grid-cols-2 gap-1">
-            <button class="h-6 rounded-chrome border border-line text-[11px] text-muted transition-colors hover:border-primary hover:text-primary" @mousedown.prevent="ptzZoom(1)" @mouseup="ptzStop()" @mouseleave="ptzStop()">变倍 +</button>
-            <button class="h-6 rounded-chrome border border-line text-[11px] text-muted transition-colors hover:border-primary hover:text-primary" @mousedown.prevent="ptzZoom(-1)" @mouseup="ptzStop()" @mouseleave="ptzStop()">变倍 −</button>
-            <button class="h-6 rounded-chrome border border-line text-[11px] text-muted transition-colors hover:border-primary hover:text-primary" @mousedown.prevent="ptzFocus(1)" @mouseup="ptzStop()" @mouseleave="ptzStop()">聚焦 +</button>
-            <button class="h-6 rounded-chrome border border-line text-[11px] text-muted transition-colors hover:border-primary hover:text-primary" @mousedown.prevent="ptzFocus(-1)" @mouseup="ptzStop()" @mouseleave="ptzStop()">聚焦 −</button>
+            <button class="h-6 rounded-chrome border border-line text-[11px] text-muted transition-colors hover:border-primary hover:text-primary" @mousedown.prevent="ptzZoom(1)" @mouseup="ptzStop()" @mouseleave="ptzStop()">{{ t('live.ptz.zoomIn') }}</button>
+            <button class="h-6 rounded-chrome border border-line text-[11px] text-muted transition-colors hover:border-primary hover:text-primary" @mousedown.prevent="ptzZoom(-1)" @mouseup="ptzStop()" @mouseleave="ptzStop()">{{ t('live.ptz.zoomOut') }}</button>
+            <button class="h-6 rounded-chrome border border-line text-[11px] text-muted transition-colors hover:border-primary hover:text-primary" @mousedown.prevent="ptzFocus(1)" @mouseup="ptzStop()" @mouseleave="ptzStop()">{{ t('live.ptz.focusNear') }}</button>
+            <button class="h-6 rounded-chrome border border-line text-[11px] text-muted transition-colors hover:border-primary hover:text-primary" @mousedown.prevent="ptzFocus(-1)" @mouseup="ptzStop()" @mouseleave="ptzStop()">{{ t('live.ptz.focusFar') }}</button>
           </div>
           <div class="mt-2 flex items-center gap-2">
-            <span class="shrink-0 text-[11px] text-muted">速度 {{ ptzSpeed }}</span>
+            <span class="shrink-0 text-[11px] text-muted">{{ t('live.ptz.speed', { n: ptzSpeed }) }}</span>
             <UiSlider v-model="ptzSpeed" :min="1" :max="10" :step="1" />
           </div>
           <!-- 预置位 -->
           <div class="mt-2 border-t border-line-soft pt-2">
-            <p class="mb-1 text-[11px] text-placeholder">预置位</p>
+            <p class="mb-1 text-[11px] text-placeholder">{{ t('live.ptz.presets') }}</p>
             <div class="mb-1.5 flex gap-1">
-              <UiInput v-model="presetName" placeholder="名称" size="sm" />
+              <UiInput v-model="presetName" :placeholder="t('live.ptz.presetNamePlaceholder')" size="sm" />
               <UiButton size="sm" variant="primary" @click="addPreset"><Icon name="plus" :size="12" /></UiButton>
             </div>
-            <div v-if="!presets.length" class="py-1 text-center text-[11px] text-placeholder">暂无预置位</div>
+            <div v-if="!presets.length" class="py-1 text-center text-[11px] text-placeholder">{{ t('live.ptz.presetEmpty') }}</div>
             <ul v-else class="max-h-24 space-y-0.5 overflow-y-auto">
               <li v-for="p in presets" :key="p.id ?? p.index" class="flex items-center gap-1 rounded-chrome px-1 py-0.5 text-[11px] hover:bg-zone">
-                <button class="min-w-0 flex-1 truncate text-left text-body hover:text-primary" @click="gotoPreset(p)">{{ p.name || ('预置位' + (p.index ?? p.id)) }}</button>
-                <button type="button" class="rounded-chrome text-placeholder hover:text-danger" :aria-label="`删除预置位 ${p.name || p.id}`" @click="delPreset(p)"><Icon name="trash" :size="11" /></button>
+                <button class="min-w-0 flex-1 truncate text-left text-body hover:text-primary" @click="gotoPreset(p)">{{ p.name || t('live.ptz.presetDefaultName', { n: p.index ?? p.id }) }}</button>
+                <button type="button" class="rounded-chrome text-placeholder hover:text-danger" :aria-label="t('live.ptz.presetDelete', { name: p.name || p.id })" @click="delPreset(p)"><Icon name="trash" :size="11" /></button>
               </li>
             </ul>
           </div>
@@ -428,7 +429,7 @@ async function delPreset(p: any) {
       <div class="mt-2.5 flex h-11 shrink-0 items-center gap-1.5 overflow-x-auto rounded-chrome border border-line bg-surface-2 px-2.5">
         <UiSegmented
           :model-value="String(grid)" @update:model-value="grid = Number($event) as any"
-          :items="[{ label: '1 分屏', value: '1' }, { label: '4 分屏', value: '4' }, { label: '9 分屏', value: '9' }]"
+          :items="[{ label: t('live.player.grid1'), value: '1' }, { label: t('live.player.grid4'), value: '4' }, { label: t('live.player.grid9'), value: '9' }]"
         />
         <span class="mx-1 h-5 w-px shrink-0 bg-line" />
         <button
@@ -436,29 +437,29 @@ async function delPreset(p: any) {
           :class="curCell?.profile === 'sub' ? 'bg-primary-soft text-primary' : 'text-muted hover:bg-zone hover:text-primary'"
           :disabled="!curCell?.channel || !canSub(curCell)"
           @click="switchProfile(curCell, curCell?.profile === 'main' ? 'sub' : 'main')"
-        ><Icon name="sliders" :size="13" />{{ curCell?.profile === 'sub' ? '子码流' : '主码流' }}</button>
+        ><Icon name="sliders" :size="13" />{{ curCell?.profile === 'sub' ? t('live.player.subStream') : t('live.player.mainStream') }}</button>
         <button
           class="flex h-7 shrink-0 items-center gap-1.5 rounded-chrome px-2.5 text-xs text-muted transition-colors hover:bg-zone hover:text-primary disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted"
           :disabled="!curCell?.channel"
           @click="doSnapshot"
-        ><Icon name="camera" :size="13" />抓图</button>
+        ><Icon name="camera" :size="13" />{{ t('live.player.snapshot') }}</button>
         <button
           class="flex h-7 shrink-0 items-center gap-1.5 rounded-chrome px-2.5 text-xs text-muted transition-colors hover:bg-zone hover:text-primary"
           @click="fullscreen"
-        ><Icon name="maximize" :size="13" />全屏</button>
+        ><Icon name="maximize" :size="13" />{{ t('live.player.fullscreen') }}</button>
         <span class="mx-1 h-5 w-px shrink-0 bg-line" />
         <button
           class="flex h-7 shrink-0 items-center gap-1.5 rounded-chrome px-2.5 text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-40"
           :class="ptzPanel ? 'bg-primary-soft text-primary' : 'text-muted hover:bg-zone hover:text-primary'"
           :disabled="!curCell?.channel"
           @click="ptzPanel = !ptzPanel"
-        ><Icon name="crosshair" :size="13" />云台</button>
+        ><Icon name="crosshair" :size="13" />{{ t('live.ptz.title') }}</button>
         <span class="mx-1 h-5 w-px shrink-0 bg-line" />
         <button
           class="flex h-7 shrink-0 items-center gap-1.5 rounded-chrome px-2.5 text-xs text-muted transition-colors hover:bg-zone hover:text-primary"
           @click="closeAll"
-        ><Icon name="power" :size="13" />全部关闭</button>
-        <span class="ml-auto shrink-0 text-xs text-placeholder">双击或拖拽左侧通道到画面格播放</span>
+        ><Icon name="power" :size="13" />{{ t('live.player.closeAll') }}</button>
+        <span class="ml-auto shrink-0 text-xs text-placeholder">{{ t('live.player.toolbarHint') }}</span>
       </div>
     </div>
   </div>

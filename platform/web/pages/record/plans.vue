@@ -3,8 +3,10 @@
 const api = useApi()
 const toast = useToast()
 const confirm = useConfirm()
+const { t } = useI18n()
 
-const PROFILE_MAP: Record<string, string> = { main: '主码流', sub: '子码流' }
+/** 码流展示名（主/子码流），随语言切换 */
+const profileName = (p: string) => (p === 'sub' ? t('record.profile.sub') : p === 'main' ? t('record.profile.main') : p)
 
 // ---------- 基础数据（设备 / 通道 / 模板映射） ----------
 const devices = ref<any[]>([])
@@ -22,7 +24,7 @@ async function loadBase() {
     channels.value = cRes.items || cRes || []
     templates.value = tRes.items || tRes || []
   } catch (e: any) {
-    toastApiError(e, '加载基础数据失败')
+    toastApiError(e, t('record.msg.loadBaseFailed'))
   }
 }
 
@@ -38,7 +40,7 @@ async function loadStorage() {
   } catch (e: any) {
     // 不弹 toast：这是页面上的一张辅助卡片，失败就地显示原因即可
     storage.value = null
-    storageErr.value = e?.msg || '存储概览加载失败'
+    storageErr.value = e?.msg || t('record.storage.loadFailed')
   }
 }
 
@@ -60,7 +62,7 @@ async function loadPlans() {
     const res: any = await api.get('/record-plans')
     plans.value = res.items || []
   } catch (e: any) {
-    toastApiError(e, '加载录像计划失败')
+    toastApiError(e, t('record.msg.loadPlansFailed'))
   } finally {
     loading.value = false
   }
@@ -73,24 +75,24 @@ async function togglePlan(row: any, v: boolean) {
     await api.put(`/record-plans/${row.id}`, { enabled: !!v })
   } catch (e: any) {
     row.enabled = prev // 失败回滚
-    toastApiError(e, '操作失败')
+    toastApiError(e, t('record.msg.actionFailed'))
   }
 }
 
 async function delPlan(row: any) {
   const ok = await confirm.ask({
-    title: '删除确认',
-    message: `确定删除通道「${channelMap.value[row.channelId] || row.channelId}」的录像计划？`,
-    detail: '删除后该通道将停止按计划录像，已存储的录像文件不受影响。',
-    danger: true, confirmText: '删除'
+    title: t('record.msg.deletePlanTitle'),
+    message: t('record.msg.deletePlanMessage', { name: channelMap.value[row.channelId] || row.channelId }),
+    detail: t('record.msg.deletePlanDetail'),
+    danger: true, confirmText: t('common.delete')
   })
   if (!ok) return
   try {
     await api.del(`/record-plans/${row.id}`)
-    toast.success('已删除')
+    toast.success(t('common.deletedOk'))
     loadPlans()
   } catch (e: any) {
-    toastApiError(e, '删除失败')
+    toastApiError(e, t('common.deleteFailed'))
   }
 }
 
@@ -150,8 +152,8 @@ function openDlg() {
   dlg.value = true
 }
 function nextStep() {
-  if (step.value === 0 && !form.channelIds.length) { toast.warning('请选择通道'); return }
-  if (step.value === 1 && !form.templateId) { toast.warning('请选择录像模板'); return }
+  if (step.value === 0 && !form.channelIds.length) { toast.warning(t('record.msg.pickChannel')); return }
+  if (step.value === 1 && !form.templateId) { toast.warning(t('record.msg.pickTemplate')); return }
   step.value++
 }
 function prevStep() {
@@ -159,8 +161,8 @@ function prevStep() {
 }
 
 async function save() {
-  if (!form.channelIds.length) { toast.warning('请选择通道'); return }
-  if (!form.templateId) { toast.warning('请选择录像模板'); return }
+  if (!form.channelIds.length) { toast.warning(t('record.msg.pickChannel')); return }
+  if (!form.templateId) { toast.warning(t('record.msg.pickTemplate')); return }
   saving.value = true
   try {
     await api.post('/record-plans', {
@@ -168,11 +170,11 @@ async function save() {
       templateId: form.templateId,
       profile: form.profile
     })
-    toast.success('录像计划已创建')
+    toast.success(t('record.msg.planCreated'))
     dlg.value = false
     loadPlans()
   } catch (e: any) {
-    toastApiError(e, '创建录像计划失败')
+    toastApiError(e, t('record.msg.createPlanFailed'))
   } finally {
     saving.value = false
   }
@@ -186,15 +188,15 @@ function openEditTpl(row: any) {
   editTplDlg.show = true
 }
 async function saveEditTpl() {
-  if (!editTplDlg.templateId) { toast.warning('请选择录像模板'); return }
+  if (!editTplDlg.templateId) { toast.warning(t('record.msg.pickTemplate')); return }
   editTplDlg.saving = true
   try {
     await api.put(`/record-plans/${editTplDlg.row.id}`, { templateId: editTplDlg.templateId })
-    toast.success('录像计划已更新')
+    toast.success(t('record.msg.planUpdated'))
     editTplDlg.show = false
     loadPlans()
   } catch (e: any) {
-    toastApiError(e, '保存失败')
+    toastApiError(e, t('common.saveFailed'))
   } finally {
     editTplDlg.saving = false
   }
@@ -211,11 +213,11 @@ async function saveEditProfile() {
   editProfDlg.saving = true
   try {
     await api.put(`/record-plans/${editProfDlg.row.id}`, { profile: editProfDlg.profile })
-    toast.success('码流已更新')
+    toast.success(t('record.msg.profileUpdated'))
     editProfDlg.show = false
     loadPlans()
   } catch (e: any) {
-    toastApiError(e, '保存失败')
+    toastApiError(e, t('common.saveFailed'))
   } finally {
     editProfDlg.saving = false
   }
@@ -239,13 +241,13 @@ const { page: pgPage, pageSize: pgSize, total: pgTotal, pageItems: pgItems } = u
       <div class="flex flex-wrap items-center justify-between gap-3">
         <div class="flex items-center gap-2">
           <Icon name="hard-drive" :size="15" class="text-muted" />
-          <span class="text-sm font-medium text-ink">录像存储</span>
+          <span class="text-sm font-medium text-ink">{{ t('record.storage.title') }}</span>
         </div>
         <button
           type="button"
           class="rounded-chrome text-xs text-muted transition-colors hover:text-primary"
           @click="loadStorage"
-        >重新计算</button>
+        >{{ t('record.storage.recalc') }}</button>
       </div>
 
       <p v-if="storageErr" class="mt-2 text-xs text-danger">{{ storageErr }}</p>
@@ -259,55 +261,55 @@ const { page: pgPage, pageSize: pgSize, total: pgTotal, pageItems: pgItems } = u
         </div>
         <div class="mt-2 flex flex-wrap items-center gap-x-6 gap-y-1 text-xs">
           <span class="text-body">
-            已用 <span class="font-mono text-ink">{{ fmtBytes(storage.usedBytes) }}</span>
+            {{ t('record.storage.used') }} <span class="font-mono text-ink">{{ fmtBytes(storage.usedBytes) }}</span>
             / <span class="font-mono">{{ fmtBytes(storage.totalBytes) }}</span>
-            <span class="ml-1 text-placeholder">（{{ storage.percent ?? 0 }}%）</span>
+            <span class="ml-1 text-placeholder">{{ t('record.storage.percent', { n: storage.percent ?? 0 }) }}</span>
           </span>
-          <span class="text-placeholder">录像片段 <span class="font-mono text-body">{{ storage.segments ?? 0 }}</span> 段</span>
-          <span class="text-placeholder">保留 <span class="font-mono text-body">{{ storage.keepDays ?? 30 }}</span> 天</span>
+          <span class="text-placeholder">{{ t('record.storage.segments') }} <span class="font-mono text-body">{{ storage.segments ?? 0 }}</span> {{ t('record.storage.segmentsUnit') }}</span>
+          <span class="text-placeholder">{{ t('record.storage.keep') }} <span class="font-mono text-body">{{ storage.keepDays ?? 30 }}</span> {{ t('record.storage.keepUnit') }}</span>
         </div>
         <p v-if="Number(storage.percent) >= 90" class="mt-1.5 text-xs text-danger">
-          存储即将写满，超出后最早的录像会被覆盖。请清理录像或扩容后再继续。
+          {{ t('record.storage.nearFull') }}
         </p>
       </template>
 
-      <p v-else class="mt-2 text-xs text-placeholder">正在统计…</p>
+      <p v-else class="mt-2 text-xs text-placeholder">{{ t('record.storage.calculating') }}</p>
     </div>
 
     <UiCard flat>
       <template #header>
         <div class="flex w-full items-center justify-between">
-          <span class="text-[15px] font-semibold text-ink">录像计划</span>
+          <span class="text-[15px] font-semibold text-ink">{{ t('record.plans.title') }}</span>
           <div class="flex items-center gap-2">
-            <UiButton size="sm" @click="() => { loadBase(); loadPlans() }"><UiIcon name="refresh" :size="13" />刷新</UiButton>
-            <UiButton variant="primary" size="sm" @click="openDlg"><UiIcon name="plus" :size="14" />新建录像设置</UiButton>
+            <UiButton size="sm" @click="() => { loadBase(); loadPlans() }"><UiIcon name="refresh" :size="13" />{{ t('common.refresh') }}</UiButton>
+            <UiButton variant="primary" size="sm" @click="openDlg"><UiIcon name="plus" :size="14" />{{ t('record.plans.create') }}</UiButton>
           </div>
         </div>
       </template>
 
       <UiTable
         :columns="[
-          { key: 'channel', label: '通道', width: '200px' },
-          { key: 'template', label: '录像模板', width: '200px' },
-          { key: 'profile', label: '码流', width: '100px' },
-          { key: 'enabled', label: '启用', width: '70px', align: 'center' },
-          { key: 'ops', label: '操作', width: '220px', align: 'center', ellipsis: false }
+          { key: 'channel', label: t('record.plans.colChannel'), width: '200px' },
+          { key: 'template', label: t('record.plans.colTemplate'), width: '200px' },
+          { key: 'profile', label: t('record.plans.colProfile'), width: '100px' },
+          { key: 'enabled', label: t('record.plans.colEnabled'), width: '70px', align: 'center' },
+          { key: 'ops', label: t('common.action'), width: '220px', align: 'center', ellipsis: false }
         ]"
-        :rows="pgItems" :loading="loading" :row-key="'id'" empty="暂无录像计划，点击「新建录像设置」开始配置"
+        :rows="pgItems" :loading="loading" :row-key="'id'" :empty="t('record.plans.empty')"
       >
         <template #channel="{ row }">{{ channelMap[row.channelId] || row.channelId }}</template>
         <template #template="{ row }">{{ templateMap[row.templateId] || row.templateId || '—' }}</template>
         <template #profile="{ row }">
-          <UiTag :color="row.profile === 'sub' ? 'info' : 'primary'" plain>{{ PROFILE_MAP[row.profile] || row.profile }}</UiTag>
+          <UiTag :color="row.profile === 'sub' ? 'info' : 'primary'" plain>{{ profileName(row.profile) }}</UiTag>
         </template>
         <template #enabled="{ row }">
-          <UiSwitch :model-value="!!row.enabled" size="sm" :aria-label="`启用录像计划 ${row.name || row.id}`" @update:model-value="togglePlan(row, $event)" />
+          <UiSwitch :model-value="!!row.enabled" size="sm" :aria-label="t('record.plans.toggleAria', { name: row.name || row.id })" @update:model-value="togglePlan(row, $event)" />
         </template>
         <template #ops="{ row }">
           <div class="flex items-center justify-center gap-1">
-            <UiButton variant="text" size="sm" @click="openEditTpl(row)">修改计划</UiButton>
-            <UiButton variant="text" size="sm" @click="openEditProfile(row)">修改码流</UiButton>
-            <UiButton variant="dangerText" size="sm" @click="delPlan(row)">删除</UiButton>
+            <UiButton variant="text" size="sm" @click="openEditTpl(row)">{{ t('record.plans.editPlan') }}</UiButton>
+            <UiButton variant="text" size="sm" @click="openEditProfile(row)">{{ t('record.plans.editProfile') }}</UiButton>
+            <UiButton variant="dangerText" size="sm" @click="delPlan(row)">{{ t('common.delete') }}</UiButton>
           </div>
         </template>
       </UiTable>
@@ -321,16 +323,16 @@ const { page: pgPage, pageSize: pgSize, total: pgTotal, pageItems: pgItems } = u
     </UiCard>
 
     <!-- 新建录像设置：三步向导（REC-06） -->
-    <UiDialog v-model:open="dlg" title="新建录像设置" width="max-w-xl">
+    <UiDialog v-model:open="dlg" :title="t('record.plans.dialogTitle')" width="max-w-xl">
       <div class="mb-5 flex justify-center">
-        <UiSteps :steps="['选择通道', '选择模板', '选择码流']" :current="step" />
+        <UiSteps :steps="[t('record.plans.stepChannel'), t('record.plans.stepTemplate'), t('record.plans.stepProfile')]" :current="step" />
       </div>
 
       <!-- 第一步：通道多选 -->
       <div v-if="step === 0">
         <div class="mb-2 flex items-center justify-between">
-          <span class="text-xs text-muted">按设备分组，可勾选设备整组或单个通道</span>
-          <span class="text-xs text-primary">已选 {{ form.channelIds.length }} 个通道</span>
+          <span class="text-xs text-muted">{{ t('record.plans.channelHint') }}</span>
+          <span class="text-xs text-primary">{{ t('record.plans.selectedChannels', { n: form.channelIds.length }) }}</span>
         </div>
         <div class="max-h-72 overflow-y-auto rounded-signal border border-line p-2">
           <UiTree :nodes="channelTree" @select="onTreeSelect">
@@ -353,72 +355,70 @@ const { page: pgPage, pageSize: pgSize, total: pgTotal, pageItems: pgItems } = u
               </span>
             </template>
           </UiTree>
-          <div v-if="!channelTree.length" class="py-6 text-center text-sm text-placeholder">暂无通道，请先在设备管理中接入设备</div>
+          <div v-if="!channelTree.length" class="py-6 text-center text-sm text-placeholder">{{ t('record.plans.noChannels') }}</div>
         </div>
       </div>
 
       <!-- 第二步：模板单选 -->
       <div v-else-if="step === 1">
-        <p class="mb-2 text-xs text-muted">选择录像计划模板（模板可在「录像模板」页维护）</p>
+        <p class="mb-2 text-xs text-muted">{{ t('record.plans.templateHint') }}</p>
         <div class="max-h-72 space-y-2 overflow-y-auto">
           <div
-            v-for="t in templates" :key="t.id"
+            v-for="tpl in templates" :key="tpl.id"
             class="flex cursor-pointer items-center gap-2.5 rounded-signal border px-3 py-2.5 transition-colors"
-            :class="form.templateId === t.id ? 'border-primary bg-primary-soft' : 'border-line hover:border-primary'"
-            @click="form.templateId = t.id"
+            :class="form.templateId === tpl.id ? 'border-primary bg-primary-soft' : 'border-line hover:border-primary'"
+            @click="form.templateId = tpl.id"
           >
-            <span class="flex h-4 w-4 shrink-0 items-center justify-center rounded-full border" :class="form.templateId === t.id ? 'border-primary' : 'border-line'">
-              <span v-if="form.templateId === t.id" class="h-2 w-2 rounded-full bg-primary" />
+            <span class="flex h-4 w-4 shrink-0 items-center justify-center rounded-full border" :class="form.templateId === tpl.id ? 'border-primary' : 'border-line'">
+              <span v-if="form.templateId === tpl.id" class="h-2 w-2 rounded-full bg-primary" />
             </span>
             <div class="min-w-0">
               <div class="flex items-center gap-1.5 text-sm text-ink">
-                {{ t.name }}
+                {{ tpl.name }}
                 <!-- 录像三色语义（REC-02）：定时=primary/信号青，事件=success/绿，与 playback.vue 一致 -->
-                <UiTag :color="t.kind === 'event' ? 'success' : 'primary'" plain>{{ t.kind === 'event' ? '事件录像' : '定时录像' }}</UiTag>
-                <UiTag v-if="t.builtin" color="info">内置</UiTag>
+                <UiTag :color="tpl.kind === 'event' ? 'success' : 'primary'" plain>{{ tpl.kind === 'event' ? t('record.kind.event') : t('record.kind.timer') }}</UiTag>
+                <UiTag v-if="tpl.builtin" color="info">{{ t('record.plans.builtin') }}</UiTag>
               </div>
             </div>
           </div>
-          <div v-if="!templates.length" class="py-6 text-center text-sm text-placeholder">暂无录像模板，请先在「录像模板」页创建</div>
+          <div v-if="!templates.length" class="py-6 text-center text-sm text-placeholder">{{ t('record.plans.noTemplates') }}</div>
         </div>
       </div>
 
       <!-- 第三步：码流 -->
       <div v-else>
-        <p class="mb-2 text-xs text-muted">选择录像使用的码流；主码流画质高、占用存储大，子码流反之</p>
+        <p class="mb-2 text-xs text-muted">{{ t('record.plans.profileHint') }}</p>
         <div class="grid grid-cols-2 gap-2">
           <div
-            v-for="p in ['main', 'sub']" :key="p"
+            v-for="prof in ['main', 'sub']" :key="prof"
             class="flex cursor-pointer items-center gap-2.5 rounded-signal border px-3 py-3 transition-colors"
-            :class="form.profile === p ? 'border-primary bg-primary-soft' : 'border-line hover:border-primary'"
-            @click="form.profile = p"
+            :class="form.profile === prof ? 'border-primary bg-primary-soft' : 'border-line hover:border-primary'"
+            @click="form.profile = prof"
           >
-            <span class="flex h-4 w-4 shrink-0 items-center justify-center rounded-full border" :class="form.profile === p ? 'border-primary' : 'border-line'">
-              <span v-if="form.profile === p" class="h-2 w-2 rounded-full bg-primary" />
+            <span class="flex h-4 w-4 shrink-0 items-center justify-center rounded-full border" :class="form.profile === prof ? 'border-primary' : 'border-line'">
+              <span v-if="form.profile === prof" class="h-2 w-2 rounded-full bg-primary" />
             </span>
             <div>
-              <div class="text-sm text-ink">{{ PROFILE_MAP[p] }}</div>
-              <div class="text-xs text-placeholder">{{ p === 'main' ? '高清录像，占用存储大' : '流畅录像，占用存储小' }}</div>
+              <div class="text-sm text-ink">{{ profileName(prof) }}</div>
+              <div class="text-xs text-placeholder">{{ prof === 'main' ? t('record.plans.mainDesc') : t('record.plans.subDesc') }}</div>
             </div>
           </div>
         </div>
         <div class="mt-4 rounded-signal bg-zone px-3 py-2.5 text-xs text-muted">
-          即将为 <span class="font-medium text-primary">{{ form.channelIds.length }}</span> 个通道创建
-          <span class="font-medium text-ink">{{ templateMap[form.templateId] || '—' }}</span>
-          （{{ PROFILE_MAP[form.profile] }}）录像计划
+          {{ t('record.plans.summary', { count: form.channelIds.length, template: templateMap[form.templateId] || '—', profile: profileName(form.profile) }) }}
         </div>
       </div>
 
       <template #footer>
         <div class="flex w-full items-center justify-between">
-          <UiButton :disabled="step === 0" @click="prevStep">上一步</UiButton>
+          <UiButton :disabled="step === 0" @click="prevStep">{{ t('record.plans.prevStep') }}</UiButton>
           <div class="flex items-center gap-2">
-            <UiButton @click="dlg = false">取消</UiButton>
-            <UiButton v-if="step < 2" variant="primary" @click="nextStep">下一步</UiButton>
+            <UiButton @click="dlg = false">{{ t('common.cancel') }}</UiButton>
+            <UiButton v-if="step < 2" variant="primary" @click="nextStep">{{ t('record.plans.nextStep') }}</UiButton>
             <UiButton v-else variant="primary" :disabled="saving" @click="save">
               <UiIcon v-if="!saving" name="check" :size="14" />
               <UiIcon v-else name="refresh" :size="14" class="ipc-spin" />
-              确定
+              {{ t('common.confirm') }}
             </UiButton>
           </div>
         </div>
@@ -426,35 +426,35 @@ const { page: pgPage, pageSize: pgSize, total: pgTotal, pageItems: pgItems } = u
     </UiDialog>
 
     <!-- 修改计划（更换模板） -->
-    <UiDialog v-model:open="editTplDlg.show" title="修改录像计划" width="max-w-md">
+    <UiDialog v-model:open="editTplDlg.show" :title="t('record.plans.editPlanTitle')" width="max-w-md">
       <div class="space-y-3">
         <div class="flex items-center gap-2 text-sm">
-          <span class="text-muted">通道</span>
+          <span class="text-muted">{{ t('record.plans.channel') }}</span>
           <span class="text-ink">{{ channelMap[editTplDlg.row?.channelId] || editTplDlg.row?.channelId }}</span>
         </div>
         <div>
-          <p class="mb-1.5 text-sm text-muted">录像模板</p>
-          <UiSelect v-model="editTplDlg.templateId" placeholder="选择录像模板" :options="templates.map(t => ({ label: t.name, value: t.id }))" />
+          <p class="mb-1.5 text-sm text-muted">{{ t('record.plans.template') }}</p>
+          <UiSelect v-model="editTplDlg.templateId" :placeholder="t('record.plans.templatePlaceholder')" :options="templates.map(tpl => ({ label: tpl.name, value: tpl.id }))" />
         </div>
       </div>
       <template #footer>
-        <UiButton @click="editTplDlg.show = false">取消</UiButton>
-        <UiButton variant="primary" :disabled="editTplDlg.saving" @click="saveEditTpl">确定</UiButton>
+        <UiButton @click="editTplDlg.show = false">{{ t('common.cancel') }}</UiButton>
+        <UiButton variant="primary" :disabled="editTplDlg.saving" @click="saveEditTpl">{{ t('common.confirm') }}</UiButton>
       </template>
     </UiDialog>
 
     <!-- 修改码流 -->
-    <UiDialog v-model:open="editProfDlg.show" title="修改码流" width="max-w-sm">
+    <UiDialog v-model:open="editProfDlg.show" :title="t('record.plans.editProfileTitle')" width="max-w-sm">
       <div class="space-y-3">
         <div class="flex items-center gap-2 text-sm">
-          <span class="text-muted">通道</span>
+          <span class="text-muted">{{ t('record.plans.channel') }}</span>
           <span class="text-ink">{{ channelMap[editProfDlg.row?.channelId] || editProfDlg.row?.channelId }}</span>
         </div>
-        <UiSegmented v-model="editProfDlg.profile" :items="[{ label: '主码流', value: 'main' }, { label: '子码流', value: 'sub' }]" />
+        <UiSegmented v-model="editProfDlg.profile" :items="[{ label: t('record.profile.main'), value: 'main' }, { label: t('record.profile.sub'), value: 'sub' }]" />
       </div>
       <template #footer>
-        <UiButton @click="editProfDlg.show = false">取消</UiButton>
-        <UiButton variant="primary" :disabled="editProfDlg.saving" @click="saveEditProfile">确定</UiButton>
+        <UiButton @click="editProfDlg.show = false">{{ t('common.cancel') }}</UiButton>
+        <UiButton variant="primary" :disabled="editProfDlg.saving" @click="saveEditProfile">{{ t('common.confirm') }}</UiButton>
       </template>
     </UiDialog>
   </div>

@@ -8,11 +8,12 @@ onMounted(async () => {
   if (!user.value) navigateTo('/login')
 })
 
-const userMenu = [
+// computed：语言切换后菜单文案与当前语言标记要跟着变
+const userMenu = computed(() => [
   { label: t('user.profile'), value: 'profile' },
-  { label: t('user.language') + '：' + (locale.value === 'zh-CN' ? '中文' : 'EN'), value: 'lang' },
+  { label: t('user.language') + t('common.colon') + (locale.value === 'zh-CN' ? t('lang.zh') : t('lang.en')), value: 'lang' },
   { label: t('user.logout'), value: 'logout', danger: true, divided: true }
-]
+])
 
 function onUserMenu(v: string) {
   if (v === 'profile') navigateTo('/account')
@@ -29,7 +30,7 @@ function onUserMenu(v: string) {
         <span class="flex h-7 w-7 items-center justify-center rounded-signal bg-primary text-sidebar">
           <Icon name="video" :size="16" />
         </span>
-        <span class="text-base font-bold text-ink">IpcCloud <span class="font-normal text-muted">| 视频管理平台</span></span>
+        <span class="text-base font-bold text-ink">IpcCloud <span class="font-normal text-muted">| {{ t('app.subtitle') }}</span></span>
       </div>
 
       <div class="flex items-center gap-4 text-xs text-body">

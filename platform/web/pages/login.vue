@@ -3,6 +3,7 @@
 definePageMeta({ layout: 'auth' })
 const { login } = useAuth()
 const route = useRoute()
+const { t } = useI18n()
 
 const username = ref('')
 const password = ref('')
@@ -14,7 +15,7 @@ const err = ref<{ code: string; msg: string; suggest?: string } | null>(null)
 async function doLogin() {
   err.value = null
   if (!username.value || !password.value) {
-    err.value = { code: '', msg: '请输入账号和密码' }
+    err.value = { code: '', msg: t('account.login.emptyFields') }
     return
   }
   loading.value = true
@@ -24,7 +25,7 @@ async function doLogin() {
     const redirect = typeof route.query.redirect === 'string' ? route.query.redirect : '/console'
     navigateTo(redirect)
   } catch (e: any) {
-    err.value = { code: e?.code || '', msg: e?.msg || '登录失败，请检查账号密码', suggest: e?.suggest }
+    err.value = { code: e?.code || '', msg: e?.msg || t('account.login.failed'), suggest: e?.suggest }
   } finally {
     loading.value = false
   }
@@ -35,8 +36,8 @@ async function doLogin() {
   <div class="relative w-[400px] max-w-[calc(100vw-32px)] rounded-signal border border-line bg-surface p-10 shadow-pop">
     <!-- 标题：强调值守场景，而非平铺产品名 -->
     <div class="mb-8">
-      <h2 class="text-lg font-semibold text-ink">开始值守</h2>
-      <p class="mt-1 text-sm text-muted">登录 IpcCloud 视频管理平台</p>
+      <h2 class="text-lg font-semibold text-ink">{{ t('account.login.title') }}</h2>
+      <p class="mt-1 text-sm text-muted">{{ t('account.login.subtitle') }}</p>
     </div>
 
     <div v-if="err" class="mb-4 flex items-start gap-2 rounded-chrome border border-danger/30 bg-danger-soft px-3 py-2 text-xs text-danger">
@@ -54,7 +55,7 @@ async function doLogin() {
             v-model="username"
             type="text"
             class="w-full bg-transparent text-sm text-ink outline-none placeholder:text-placeholder"
-            placeholder="用户名"
+            :placeholder="t('account.login.usernamePlaceholder')"
             autocomplete="username"
           />
         </div>
@@ -66,22 +67,22 @@ async function doLogin() {
             v-model="password"
             :type="showPwd ? 'text' : 'password'"
             class="w-full bg-transparent text-sm text-ink outline-none placeholder:text-placeholder"
-            placeholder="请输入密码"
+            :placeholder="t('account.login.passwordPlaceholder')"
             autocomplete="current-password"
           />
-          <button type="button" class="ml-2 rounded-chrome text-placeholder hover:text-body" :aria-label="showPwd ? '隐藏密码' : '显示密码'" @click="showPwd = !showPwd">
+          <button type="button" class="ml-2 rounded-chrome text-placeholder hover:text-body" :aria-label="showPwd ? t('account.login.hidePassword') : t('account.login.showPassword')" @click="showPwd = !showPwd">
             <Icon :name="showPwd ? 'eye-off' : 'eye'" :size="16" />
           </button>
         </div>
       </div>
 
       <div class="flex items-center justify-between pt-1 text-xs">
-        <UiCheckbox v-model="remember" label="记住账号" />
-        <span class="text-placeholder">忘记密码请联系管理员重置</span>
+        <UiCheckbox v-model="remember" :label="t('account.login.remember')" />
+        <span class="text-placeholder">{{ t('account.login.forgotHint') }}</span>
       </div>
 
       <UiButton variant="primary" size="lg" block :disabled="loading" @click="doLogin">
-        <Icon v-if="loading" name="refresh" :size="14" class="ipc-spin" />{{ loading ? '登录中…' : '登录' }}
+        <Icon v-if="loading" name="refresh" :size="14" class="ipc-spin" />{{ loading ? t('account.login.submitting') : t('account.login.submit') }}
       </UiButton>
     </form>
   </div>

@@ -11,6 +11,9 @@
 /** 空值占位符：全站统一，不要就地写字面量 */
 export const EMPTY = '—'
 
+/** 词条取值函数签名；本模块是纯函数模块不能调 useI18n，由调用方注入 t */
+export type Translator = (key: string, params?: Record<string, any>) => string
+
 /** 后端时间戳既有毫秒数也有 ISO 字符串，统一归一化为毫秒数；无法解析返回 null */
 function toMillis(ts: unknown): number | null {
   if (ts == null || ts === '' || ts === 0) return null
@@ -31,29 +34,40 @@ export function fmtTime(ts: unknown): string {
   return ms == null ? EMPTY : new Date(ms).toLocaleString()
 }
 
-/** 仅时:分（24 小时制），用于告警流等紧凑场景 */
+/** 仅时:分（24 小时制），用于告警流等紧凑场景。值班场景一律 24 小时制，不随语言变 */
 export function fmtHm(ts: unknown): string {
   const ms = toMillis(ts)
   if (ms == null) return EMPTY
-  return new Date(ms).toLocaleTimeString('zh-CN', { hour12: false, hour: '2-digit', minute: '2-digit' })
+  const d = new Date(ms)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
 
 /**
  * 相对时间：刚刚 / N 分钟前 / N 小时前 / N 天前。
  * 未来时间（设备时钟偏快导致的负数差值）按「刚刚」处理而非显示负数。
+ *
+ * t 由调用方注入（页面里传 useI18n().t）；不传则回落中文。
  */
-export function ago(ts: unknown): string {
+export function ago(ts: unknown, t?: Translator): string {
   const ms = toMillis(ts)
   if (ms == null) return EMPTY
   const s = Math.floor((Date.now() - ms) / 1000)
   if (!Number.isFinite(s)) return EMPTY
-  if (s < 60) return '刚刚'
-  if (s < 3600) return Math.floor(s / 60) + ' 分钟前'
-  if (s < 86400) return Math.floor(s / 3600) + ' 小时前'
-  return Math.floor(s / 86400) + ' 天前'
+  if (s < 60) return t ? t('time.justNow') : '刚刚'
+  if (s < 3600) {
+    const n = Math.floor(s / 60)
+    return t ? t('time.minutesAgo', { n }) : n + ' 分钟前'
+  }
+  if (s < 86400) {
+    const n = Math.floor(s / 3600)
+    return t ? t('time.hoursAgo', { n }) : n + ' 小时前'
+  }
+  const n = Math.floor(s / 86400)
+  return t ? t('time.daysAgo', { n }) : n + ' 天前'
 }
 
-/** 星期名：schedule.days 用 1–7 表示周一至周日 */
+/** 星期名中文兜底：schedule.days 用 1–7 表示周一至周日。界面渲染走词条 enum.day.<n> */
 export const DAY_NAMES = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'] as const
 
 export interface Schedule {
@@ -63,15 +77,22 @@ export interface Schedule {
 
 /**
  * 布防/录像时段摘要：{days:[1,2],ranges:[['00:00','24:00']]} → '周一、周二 00:00-24:00'。
+ *
  * empty 由调用方给出——告警规则页说「未布防」，模板页说「未设置」，语义不同。
+ * t 由调用方注入（页面里传 useI18n().t）；不传则回落中文，
+ * 便于非组件上下文（如纯工具函数测试）直接使用。
  */
-export function fmtSchedule(s: Schedule | null | undefined, empty = '未设置'): string {
+export function fmtSchedule(
+  s: Schedule | null | undefined,
+  empty = '未设置',
+  t?: Translator
+): string {
   if (!s || !s.days?.length) return empty
-  const days = [...s.days]
-    .sort((a, b) => a - b)
-    .map((d) => DAY_NAMES[d - 1] || d)
-    .join('、')
-  const ranges = (s.ranges || []).map((r) => `${r[0]}-${r[1]}`).join('、')
+  const dayName = (d: number) => (t ? t(`enum.day.${d}`) : DAY_NAMES[d - 1] || String(d))
+  // 中英分隔符不同：中文用顿号，英文用逗号
+  const sep = t ? t('common.listSep') : '、'
+  const days = [...s.days].sort((a, b) => a - b).map(dayName).join(sep)
+  const ranges = (s.ranges || []).map((r) => `${r[0]}-${r[1]}`).join(sep)
   return ranges ? `${days} ${ranges}` : days
 }
 

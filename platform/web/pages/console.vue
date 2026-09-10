@@ -7,6 +7,7 @@ const api = useApi()
 const toast = useToast()
 const router = useRouter()
 const { user, projects, currentProject, switchProject, loadMe } = useAuth()
+const { t } = useI18n()
 
 const search = ref('')
 
@@ -53,17 +54,17 @@ function enterProject(p: any) {
 // 新建项目弹窗
 const addProjDlg = reactive({ show: false, name: '', saving: false })
 async function createProject() {
-  if (!addProjDlg.name.trim()) return toast.warning('请输入项目名称')
+  if (!addProjDlg.name.trim()) return toast.warning(t('account.msg.projectNameRequired'))
   addProjDlg.saving = true
   try {
     const res: any = await api.post('/projects', { name: addProjDlg.name.trim() })
-    toast.success('项目创建成功')
+    toast.success(t('account.msg.projectCreated'))
     addProjDlg.show = false
     addProjDlg.name = ''
     await loadMe()
     await loadProjectStats()
   } catch (e: any) {
-    toastApiError(e, '创建项目失败')
+    toastApiError(e, t('account.msg.projectCreateFailedToast'))
   } finally {
     addProjDlg.saving = false
   }
@@ -81,11 +82,11 @@ onMounted(async () => {
       <!-- 页面头部：标题 + 搜索 -->
       <div class="mb-6 flex flex-wrap items-center justify-between gap-4">
         <div>
-          <h1 class="text-xl font-semibold tracking-tight text-ink">选择项目</h1>
-          <p class="mt-1 text-sm text-muted">选择一个项目进入值守</p>
+          <h1 class="text-xl font-semibold tracking-tight text-ink">{{ t('account.console.title') }}</h1>
+          <p class="mt-1 text-sm text-muted">{{ t('account.console.subtitle') }}</p>
         </div>
         <div class="relative w-64">
-          <UiInput v-model="search" placeholder="搜索项目">
+          <UiInput v-model="search" :placeholder="t('account.console.searchPlaceholder')">
             <template #prefix><Icon name="search" :size="14" class="mr-1.5 text-placeholder" /></template>
           </UiInput>
         </div>
@@ -106,9 +107,9 @@ onMounted(async () => {
           <div class="min-w-0 flex-1">
             <h3 class="truncate text-sm font-medium text-ink group-hover:text-primary">{{ p.name }}</h3>
             <div class="mt-1 flex items-center gap-3 text-xs text-muted">
-              <span>{{ projectStats[p.id]?.total ?? 0 }} 台设备</span>
-              <span v-if="projectStats[p.id]?.offline" class="text-danger">{{ projectStats[p.id].offline }} 台离线</span>
-              <span v-else class="text-success">全部在线</span>
+              <span>{{ t('account.console.deviceCount', { n: projectStats[p.id]?.total ?? 0 }) }}</span>
+              <span v-if="projectStats[p.id]?.offline" class="text-danger">{{ t('account.console.offlineCount', { n: projectStats[p.id].offline }) }}</span>
+              <span v-else class="text-success">{{ t('account.console.allOnline') }}</span>
             </div>
           </div>
           <!-- 在线率迷你信号条 -->
@@ -125,7 +126,7 @@ onMounted(async () => {
         </div>
 
         <div v-if="!filteredProjects.length" class="p-8">
-          <UiEmptyState text="没有匹配的项目" />
+          <UiEmptyState :text="t('account.console.empty')" />
         </div>
       </div>
 
@@ -133,21 +134,21 @@ onMounted(async () => {
         class="mt-4 flex w-full items-center justify-center gap-1.5 rounded-signal border border-dashed border-line py-3 text-sm text-muted transition-colors hover:border-primary hover:text-primary"
         @click="addProjDlg.show = true"
       >
-        <Icon name="plus" :size="15" />添加项目
+        <Icon name="plus" :size="15" />{{ t('account.console.addProject') }}
       </button>
     </div>
 
     <!-- 新建项目弹窗 -->
-    <UiDialog v-model:open="addProjDlg.show" title="添加新项目" width="max-w-md">
+    <UiDialog v-model:open="addProjDlg.show" :title="t('account.console.addDialogTitle')" width="max-w-md">
       <div class="space-y-4">
         <div>
-          <label class="mb-1.5 block text-xs font-medium text-muted">项目名称 *</label>
-          <UiInput v-model="addProjDlg.name" placeholder="请输入新项目名称，如：深圳绿享、杭州仓储" />
+          <label class="mb-1.5 block text-xs font-medium text-muted">{{ t('account.console.projectNameLabel') }}</label>
+          <UiInput v-model="addProjDlg.name" :placeholder="t('account.console.projectNamePlaceholder')" />
         </div>
       </div>
       <template #footer>
-        <UiButton @click="addProjDlg.show = false">取消</UiButton>
-        <UiButton variant="primary" :loading="addProjDlg.saving" @click="createProject">创建项目</UiButton>
+        <UiButton @click="addProjDlg.show = false">{{ t('common.cancel') }}</UiButton>
+        <UiButton variant="primary" :loading="addProjDlg.saving" @click="createProject">{{ t('account.console.createProject') }}</UiButton>
       </template>
     </UiDialog>
   </div>

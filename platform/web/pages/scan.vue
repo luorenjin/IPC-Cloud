@@ -5,6 +5,7 @@ definePageMeta({ layout: 'auth' }) // 移动端扫码使用独立轻量布局或
 const api = useApi()
 const toast = useToast()
 const router = useRouter()
+const { t } = useI18n()
 
 const videoRef = ref<HTMLVideoElement>()
 const canvasRef = ref<HTMLCanvasElement>()
@@ -30,11 +31,11 @@ const binding = ref(false)
 
 // 纯展示性状态文案：随扫描状态机派生，不引入新状态、不改变原逻辑
 const scanStatusText = computed(() => {
-  if (deviceFound.value) return `识别成功：设备型号 ${deviceFound.value.model || '标准 IPC'}`
-  if (lookingUp.value) return '识别中…'
+  if (deviceFound.value) return t('account.scan.statusFound', { model: deviceFound.value.model || t('account.scan.defaultModel') })
+  if (lookingUp.value) return t('account.scan.statusLooking')
   if (errorMsg.value) return ''
-  if (cameraActive.value && scanning.value) return '将镜头对准设备机身或包装盒上的二维码'
-  return '摄像头未开启，可在下方手动输入设备信息'
+  if (cameraActive.value && scanning.value) return t('account.scan.statusAiming')
+  return t('account.scan.statusIdle')
 })
 
 async function loadGroups() {
@@ -43,7 +44,7 @@ async function loadGroups() {
     groups.value = res?.items || []
     if (groups.value.length) form.groupId = groups.value[0].id
   } catch (e: any) {
-    toastApiError(e, '分组列表加载失败，将添加到默认分组')
+    toastApiError(e, t('account.msg.groupLoadFailed'))
   }
 }
 
@@ -55,7 +56,7 @@ async function startCamera() {
   cameraActive.value = false
   try {
     if (!navigator.mediaDevices?.getUserMedia) {
-      errorMsg.value = '当前浏览器或环境不支持调用摄像头，请使用手动输入'
+      errorMsg.value = t('account.msg.cameraUnsupported')
       return
     }
     stream = await navigator.mediaDevices.getUserMedia({
@@ -70,7 +71,7 @@ async function startCamera() {
       startDetection()
     }
   } catch (e: any) {
-    errorMsg.value = '无法打开摄像头：' + (e.message || '请检查摄像头权限')
+    errorMsg.value = t('account.msg.cameraFailed', { reason: e.message || t('account.msg.cameraPermission') })
   }
 }
 
@@ -124,7 +125,7 @@ function handleQrResult(raw: string) {
   if (!text) return
 
   stopCamera()
-  toast.success('扫描成功')
+  toast.success(t('account.msg.scanOk'))
 
   if (text.startsWith('IPC1:')) {
     const parts = text.split(':')
@@ -157,7 +158,7 @@ async function lookupDevice() {
     const res: any = await api.post('/devices/idp/lookup', { deviceId: form.deviceId })
     deviceFound.value = res
   } catch (e: any) {
-    toastApiError(e, '未找到该设备或设备未连网')
+    toastApiError(e, t('account.msg.deviceNotFound'))
   } finally {
     lookingUp.value = false
   }
@@ -165,9 +166,9 @@ async function lookupDevice() {
 
 // 提交绑定
 async function submitBind() {
-  if (!form.deviceId) return toast.warning('请输入设备 ID')
-  if (!form.verifyCode) return toast.warning('请输入设备验证码')
-  if (!form.groupId) return toast.warning('请选择所属分组')
+  if (!form.deviceId) return toast.warning(t('account.msg.deviceIdRequired'))
+  if (!form.verifyCode) return toast.warning(t('account.msg.verifyCodeRequired'))
+  if (!form.groupId) return toast.warning(t('account.msg.groupRequired'))
 
   binding.value = true
   try {
@@ -177,10 +178,10 @@ async function submitBind() {
       groupId: form.groupId,
       name: form.name.trim() || undefined
     })
-    toast.success('设备绑定成功！')
+    toast.success(t('account.msg.bindOk'))
     router.push('/devices')
   } catch (e: any) {
-    toastApiError(e, '绑定失败')
+    toastApiError(e, t('account.msg.bindFailed'))
   } finally {
     binding.value = false
   }
@@ -201,12 +202,12 @@ onBeforeUnmount(() => {
     <!-- 移动端顶栏 -->
     <header class="flex h-12 shrink-0 items-center justify-between border-b border-line px-4">
       <button class="flex items-center gap-1 text-sm text-sidebar-text transition-colors hover:text-ink" @click="router.push('/devices')">
-        <Icon name="chevron-left" :size="18" />返回
+        <Icon name="chevron-left" :size="18" />{{ t('account.scan.back') }}
       </button>
-      <span class="text-base font-medium text-ink">扫描设备二维码</span>
+      <span class="text-base font-medium text-ink">{{ t('account.scan.title') }}</span>
       <div class="w-12 text-right">
-        <button v-if="cameraActive" class="text-xs text-primary hover:text-primary-deep" @click="stopCamera">手动</button>
-        <button v-else class="text-xs text-primary hover:text-primary-deep" @click="startCamera">重新扫码</button>
+        <button v-if="cameraActive" class="text-xs text-primary hover:text-primary-deep" @click="stopCamera">{{ t('account.scan.manual') }}</button>
+        <button v-else class="text-xs text-primary hover:text-primary-deep" @click="startCamera">{{ t('account.scan.rescan') }}</button>
       </div>
     </header>
 
@@ -236,44 +237,44 @@ onBeforeUnmount(() => {
 
       <!-- 识别结果与手动确认录入表单 -->
       <div class="mt-4 w-full max-w-md space-y-3 rounded-signal border border-line bg-surface p-5">
-        <div class="text-sm font-medium text-ink">设备接入信息</div>
+        <div class="text-sm font-medium text-ink">{{ t('account.scan.formTitle') }}</div>
 
         <div>
-          <label class="mb-1 block text-xs text-muted">设备 ID (17位) *</label>
+          <label class="mb-1 block text-xs text-muted">{{ t('account.scan.deviceIdLabel') }}</label>
           <div class="flex gap-2">
-            <UiInput v-model="form.deviceId" placeholder="扫描或手动输入 DeviceID" class="flex-1 uppercase" />
-            <UiButton size="sm" :loading="lookingUp" @click="lookupDevice">查找</UiButton>
+            <UiInput v-model="form.deviceId" :placeholder="t('account.scan.deviceIdPlaceholder')" class="flex-1 uppercase" />
+            <UiButton size="sm" :loading="lookingUp" @click="lookupDevice">{{ t('account.scan.lookup') }}</UiButton>
           </div>
         </div>
 
         <div v-if="deviceFound" class="flex items-center justify-between rounded-signal border border-primary/30 bg-primary-soft p-2.5 text-xs text-primary">
           <div class="space-y-0.5">
-            <div>型号：<span class="font-medium text-ink">{{ deviceFound.model || '标准IPC' }}</span></div>
-            <div>状态：<span :class="deviceFound.online ? 'text-success' : 'text-danger'">{{ deviceFound.online ? '在线' : '离线' }}</span></div>
+            <div>{{ t('account.scan.model') }}<span class="font-medium text-ink">{{ deviceFound.model || t('account.scan.defaultModel') }}</span></div>
+            <div>{{ t('account.scan.status') }}<span :class="deviceFound.online ? 'text-success' : 'text-danger'">{{ deviceFound.online ? t('common.online') : t('common.offline') }}</span></div>
           </div>
           <UiTag :color="deviceFound.bound ? 'warning' : 'success'">
-            {{ deviceFound.bound ? '已绑定' : '可绑定' }}
+            {{ deviceFound.bound ? t('account.scan.bound') : t('account.scan.bindable') }}
           </UiTag>
         </div>
 
         <div>
-          <label class="mb-1 block text-xs text-muted">设备验证码 (6位) *</label>
-          <UiInput v-model="form.verifyCode" placeholder="机身标签 6 位验证码" />
+          <label class="mb-1 block text-xs text-muted">{{ t('account.scan.verifyCodeLabel') }}</label>
+          <UiInput v-model="form.verifyCode" :placeholder="t('account.scan.verifyCodePlaceholder')" />
         </div>
 
         <div>
-          <label class="mb-1 block text-xs text-muted">设备名称 (选填)</label>
-          <UiInput v-model="form.name" placeholder="如：正门摄像头、库房监控" />
+          <label class="mb-1 block text-xs text-muted">{{ t('account.scan.nameLabel') }}</label>
+          <UiInput v-model="form.name" :placeholder="t('account.scan.namePlaceholder')" />
         </div>
 
         <div>
-          <label class="mb-1 block text-xs text-muted">所属分组 *</label>
+          <label class="mb-1 block text-xs text-muted">{{ t('account.scan.groupLabel') }}</label>
           <UiSelect v-model="form.groupId" :options="groupOptions" class="w-full" />
         </div>
 
         <div class="pt-2">
           <UiButton variant="primary" class="w-full justify-center" :loading="binding" @click="submitBind">
-            确认绑定设备
+            {{ t('account.scan.submit') }}
           </UiButton>
         </div>
       </div>

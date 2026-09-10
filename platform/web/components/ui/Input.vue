@@ -1,4 +1,5 @@
 <script setup lang="ts">
+const { t } = useI18n()
 // 输入框（PRD 基线：小圆角、浅灰边框、聚焦品牌蓝）
 const props = withDefaults(defineProps<{
   modelValue?: string | number | null
@@ -45,7 +46,7 @@ const heights = { sm: 'h-7 text-xs', md: 'h-8 text-sm', lg: 'h-10 text-sm' }
     />
     <button
       v-if="clearable && modelValue !== '' && modelValue != null" type="button"
-      aria-label="清空"
+      :aria-label="t('common.clear')"
       class="ml-1 hidden rounded-chrome text-placeholder hover:text-body group-hover/ipc:block focus-visible:block"
       @click="emit('update:modelValue', ''); emit('clear')"
     >

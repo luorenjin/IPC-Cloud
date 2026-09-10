@@ -1,4 +1,5 @@
 <script setup lang="ts">
+const { t } = useI18n()
 // 分页
 const props = withDefaults(defineProps<{
   page: number
@@ -27,13 +28,13 @@ function go(p: number) {
 
 <template>
   <div class="flex flex-wrap items-center justify-end gap-3 pt-3 text-sm text-muted">
-    <span>共 {{ total }} 条</span>
+    <span>{{ t('page.totalCount', { n: total }) }}</span>
     <UiSelect
-      :model-value="String(pageSize)" :options="pageSizes.map((s) => ({ label: s + ' 条/页', value: String(s) }))"
+      :model-value="String(pageSize)" :options="pageSizes.map((s) => ({ label: t('page.perPage', { n: s }), value: String(s) }))"
       width="w-28" size="sm" @update:model-value="emit('update:pageSize', Number($event)); emit('update:page', 1)"
     />
     <div class="flex items-center gap-1">
-      <button type="button" aria-label="上一页" class="flex h-7 w-7 items-center justify-center rounded-chrome border border-line bg-surface text-muted transition-colors hover:border-primary hover:text-primary disabled:cursor-not-allowed disabled:opacity-40" :disabled="page <= 1" @click="go(page - 1)">
+      <button type="button" :aria-label="t('page.prev')" class="flex h-7 w-7 items-center justify-center rounded-chrome border border-line bg-surface text-muted transition-colors hover:border-primary hover:text-primary disabled:cursor-not-allowed disabled:opacity-40" :disabled="page <= 1" @click="go(page - 1)">
         <Icon name="chevron-left" :size="14" />
       </button>
       <template v-for="(p, i) in list" :key="i">
@@ -43,12 +44,12 @@ function go(p: number) {
           type="button"
           class="h-7 min-w-7 rounded-chrome border px-1.5 text-sm transition-colors"
           :class="p === page ? 'border-primary bg-primary text-white' : 'border-line bg-surface text-muted hover:border-primary hover:text-primary'"
-          :aria-label="`第 ${p} 页`"
+          :aria-label="t('page.nth', { n: p })"
           :aria-current="p === page ? 'page' : undefined"
           @click="go(Number(p))"
         >{{ p }}</button>
       </template>
-      <button type="button" aria-label="下一页" class="flex h-7 w-7 items-center justify-center rounded-chrome border border-line bg-surface text-muted transition-colors hover:border-primary hover:text-primary disabled:cursor-not-allowed disabled:opacity-40" :disabled="page >= pages" @click="go(page + 1)">
+      <button type="button" :aria-label="t('page.next')" class="flex h-7 w-7 items-center justify-center rounded-chrome border border-line bg-surface text-muted transition-colors hover:border-primary hover:text-primary disabled:cursor-not-allowed disabled:opacity-40" :disabled="page >= pages" @click="go(page + 1)">
         <Icon name="chevron-right" :size="14" />
       </button>
     </div>

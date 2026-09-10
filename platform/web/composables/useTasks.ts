@@ -25,6 +25,7 @@ function fromServer(t: any): TaskItem {
 
 export function useTasks() {
   const api = useApi()
+  const { t } = useI18n()
   const tasks = useState<TaskItem[]>('tasks', () => [])
   const open = useState('taskDrawer', () => false)
   const loading = useState('taskLoading', () => false)
@@ -46,7 +47,7 @@ export function useTasks() {
       loaded.value = true
     } catch (e: any) {
       // 任务中心是辅助功能，失败给出可见反馈但不打断当前操作
-      toastApiError(e, '加载任务列表失败')
+      toastApiError(e, t('task.loadFailed'))
     } finally {
       loading.value = false
     }

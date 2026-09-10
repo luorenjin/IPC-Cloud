@@ -7,6 +7,7 @@
 const api = useApi()
 const router = useRouter()
 const { currentProject } = useAuth()
+const { t } = useI18n()
 
 // 变量名不用 dash——会遮蔽 utils/format 自动导入的 dash() 空值兜底函数
 const dashboard = ref<any>(null)
@@ -20,7 +21,7 @@ async function load(silent = false) {
     dashboard.value = await api.get('/dashboard')
   } catch (e: any) {
     // 首页整体加载失败要给出可重试的错误态，而不是留一片空白
-    loadErr.value = e?.msg || '总览数据加载失败'
+    loadErr.value = e?.msg || t('account.msg.dashboardLoadFailed')
   } finally {
     loading.value = false
   }
@@ -40,21 +41,21 @@ const offlineCount = computed(() => {
 /** 节点健康：全部在线为正常，否则给出离线台数 */
 const nodeSummary = computed(() => {
   const list = dashboard.value?.nodes || []
-  if (!list.length) return { text: '未配置', tone: 'muted' }
+  if (!list.length) return { text: t('account.dashboard.nodeUnset'), tone: 'muted' }
   const off = list.filter((n: any) => n.status !== 'online').length
   return off
-    ? { text: `${off}/${list.length} 离线`, tone: 'danger' }
-    : { text: `${list.length} 个正常`, tone: 'success' }
+    ? { text: t('account.dashboard.nodeOffline', { off, total: list.length }), tone: 'danger' }
+    : { text: t('account.dashboard.nodeHealthy', { n: list.length }), tone: 'success' }
 })
 
 /** 指标条：数值为 null 表示后端未提供，显示 — 而不是编造 0 */
 const metrics = computed(() => [
-  { label: '设备总数', value: dashboard.value?.deviceTotal ?? null, path: '/devices' },
-  { label: '在线', value: dashboard.value?.deviceOnline ?? null, tone: 'success', path: '/devices?status=online' },
-  { label: '离线', value: dashboard.value ? offlineCount.value : null, tone: offlineCount.value ? 'danger' : undefined, path: '/devices?status=offline' },
-  { label: '通道数', value: dashboard.value?.channelTotal ?? null, path: '/live' },
-  { label: '播放中', value: dashboard.value?.playing ?? null, tone: 'primary', path: '/live' },
-  { label: '今日告警', value: dashboard.value?.alarmToday ?? null, tone: dashboard.value?.alarmToday ? 'warning' : undefined, path: '/alarms' }
+  { label: t('account.dashboard.deviceTotal'), value: dashboard.value?.deviceTotal ?? null, path: '/devices' },
+  { label: t('account.dashboard.deviceOnline'), value: dashboard.value?.deviceOnline ?? null, tone: 'success', path: '/devices?status=online' },
+  { label: t('account.dashboard.deviceOffline'), value: dashboard.value ? offlineCount.value : null, tone: offlineCount.value ? 'danger' : undefined, path: '/devices?status=offline' },
+  { label: t('account.dashboard.channelTotal'), value: dashboard.value?.channelTotal ?? null, path: '/live' },
+  { label: t('account.dashboard.playing'), value: dashboard.value?.playing ?? null, tone: 'primary', path: '/live' },
+  { label: t('account.dashboard.alarmToday'), value: dashboard.value?.alarmToday ?? null, tone: dashboard.value?.alarmToday ? 'warning' : undefined, path: '/alarms' }
 ])
 
 const TONE_CLASS: Record<string, string> = {
@@ -66,7 +67,7 @@ const TONE_CLASS: Record<string, string> = {
 const srcRows = computed(() => {
   // 来源展示名/颜色见 utils/enums.ts SOURCE_MAP（PRD §9.1 四色语义固定）
   const rows = SOURCES.map((k) => ({
-    key: k, label: SOURCE_MAP[k].longLabel, color: SOURCE_MAP[k].cssVar,
+    key: k, label: t(SOURCE_MAP[k].longLabelKey), color: SOURCE_MAP[k].cssVar,
     count: dashboard.value?.bySource?.[k] ?? 0
   }))
   const max = Math.max(1, ...rows.map((r) => r.count))
@@ -101,8 +102,8 @@ async function loadNames(alarms: any[]) {
 const alarmRows = computed(() => (dashboard.value?.recentAlarms || []).slice(0, 10).map((a: any) => ({
   id: a.id,
   level: a.level || 'info',
-  kind: alarmKindName(a.kind),
-  msg: a.data?.error?.msg || a.data?.name || alarmKindName(a.kind),
+  kind: t(alarmKindKey(a.kind)),
+  msg: a.data?.error?.msg || a.data?.name || t(alarmKindKey(a.kind)),
   src: nameMap.value[a.channelId] || nameMap.value[a.deviceId] || a.channelId || a.deviceId || '—',
   ts: a.ts || 0
 })))
@@ -131,7 +132,7 @@ useWs((ev: any) => {
         <Icon name="alert-circle" :size="16" class="shrink-0 text-danger" />
         <span class="text-body">{{ loadErr }}</span>
       </div>
-      <UiButton size="sm" @click="load()">重试</UiButton>
+      <UiButton size="sm" @click="load()">{{ t('common.retry') }}</UiButton>
     </div>
 
     <!-- 骨架屏：首屏加载时占位，避免布局跳动 -->
@@ -161,15 +162,15 @@ useWs((ev: any) => {
         <section class="flex min-h-0 flex-col rounded-signal border border-line bg-surface">
           <header class="flex items-center justify-between gap-2 border-b border-line-soft px-4 py-2.5">
             <h2 class="flex items-center gap-1.5 text-sm font-semibold text-ink">
-              <Icon name="activity" :size="15" class="text-primary" />实时告警
+              <Icon name="activity" :size="15" class="text-primary" />{{ t('account.dashboard.recentAlarms') }}
             </h2>
             <NuxtLink to="/alarms" class="flex items-center gap-0.5 rounded-chrome text-xs text-muted transition-colors hover:text-primary">
-              查看全部<Icon name="chevron-right" :size="12" />
+              {{ t('account.dashboard.viewAll') }}<Icon name="chevron-right" :size="12" />
             </NuxtLink>
           </header>
 
           <div v-if="!alarmRows.length" class="flex-1">
-            <UiEmptyState text="暂无告警记录" hint="设备上报事件或平台检测到异常时，会实时出现在这里。" />
+            <UiEmptyState :text="t('account.dashboard.alarmEmpty')" :hint="t('account.dashboard.alarmEmptyHint')" />
           </div>
           <ul v-else class="max-h-[26rem] divide-y divide-line-soft overflow-y-auto">
             <li v-for="a in alarmRows" :key="a.id">
@@ -182,7 +183,7 @@ useWs((ev: any) => {
                 <span class="w-11 shrink-0 font-mono text-placeholder">{{ fmtHm(a.ts) }}</span>
                 <span class="w-28 shrink-0 truncate font-medium text-ink">{{ a.src }}</span>
                 <span class="min-w-0 flex-1 truncate text-body">{{ a.msg }}</span>
-                <span class="shrink-0 text-placeholder">{{ ago(a.ts) }}</span>
+                <span class="shrink-0 text-placeholder">{{ ago(a.ts, t) }}</span>
               </button>
             </li>
           </ul>
@@ -191,12 +192,12 @@ useWs((ev: any) => {
         <!-- 侧栏：在线率 + 来源分布 + 节点健康 -->
         <aside class="space-y-3">
           <section class="rounded-signal border border-line bg-surface px-4 py-4">
-            <p class="text-xs text-muted">设备在线率</p>
+            <p class="text-xs text-muted">{{ t('account.dashboard.onlineRate') }}</p>
             <div class="mt-1 flex items-baseline gap-2">
               <span class="font-mono text-3xl font-semibold text-ink">
                 {{ onlineRate === null ? EMPTY : onlineRate + '%' }}
               </span>
-              <span v-if="offlineCount" class="text-xs text-danger">{{ offlineCount }} 台离线</span>
+              <span v-if="offlineCount" class="text-xs text-danger">{{ t('account.dashboard.offlineDevices', { n: offlineCount }) }}</span>
             </div>
             <div class="mt-2.5 h-1.5 overflow-hidden rounded-full bg-line">
               <div
@@ -210,9 +211,9 @@ useWs((ev: any) => {
           </section>
 
           <section class="rounded-signal border border-line bg-surface px-4 py-4">
-            <p class="mb-2.5 text-xs text-muted">设备来源分布</p>
+            <p class="mb-2.5 text-xs text-muted">{{ t('account.dashboard.sourceDist') }}</p>
             <p v-if="!hasAnyDevice" class="text-xs text-placeholder">
-              还没有设备。<NuxtLink to="/devices" class="text-primary hover:underline">去添加</NuxtLink>
+              {{ t('account.dashboard.noDevice') }}<NuxtLink to="/devices" class="text-primary hover:underline">{{ t('account.dashboard.goAddDevice') }}</NuxtLink>
             </p>
             <div v-else class="space-y-2">
               <div v-for="r in srcRows" :key="r.key" class="flex items-center gap-2.5">
@@ -230,7 +231,7 @@ useWs((ev: any) => {
             class="flex items-center justify-between rounded-signal border border-line bg-surface px-4 py-3 transition-colors hover:border-primary"
           >
             <span class="flex items-center gap-1.5 text-xs text-muted">
-              <Icon name="server" :size="14" />媒体节点
+              <Icon name="server" :size="14" />{{ t('account.dashboard.mediaNodes') }}
             </span>
             <span class="text-xs font-medium" :class="TONE_CLASS[nodeSummary.tone] || 'text-muted'">
               {{ nodeSummary.text }}

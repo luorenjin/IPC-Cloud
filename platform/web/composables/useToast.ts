@@ -42,8 +42,11 @@ export function useToast() {
 }
 
 // 统一错误呈现（MGR-15：错误码 + 原因 + 建议）
-export function toastApiError(e: any, fallback = '操作失败') {
-  const msg = e?.msg || e?.message || fallback
+// fallback 由调用方传入具体语境文案（如「加载设备列表失败」）；
+// 这里不再内置中文默认值，缺省时用通用词条。
+export function toastApiError(e: any, fallback?: string) {
+  const { t } = useI18n()
+  const msg = e?.msg || e?.message || fallback || t('common.loadFailed')
   const title = e?.code ? `${e.code}：${msg}` : msg
   useToast().error({ title, suggest: e?.suggest })
 }

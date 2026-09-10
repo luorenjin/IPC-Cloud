@@ -2,6 +2,7 @@
 // 媒体节点管理（SYS-01/02）：节点增删改查、禁用、自检、流列表抽屉与踢流，WebSocket 实时刷新状态
 const api = useApi()
 const toast = useToast()
+const { t } = useI18n()
 const confirm = useConfirm()
 const { currentProject, loadMe } = useAuth()
 
@@ -14,7 +15,7 @@ async function loadNodes() {
     const res: any = await api.get('/media-nodes')
     nodes.value = res?.items || []
   } catch (e: any) {
-    toastApiError(e, '加载媒体节点失败')
+    toastApiError(e, t('system.msg.nodesLoadFailed'))
   } finally {
     loading.value = false
   }
@@ -35,7 +36,7 @@ const LAMP_STYLE: Record<string, { dot: string; text: string }> = {
   info: { dot: 'bg-info', text: 'text-info' }
 }
 function nodeLamp(row: any) {
-  if (row.disabled) return { ...LAMP_STYLE.info, label: '已禁用' }
+  if (row.disabled) return { ...LAMP_STYLE.info, label: t('common.disabled') }
   const t = statusTag(row.status)
   return { ...(LAMP_STYLE[t.color] || LAMP_STYLE.info), label: t.text }
 }
@@ -160,14 +161,14 @@ function isValidWeight(v: any): boolean {
 
 async function saveNode() {
   const f = nodeDlg.form
-  if (!f.name.trim() || !f.apiUrl.trim()) return toast.warning('请填写节点名称与 API 地址')
-  if (nodeDlg.mode === 'create' && !f.secret.trim()) return toast.warning('请填写接入密钥')
-  if (nodeDlg.mode === 'create' && !f.publicHost.trim()) return toast.warning('请填写公网地址')
+  if (!f.name.trim() || !f.apiUrl.trim()) return toast.warning(t('system.msg.nodeNeedNameApi'))
+  if (nodeDlg.mode === 'create' && !f.secret.trim()) return toast.warning(t('system.msg.nodeNeedSecret'))
+  if (nodeDlg.mode === 'create' && !f.publicHost.trim()) return toast.warning(t('system.msg.nodeNeedPublicHost'))
   if (!isValidPort(f.httpPort) || !isValidPort(f.httpsPort) || !isValidPort(f.rtmpPort) || !isValidPort(f.rtspPort)) {
-    return toast.warning('端口须为 1–65535 的整数')
+    return toast.warning(t('system.msg.nodePortRange'))
   }
-  if (!isValidMaxStreams(f.maxStreams)) return toast.warning('最大流数须为不小于 1 的整数')
-  if (!isValidWeight(f.weight)) return toast.warning('权重须为 1–100 的整数')
+  if (!isValidMaxStreams(f.maxStreams)) return toast.warning(t('system.msg.nodeMaxStreamsRange'))
+  if (!isValidWeight(f.weight)) return toast.warning(t('system.msg.nodeWeightRange'))
   nodeDlg.saving = true
   try {
     const body: any = {
@@ -185,15 +186,15 @@ async function saveNode() {
     if (f.secret.trim()) body.secret = f.secret.trim()
     if (nodeDlg.mode === 'create') {
       await api.post('/media-nodes', body)
-      toast.success('节点已创建')
+      toast.success(t('system.msg.nodeCreated'))
     } else {
       await api.put('/media-nodes/' + nodeDlg.id, body)
-      toast.success('节点已更新')
+      toast.success(t('system.msg.nodeUpdated'))
     }
     nodeDlg.visible = false
     await loadNodes()
   } catch (e: any) {
-    toastApiError(e, '保存失败')
+    toastApiError(e, t('common.saveFailed'))
   } finally {
     nodeDlg.saving = false
   }
@@ -211,22 +212,22 @@ async function selfcheck(row: any) {
       checkingId.value = null
       const fresh = nodes.value.find((n) => n.id === row.id)
       if (!fresh) return
-      if (fresh.status === 'online') { toast.success('自检通过：节点「' + fresh.name + '」在线'); return }
+      if (fresh.status === 'online') { toast.success(t('system.msg.selfcheckOk', { name: fresh.name })); return }
       // ACC-02：后端自检失败会带回具体原因（statusReason），优先呈现它而非泛化猜测
       toast.error({
-        title: '自检失败：节点「' + fresh.name + '」不可达',
-        suggest: fresh.statusReason || '请检查 API 地址与端口是否正确、节点服务是否启动、网络是否连通。'
+        title: t('system.msg.selfcheckFailed', { name: fresh.name }),
+        suggest: fresh.statusReason || t('system.msg.selfcheckFailedSuggest')
       })
     }, 1500)
   } catch (e: any) {
     checkingId.value = null
     // 自检失败呈现具体原因：不可达 / secret 错误 / 版本过低
     const msg = String(e?.msg || '')
-    let suggest = e?.suggest || '节点服务不可达：请检查 API 地址与端口是否正确、服务是否启动、网络是否连通。'
-    if (/secret|密钥|auth|401/i.test(msg)) suggest = '接入密钥（secret）错误：请核对节点配置中的 secret 后重试。'
-    else if (/version|版本/i.test(msg)) suggest = '节点版本过低：请升级流媒体服务后重试。'
+    let suggest = e?.suggest || t('system.msg.selfcheckUnreachable')
+    if (/secret|密钥|auth|401/i.test(msg)) suggest = t('system.msg.selfcheckBadSecret')
+    else if (/version|版本/i.test(msg)) suggest = t('system.msg.selfcheckOldVersion')
     else if (msg) suggest = msg
-    toast.error({ title: (e?.code ? e.code + '：' : '') + (msg || '自检失败'), suggest })
+    toast.error({ title: (e?.code ? e.code + '：' : '') + (msg || t('system.msg.selfcheckTitle')), suggest })
   }
 }
 
@@ -234,40 +235,40 @@ async function selfcheck(row: any) {
 async function toggleDisable(row: any) {
   const disabling = !row.disabled
   const ok = await confirm.ask({
-    title: disabling ? '禁用节点' : '启用节点',
+    title: disabling ? t('system.nodes.disableTitle') : t('system.nodes.enableTitle'),
     message: disabling
-      ? '确定禁用节点「' + row.name + '」？'
-      : '确定启用节点「' + row.name + '」？',
-    detail: disabling ? '禁用后新流不再调度到该节点，已有流不受影响。' : '启用后恢复参与调度。',
+      ? t('system.nodes.disableMsg', { name: row.name })
+      : t('system.nodes.enableMsg', { name: row.name }),
+    detail: disabling ? t('system.nodes.disableDetail') : t('system.nodes.enableDetail'),
     danger: disabling,
-    confirmText: disabling ? '禁用' : '启用'
+    confirmText: disabling ? t('common.disable') : t('common.enable')
   })
   if (!ok) return
   try {
     await api.put('/media-nodes/' + row.id, { disabled: disabling })
-    toast.success(disabling ? '已禁用' : '已启用')
+    toast.success(disabling ? t('system.msg.nodeDisabled') : t('system.msg.nodeEnabled'))
     await loadNodes()
   } catch (e: any) {
-    toastApiError(e, '操作失败')
+    toastApiError(e, t('system.msg.opFailed'))
   }
 }
 
 /* 删除节点（有活跃流时禁用按钮并 tooltip 说明） */
 async function removeNode(row: any) {
   const ok = await confirm.ask({
-    title: '删除节点',
-    message: '确定删除节点「' + row.name + '」？',
-    detail: '节点存在活跃流时无法删除，请先踢流。',
+    title: t('system.nodes.deleteTitle'),
+    message: t('system.nodes.deleteMsg', { name: row.name }),
+    detail: t('system.nodes.deleteDetail'),
     danger: true,
-    confirmText: '删除'
+    confirmText: t('common.delete')
   })
   if (!ok) return
   try {
     await api.del('/media-nodes/' + row.id)
-    toast.success('已删除')
+    toast.success(t('common.deletedOk'))
     await loadNodes()
   } catch (e: any) {
-    toastApiError(e, '删除失败')
+    toastApiError(e, t('common.deleteFailed'))
   }
 }
 
@@ -288,7 +289,7 @@ async function showDetail(row: any) {
     const res: any = await api.get('/media-nodes/' + row.id + '/streams')
     detail.items = res?.items || []
   } catch (e: any) {
-    toastApiError(e, '获取流列表失败')
+    toastApiError(e, t('system.msg.streamsLoadFailed'))
   } finally {
     detail.loading = false
   }
@@ -297,31 +298,31 @@ async function showDetail(row: any) {
 /* 踢流 */
 async function kickStream(ss: any) {
   const ok = await confirm.ask({
-    title: '踢流',
-    message: '确定断开流「' + ss.stream + '」？',
-    detail: '踢流后对应观看端将停止播放。',
+    title: t('system.nodes.kickTitle'),
+    message: t('system.nodes.kickMsg', { stream: ss.stream }),
+    detail: t('system.nodes.kickDetail'),
     danger: true,
-    confirmText: '踢流'
+    confirmText: t('system.nodes.kick')
   })
   if (!ok) return
   try {
     await api.post('/media-nodes/' + detail.node.id + '/streams/' + ss.id + '/kick')
-    toast.success('已踢流')
+    toast.success(t('system.msg.kicked'))
     await showDetail(detail.node)
     await loadNodes()
   } catch (e: any) {
-    toastApiError(e, '踢流失败')
+    toastApiError(e, t('system.msg.kickFailed'))
   }
 }
 
-const streamCols = [
-  { key: 'app', label: '应用', width: '90px' },
-  { key: 'stream', label: '流名称', width: '180px' },
-  { key: 'channel', label: '来源通道', width: '130px' },
-  { key: 'viewers', label: '观看数', width: '80px', align: 'center' as const },
-  { key: 'bitrate', label: '码率', width: '90px', align: 'right' as const },
-  { key: 'ops', label: '操作', width: '70px', align: 'center' as const }
-]
+const streamCols = computed(() => [
+  { key: 'app', label: t('system.nodes.colApp'), width: '90px' },
+  { key: 'stream', label: t('system.nodes.colStream'), width: '180px' },
+  { key: 'channel', label: t('system.nodes.colChannel'), width: '130px' },
+  { key: 'viewers', label: t('system.nodes.colViewers'), width: '80px', align: 'center' as const },
+  { key: 'bitrate', label: t('system.nodes.colBitrate'), width: '90px', align: 'right' as const },
+  { key: 'ops', label: t('common.action'), width: '70px', align: 'center' as const }
+])
 
 
 /* WebSocket 实时刷新：节点状态变化事件 */
@@ -338,14 +339,14 @@ onMounted(async () => {
 
 <template>
   <div class="space-y-3">
-    <UiCard title="媒体节点" flat>
+    <UiCard :title="t('system.nodes.title')" flat>
       <template #extra>
         <div class="flex items-center gap-2">
           <UiButton size="sm" :disabled="loading" @click="loadNodes">
-            <UiIcon name="refresh" :size="14" />刷新
+            <UiIcon name="refresh" :size="14" />{{ t('common.refresh') }}
           </UiButton>
           <UiButton variant="primary" size="sm" @click="openNodeDlg('create')">
-            <UiIcon name="plus" :size="14" />新建节点
+            <UiIcon name="plus" :size="14" />{{ t('system.nodes.create') }}
           </UiButton>
         </div>
       </template>
@@ -370,15 +371,15 @@ onMounted(async () => {
               <div class="flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[11px] text-placeholder">
                 <span class="max-w-full truncate" :title="row.apiUrl">{{ row.apiUrl }}</span>
                 <span>v{{ row.version || '—' }}</span>
-                <span :class="row.weight === 0 ? 'text-placeholder' : ''">权重 {{ row.weight ?? 100 }}</span>
-                <span>心跳 {{ ago(row.lastKeepalive) }}</span>
+                <span :class="row.weight === 0 ? 'text-placeholder' : ''">{{ t('system.nodes.weightLabel', { n: row.weight ?? 100 }) }}</span>
+                <span>{{ t('system.nodes.keepalive', { t: ago(row.lastKeepalive, t) }) }}</span>
               </div>
 
               <!-- 迷你实时曲线：负载 / 带宽 / 在线通道数（最近若干次轮询的采样点连线） -->
               <div class="grid grid-cols-3 gap-2">
                 <div class="rounded-signal bg-zone px-2 py-1.5">
                   <div class="flex items-baseline justify-between gap-1">
-                    <span class="text-[11px] text-muted">流数占比</span>
+                    <span class="text-[11px] text-muted">{{ t('system.nodes.streamUsage') }}</span>
                     <span class="font-mono text-xs" :class="row.maxStreams && row.streams >= row.maxStreams ? 'text-danger' : 'text-body'">{{ loadPct(row) }}%</span>
                   </div>
                   <svg v-if="(nodeHistory[row.id]?.load || []).length >= 2" viewBox="0 0 64 22" class="mt-1 h-5 w-full" preserveAspectRatio="none">
@@ -387,11 +388,11 @@ onMounted(async () => {
                       stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"
                     />
                   </svg>
-                  <div v-else class="mt-1 flex h-5 items-center text-[10px] text-placeholder">采集中</div>
+                  <div v-else class="mt-1 flex h-5 items-center text-[10px] text-placeholder">{{ t('system.nodes.sampling') }}</div>
                 </div>
                 <div class="rounded-signal bg-zone px-2 py-1.5">
                   <div class="flex items-baseline justify-between gap-1">
-                    <span class="text-[11px] text-muted">带宽 入/出</span>
+                    <span class="text-[11px] text-muted">{{ t('system.nodes.bandwidth') }}</span>
                   </div>
                   <svg v-if="(nodeHistory[row.id]?.bwIn || []).length >= 2" viewBox="0 0 64 22" class="mt-1 h-5 w-full" preserveAspectRatio="none">
                     <polyline
@@ -403,14 +404,14 @@ onMounted(async () => {
                       stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"
                     />
                   </svg>
-                  <div v-else class="mt-1 flex h-5 items-center text-[10px] text-placeholder">采集中</div>
+                  <div v-else class="mt-1 flex h-5 items-center text-[10px] text-placeholder">{{ t('system.nodes.sampling') }}</div>
                   <div class="mt-0.5 truncate font-mono text-[10px] text-placeholder">
                     {{ fmtRate(row.bytesIn ?? row.bwIn) }} / {{ fmtRate(row.bytesOut ?? row.bwOut) }}
                   </div>
                 </div>
                 <div class="rounded-signal bg-zone px-2 py-1.5">
                   <div class="flex items-baseline justify-between gap-1">
-                    <span class="text-[11px] text-muted">在线通道</span>
+                    <span class="text-[11px] text-muted">{{ t('system.nodes.onlineChannels') }}</span>
                     <span class="font-mono text-xs text-body">{{ row.playing ?? row.viewers ?? 0 }}</span>
                   </div>
                   <svg v-if="(nodeHistory[row.id]?.playing || []).length >= 2" viewBox="0 0 64 22" class="mt-1 h-5 w-full" preserveAspectRatio="none">
@@ -419,34 +420,34 @@ onMounted(async () => {
                       stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"
                     />
                   </svg>
-                  <div v-else class="mt-1 flex h-5 items-center text-[10px] text-placeholder">采集中</div>
+                  <div v-else class="mt-1 flex h-5 items-center text-[10px] text-placeholder">{{ t('system.nodes.sampling') }}</div>
                 </div>
               </div>
 
               <div class="text-xs text-placeholder">
-                流数/上限
+                {{ t('system.nodes.streamsOfMax') }}
                 <span class="font-mono" :class="row.maxStreams && row.streams >= row.maxStreams ? 'text-danger' : 'text-body'">{{ row.streams ?? 0 }} / {{ row.maxStreams ?? 0 }}</span>
               </div>
             </div>
 
             <!-- 操作 -->
             <div class="mt-auto flex flex-wrap items-center gap-1 border-t border-line-soft px-2.5 py-2">
-              <UiButton variant="text" size="sm" @click="openNodeDlg('edit', row)">编辑</UiButton>
+              <UiButton variant="text" size="sm" @click="openNodeDlg('edit', row)">{{ t('common.edit') }}</UiButton>
               <UiButton variant="text" size="sm" :disabled="checkingId === row.id" @click="selfcheck(row)">
-                {{ checkingId === row.id ? '自检中…' : '自检' }}
+                {{ checkingId === row.id ? t('system.nodes.selfchecking') : t('system.nodes.selfcheck') }}
               </UiButton>
-              <UiButton variant="text" size="sm" @click="showDetail(row)">详情</UiButton>
-              <UiButton variant="text" size="sm" @click="toggleDisable(row)">{{ row.disabled ? '启用' : '禁用' }}</UiButton>
-              <UiTooltip v-if="row.streams > 0" label="节点存在活跃流，请先在详情中踢流">
-                <span class="ml-auto"><UiButton variant="dangerText" size="sm" disabled>删除</UiButton></span>
+              <UiButton variant="text" size="sm" @click="showDetail(row)">{{ t('common.detail') }}</UiButton>
+              <UiButton variant="text" size="sm" @click="toggleDisable(row)">{{ row.disabled ? t('common.enable') : t('common.disable') }}</UiButton>
+              <UiTooltip v-if="row.streams > 0" :label="t('system.nodes.activeStreamTip')">
+                <span class="ml-auto"><UiButton variant="dangerText" size="sm" disabled>{{ t('common.delete') }}</UiButton></span>
               </UiTooltip>
-              <UiButton v-else variant="dangerText" size="sm" class="ml-auto" @click="removeNode(row)">删除</UiButton>
+              <UiButton v-else variant="dangerText" size="sm" class="ml-auto" @click="removeNode(row)">{{ t('common.delete') }}</UiButton>
             </div>
           </div>
         </div>
-        <UiEmptyState v-else-if="!loading" text="暂无媒体节点">
+        <UiEmptyState v-else-if="!loading" :text="t('system.nodes.empty')">
           <template #action>
-            <UiButton variant="primary" @click="openNodeDlg('create')">新建节点</UiButton>
+            <UiButton variant="primary" @click="openNodeDlg('create')">{{ t('system.nodes.create') }}</UiButton>
           </template>
         </UiEmptyState>
       </UiLoading>
@@ -455,66 +456,66 @@ onMounted(async () => {
     <!-- 新建/编辑节点对话框 -->
     <UiDialog
       v-model:open="nodeDlg.visible"
-      :title="nodeDlg.mode === 'create' ? '新建媒体节点' : '编辑媒体节点'"
+      :title="nodeDlg.mode === 'create' ? t('system.nodes.createDlgTitle') : t('system.nodes.editDlgTitle')"
       width="max-w-lg"
     >
       <div class="grid grid-cols-[110px_1fr] items-center gap-x-3 gap-y-3">
-        <span class="text-right text-sm text-body"><span class="text-danger">*</span>节点名称</span>
-        <UiInput v-model="nodeDlg.form.name" placeholder="节点名称" :maxlength="50" />
-        <span class="text-right text-sm text-body"><span class="text-danger">*</span>API 地址</span>
+        <span class="text-right text-sm text-body"><span class="text-danger">*</span>{{ t('system.nodes.name') }}</span>
+        <UiInput v-model="nodeDlg.form.name" :placeholder="t('system.nodes.name')" :maxlength="50" />
+        <span class="text-right text-sm text-body"><span class="text-danger">*</span>{{ t('system.nodes.apiUrl') }}</span>
         <UiInput v-model="nodeDlg.form.apiUrl" placeholder="http://host:port" :maxlength="200" />
         <span class="text-right text-sm text-body">
-          <span v-if="nodeDlg.mode === 'create'" class="text-danger">*</span>接入密钥
+          <span v-if="nodeDlg.mode === 'create'" class="text-danger">*</span>{{ t('system.nodes.secret') }}
         </span>
         <UiInput
           v-model="nodeDlg.form.secret" type="password"
-          :placeholder="nodeDlg.mode === 'create' ? '节点接入密钥' : '留空表示不修改'" :maxlength="128"
+          :placeholder="nodeDlg.mode === 'create' ? t('system.nodes.secretPlaceholder') : t('system.nodes.secretKeepPlaceholder')" :maxlength="128"
         />
         <span class="text-right text-sm text-body">
-          <span v-if="nodeDlg.mode === 'create'" class="text-danger">*</span>公网地址
+          <span v-if="nodeDlg.mode === 'create'" class="text-danger">*</span>{{ t('system.nodes.publicHost') }}
         </span>
-        <UiInput v-model="nodeDlg.form.publicHost" placeholder="公网访问域名或 IP" :maxlength="200" />
-        <span class="text-right text-sm text-body">HTTP 端口</span>
+        <UiInput v-model="nodeDlg.form.publicHost" :placeholder="t('system.nodes.publicHostPlaceholder')" :maxlength="200" />
+        <span class="text-right text-sm text-body">{{ t('system.nodes.httpPorts') }}</span>
         <div class="grid grid-cols-2 gap-3">
           <UiInput v-model="nodeDlg.form.httpPort" placeholder="80" :maxlength="5" />
           <UiInput v-model="nodeDlg.form.httpsPort" placeholder="443" :maxlength="5" />
         </div>
-        <span class="text-right text-sm text-body">RTMP / RTSP 端口</span>
+        <span class="text-right text-sm text-body">{{ t('system.nodes.mediaPorts') }}</span>
         <div class="grid grid-cols-2 gap-3">
           <UiInput v-model="nodeDlg.form.rtmpPort" placeholder="1936" :maxlength="5" />
           <UiInput v-model="nodeDlg.form.rtspPort" placeholder="554" :maxlength="5" />
         </div>
-        <span class="text-right text-sm text-body">RTP 端口段</span>
+        <span class="text-right text-sm text-body">{{ t('system.nodes.rtpRange') }}</span>
         <UiInput v-model="nodeDlg.form.rtpRange" placeholder="30000-30100" :maxlength="30" width="w-45" />
-        <span class="text-right text-sm text-body">最大流数</span>
+        <span class="text-right text-sm text-body">{{ t('system.nodes.maxStreams') }}</span>
         <UiInput v-model="nodeDlg.form.maxStreams" placeholder="200" :maxlength="5" width="w-45" />
-        <span class="text-right text-body text-sm">权重</span>
+        <span class="text-right text-body text-sm">{{ t('system.nodes.weight') }}</span>
         <UiInput v-model="nodeDlg.form.weight" placeholder="100" :maxlength="4" width="w-45" />
       </div>
       <template #footer>
-        <UiButton @click="nodeDlg.visible = false">取消</UiButton>
-        <UiButton variant="primary" :disabled="nodeDlg.saving" @click="saveNode">{{ nodeDlg.saving ? '保存中…' : '确定' }}</UiButton>
+        <UiButton @click="nodeDlg.visible = false">{{ t('common.cancel') }}</UiButton>
+        <UiButton variant="primary" :disabled="nodeDlg.saving" @click="saveNode">{{ nodeDlg.saving ? t('common.saving') : t('common.confirm') }}</UiButton>
       </template>
     </UiDialog>
 
     <!-- 节点详情抽屉（SYS-02） -->
-    <UiDrawer v-model:open="detail.open" :title="'节点详情 - ' + (detail.node?.name || '')" width="max-w-xl">
+    <UiDrawer v-model:open="detail.open" :title="t('system.nodes.detailTitle', { name: detail.node?.name || '' })" width="max-w-xl">
       <div class="space-y-4 p-5">
         <!-- 配置摘要 -->
         <div>
-          <p class="mb-2 text-sm font-semibold text-ink">配置摘要</p>
+          <p class="mb-2 text-sm font-semibold text-ink">{{ t('system.nodes.configSummary') }}</p>
           <div class="grid grid-cols-2 gap-x-4 gap-y-2 rounded border border-line bg-canvas p-3 text-[13px]">
-            <div class="flex gap-2"><span class="shrink-0 text-placeholder">API 地址</span><span class="truncate text-body" :title="detail.node?.apiUrl">{{ detail.node?.apiUrl || '—' }}</span></div>
-            <div class="flex gap-2"><span class="shrink-0 text-placeholder">公网地址</span><span class="truncate text-body">{{ detail.node?.publicHost || '—' }}</span></div>
-            <div class="flex gap-2"><span class="shrink-0 text-placeholder">端口</span><span class="text-body">HTTP {{ detail.node?.httpPort ?? '—' }} · HTTPS {{ detail.node?.httpsPort ?? '—' }} · RTMP {{ detail.node?.rtmpPort ?? '—' }} · RTSP {{ detail.node?.rtspPort ?? '—' }}</span></div>
-            <div class="flex gap-2"><span class="shrink-0 text-placeholder">RTP 段</span><span class="text-body">{{ detail.node?.rtpRange || '—' }}</span></div>
-            <div class="flex gap-2"><span class="shrink-0 text-placeholder">流数/上限</span><span class="text-body">{{ detail.node?.streams ?? 0 }} / {{ detail.node?.maxStreams ?? 0 }}</span></div>
-            <div class="flex gap-2"><span class="shrink-0 text-placeholder">权重</span><span class="text-body">{{ detail.node?.weight ?? 100 }}</span></div>
-            <div class="flex gap-2"><span class="shrink-0 text-placeholder">状态</span><UiTag :color="statusTag(detail.node?.status).color" dot>{{ statusTag(detail.node?.status).text }}</UiTag></div>
-            <div class="flex gap-2"><span class="shrink-0 text-placeholder">最近心跳</span><span class="text-body">{{ ago(detail.node?.lastKeepalive) }}</span></div>
+            <div class="flex gap-2"><span class="shrink-0 text-placeholder">{{ t('system.nodes.apiUrl') }}</span><span class="truncate text-body" :title="detail.node?.apiUrl">{{ detail.node?.apiUrl || '—' }}</span></div>
+            <div class="flex gap-2"><span class="shrink-0 text-placeholder">{{ t('system.nodes.publicHost') }}</span><span class="truncate text-body">{{ detail.node?.publicHost || '—' }}</span></div>
+            <div class="flex gap-2"><span class="shrink-0 text-placeholder">{{ t('system.nodes.ports') }}</span><span class="text-body">HTTP {{ detail.node?.httpPort ?? '—' }} · HTTPS {{ detail.node?.httpsPort ?? '—' }} · RTMP {{ detail.node?.rtmpPort ?? '—' }} · RTSP {{ detail.node?.rtspPort ?? '—' }}</span></div>
+            <div class="flex gap-2"><span class="shrink-0 text-placeholder">{{ t('system.nodes.rtpSeg') }}</span><span class="text-body">{{ detail.node?.rtpRange || '—' }}</span></div>
+            <div class="flex gap-2"><span class="shrink-0 text-placeholder">{{ t('system.nodes.streamsOfMax') }}</span><span class="text-body">{{ detail.node?.streams ?? 0 }} / {{ detail.node?.maxStreams ?? 0 }}</span></div>
+            <div class="flex gap-2"><span class="shrink-0 text-placeholder">{{ t('system.nodes.weight') }}</span><span class="text-body">{{ detail.node?.weight ?? 100 }}</span></div>
+            <div class="flex gap-2"><span class="shrink-0 text-placeholder">{{ t('common.status') }}</span><UiTag :color="statusTag(detail.node?.status).color" dot>{{ statusTag(detail.node?.status).text }}</UiTag></div>
+            <div class="flex gap-2"><span class="shrink-0 text-placeholder">{{ t('system.nodes.lastKeepalive') }}</span><span class="text-body">{{ ago(detail.node?.lastKeepalive, t) }}</span></div>
             <!-- ACC-02：仅离线且后端带回原因时呈现，占整行避免长文本挤压相邻字段 -->
             <div v-if="detail.node?.status !== 'online' && detail.node?.statusReason" class="col-span-2 flex gap-2">
-              <span class="shrink-0 text-placeholder">离线原因</span>
+              <span class="shrink-0 text-placeholder">{{ t('system.nodes.offlineReason') }}</span>
               <span class="text-danger">{{ detail.node.statusReason }}</span>
             </div>
           </div>
@@ -522,8 +523,8 @@ onMounted(async () => {
 
         <!-- 当前流列表 -->
         <div>
-          <p class="mb-2 text-sm font-semibold text-ink">当前流列表</p>
-          <UiTable :columns="streamCols" :rows="detail.items" :loading="detail.loading" dense empty="该节点暂无推流">
+          <p class="mb-2 text-sm font-semibold text-ink">{{ t('system.nodes.streamList') }}</p>
+          <UiTable :columns="streamCols" :rows="detail.items" :loading="detail.loading" dense :empty="t('system.nodes.streamEmpty')">
             <template #channel="{ row }">
               <span class="block truncate" :title="row.channel">{{ row.channel || '—' }}</span>
             </template>
@@ -532,17 +533,17 @@ onMounted(async () => {
               <span class="text-xs">{{ row.bitrate ? (row.bitrate / 1000).toFixed(0) + ' kbps' : '—' }}</span>
             </template>
             <template #ops="{ row }">
-              <UiButton variant="dangerText" size="sm" @click="kickStream(row)">踢流</UiButton>
+              <UiButton variant="dangerText" size="sm" @click="kickStream(row)">{{ t('system.nodes.kick') }}</UiButton>
             </template>
           </UiTable>
-          <p v-if="detail.items.length" class="mt-2 text-xs text-placeholder">开始时间：{{ fmtTime(detail.items[0].startedAt) }} 起，共 {{ detail.items.length }} 路</p>
+          <p v-if="detail.items.length" class="mt-2 text-xs text-placeholder">{{ t('system.nodes.streamStartedAt', { time: fmtTime(detail.items[0].startedAt), n: detail.items.length }) }}</p>
         </div>
       </div>
       <template #footer>
         <div class="flex justify-end gap-2">
-          <UiButton @click="detail.open = false">关闭</UiButton>
+          <UiButton @click="detail.open = false">{{ t('common.close') }}</UiButton>
           <UiButton variant="primary" :disabled="!detail.node" @click="showDetail(detail.node)">
-            <UiIcon name="refresh" :size="14" />刷新流列表
+            <UiIcon name="refresh" :size="14" />{{ t('system.nodes.refreshStreams') }}
           </UiButton>
         </div>
       </template>

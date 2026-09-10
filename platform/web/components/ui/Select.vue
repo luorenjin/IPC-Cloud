@@ -1,4 +1,5 @@
 <script setup lang="ts">
+const { t } = useI18n()
 // 下拉选择（Reka Select，PRD 基线：小圆角描边、激活项浅蓝）
 import {
   SelectRoot, SelectTrigger, SelectValue, SelectIcon, SelectPortal,
@@ -13,7 +14,7 @@ const props = withDefaults(defineProps<{
   disabled?: boolean
   width?: string
   align?: 'start' | 'center' | 'end'
-}>(), { placeholder: '请选择', size: 'md', disabled: false, width: 'w-full', align: 'start' })
+}>(), { placeholder: '', size: 'md', disabled: false, width: 'w-full', align: 'start' })
 
 const emit = defineEmits<{ 'update:modelValue': [v: any] }>()
 const open = ref(false)
@@ -53,7 +54,7 @@ function onModel(v: any) { emit('update:modelValue', dec(v)) }
             </span>
             <SelectItemText>{{ o.label }}</SelectItemText>
           </SelectItem>
-          <div v-if="!options.length" class="px-3 py-4 text-center text-xs text-placeholder">暂无数据</div>
+          <div v-if="!options.length" class="px-3 py-4 text-center text-xs text-placeholder">{{ t('common.noData') }}</div>
         </SelectViewport>
       </SelectContent>
     </SelectPortal>

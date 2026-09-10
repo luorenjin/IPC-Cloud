@@ -1,4 +1,5 @@
 <script setup lang="ts">
+const { t } = useI18n()
 // 确认对话框（全局单例，挂载于 app.vue；通过 useConfirm().ask() 调用）
 import {
   AlertDialogRoot, AlertDialogPortal, AlertDialogOverlay, AlertDialogContent,
@@ -28,8 +29,8 @@ watch(open, (v) => { if (!v) inputValue.value = '' })
               <template v-if="state.detail"><br /><span class="text-xs text-placeholder">{{ state.detail }}</span></template>
             </AlertDialogDescription>
             <div v-if="state.inputConfirm" class="mt-3">
-              <p class="mb-1 text-xs text-muted">请输入 <b class="text-danger">{{ state.inputConfirm }}</b> 以确认删除：</p>
-              <UiInput v-model="inputValue" :placeholder="state.inputPlaceholder || '设备名称'" size="sm" />
+              <p class="mb-1 text-xs text-muted">{{ t('confirm.typeToConfirm') }} <b class="text-danger">{{ state.inputConfirm }}</b></p>
+              <UiInput v-model="inputValue" :placeholder="state.inputPlaceholder || t('confirm.namePlaceholder')" size="sm" />
             </div>
           </div>
         </div>

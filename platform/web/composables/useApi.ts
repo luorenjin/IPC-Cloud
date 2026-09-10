@@ -68,7 +68,7 @@ export function useApi() {
       const body = e?.data || {}
       const err: ApiError = {
         code: body.code || 'E5000',
-        msg: body.msg || e?.message || '网络错误',
+        msg: body.msg || e?.message || '网络错误', // 无 i18n 上下文：中文兜底，页面会用 toastApiError 覆盖
         suggest: body.suggest
       }
       throw err
@@ -103,7 +103,7 @@ export function useApi() {
         const body = e?.data || {}
         const err: ApiError = {
           code: body.code || 'E5000',
-          msg: body.msg || e?.message || '网络错误',
+          msg: body.msg || e?.message || '网络错误', // 无 i18n 上下文：中文兜底，页面会用 toastApiError 覆盖
           suggest: body.suggest
         }
         throw err

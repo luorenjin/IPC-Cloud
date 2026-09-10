@@ -2,6 +2,7 @@
 // 操作日志（ACC-08）：筛选（时间范围/操作者/对象类型/动作）、分页与导出 CSV
 const api = useApi()
 const toast = useToast()
+const { t } = useI18n()
 const { currentProject, loadMe } = useAuth()
 
 const filters = reactive({
@@ -18,46 +19,46 @@ const items = ref<any[]>([])
 const loading = ref(false)
 
 /* 动作中文映射（未匹配的动作原样展示） */
-const ACTION_MAP: Record<string, string> = {
-  'device.add': '添加设备',
-  'device.delete': '删除设备',
-  'device.transfer': '转移设备',
-  'user.create': '创建成员',
-  'user.delete': '删除成员',
-  'role.create': '创建角色',
-  'role.update': '修改角色',
-  'role.delete': '删除角色',
-  'group.create': '创建分组',
-  'group.delete': '删除分组',
-  'node.create': '创建节点',
-  'node.delete': '删除节点',
-  'settings.update': '修改设置',
-  'login': '登录',
-  'logout': '退出登录'
-}
-const actionLabel = (a: string) => ACTION_MAP[a] || a || '-'
+const ACTION_MAP = computed<Record<string, string>>(() => ({
+  'device.add': t('system.audit.actDeviceAdd'),
+  'device.delete': t('system.audit.actDeviceDelete'),
+  'device.transfer': t('system.audit.actDeviceTransfer'),
+  'user.create': t('system.audit.actUserCreate'),
+  'user.delete': t('system.audit.actUserDelete'),
+  'role.create': t('system.audit.actRoleCreate'),
+  'role.update': t('system.audit.actRoleUpdate'),
+  'role.delete': t('system.audit.actRoleDelete'),
+  'group.create': t('system.audit.actGroupCreate'),
+  'group.delete': t('system.audit.actGroupDelete'),
+  'node.create': t('system.audit.actNodeCreate'),
+  'node.delete': t('system.audit.actNodeDelete'),
+  'settings.update': t('system.audit.actSettingsUpdate'),
+  'login': t('system.audit.actLogin'),
+  'logout': t('system.audit.actLogout')
+}))
+const actionLabel = (a: string) => ACTION_MAP.value[a] || a || '-'
 
 /* 对象类型（由动作前缀推断） */
-const TARGET_TYPES = [
-  { label: '全部', value: '' },
-  { label: '设备', value: 'device' },
-  { label: '成员', value: 'user' },
-  { label: '角色', value: 'role' },
-  { label: '分组', value: 'group' },
-  { label: '节点', value: 'node' },
-  { label: '设置', value: 'settings' },
-  { label: '会话', value: 'login' }
-]
+const TARGET_TYPES = computed(() => [
+  { label: t('common.all'), value: '' },
+  { label: t('system.audit.typeDevice'), value: 'device' },
+  { label: t('system.audit.typeUser'), value: 'user' },
+  { label: t('system.audit.typeRole'), value: 'role' },
+  { label: t('system.audit.typeGroup'), value: 'group' },
+  { label: t('system.audit.typeNode'), value: 'node' },
+  { label: t('system.audit.typeSettings'), value: 'settings' },
+  { label: t('system.audit.typeSession'), value: 'login' }
+])
 function targetTypeOf(action: string): string {
   const a = String(action || '')
-  if (a.startsWith('device.')) return '设备'
-  if (a.startsWith('user.')) return '成员'
-  if (a.startsWith('role.')) return '角色'
-  if (a.startsWith('group.')) return '分组'
-  if (a.startsWith('node.') || a.startsWith('media-node')) return '节点'
-  if (a.startsWith('settings.') || a.startsWith('alarm.') || a.startsWith('record.')) return '设置'
-  if (a === 'login' || a === 'logout') return '会话'
-  return '其他'
+  if (a.startsWith('device.')) return t('system.audit.typeDevice')
+  if (a.startsWith('user.')) return t('system.audit.typeUser')
+  if (a.startsWith('role.')) return t('system.audit.typeRole')
+  if (a.startsWith('group.')) return t('system.audit.typeGroup')
+  if (a.startsWith('node.') || a.startsWith('media-node')) return t('system.audit.typeNode')
+  if (a.startsWith('settings.') || a.startsWith('alarm.') || a.startsWith('record.')) return t('system.audit.typeSettings')
+  if (a === 'login' || a === 'logout') return t('system.audit.typeSession')
+  return t('system.audit.typeOther')
 }
 
 async function loadLogs() {
@@ -78,14 +79,14 @@ async function loadLogs() {
     if (filters.targetType) {
       list = list.filter((r: any) => {
         const t = r.targetType || targetTypeOf(r.action)
-        const label = TARGET_TYPES.find((x) => x.value === filters.targetType)?.label
+        const label = TARGET_TYPES.value.find((x) => x.value === filters.targetType)?.label
         return t === label || String(r.action || '').startsWith(filters.targetType + '.')
       })
     }
     items.value = list
     total.value = res?.total || 0
   } catch (e: any) {
-    toastApiError(e, '加载操作日志失败')
+    toastApiError(e, t('system.msg.auditLoadFailed'))
   } finally {
     loading.value = false
   }
@@ -114,9 +115,9 @@ async function exportLogs() {
   if (filters.dateTo) params.end = String(Date.parse(filters.dateTo + 'T23:59:59'))
   try {
     await api.download('/audit-logs/export', params)
-    toast.success('已开始导出（最多 10000 条）')
+    toast.success(t('system.msg.auditExportStarted'))
   } catch (e: any) {
-    toastApiError(e, '导出失败')
+    toastApiError(e, t('system.msg.auditExportFailed'))
   }
 }
 
@@ -124,18 +125,18 @@ async function exportLogs() {
 /* 结果标签映射见 utils/enums.ts */
 function resultTag(r: string) {
   const i = resultInfo(r)
-  return { text: i.label, color: i.color }
+  return { text: t(i.labelKey), color: i.color }
 }
 
-const cols = [
-  { key: 'ts', label: '时间', width: '170px' },
-  { key: 'username', label: '操作者', width: '120px' },
-  { key: 'targetType', label: '对象类型', width: '90px', align: 'center' as const },
-  { key: 'target', label: '对象', width: '200px' },
-  { key: 'action', label: '动作', width: '140px' },
-  { key: 'result', label: '结果', width: '80px', align: 'center' as const },
-  { key: 'ip', label: 'IP', width: '140px' }
-]
+const cols = computed(() => [
+  { key: 'ts', label: t('common.time'), width: '170px' },
+  { key: 'username', label: t('system.audit.operator'), width: '120px' },
+  { key: 'targetType', label: t('system.audit.targetType'), width: '90px', align: 'center' as const },
+  { key: 'target', label: t('system.audit.colTarget'), width: '200px' },
+  { key: 'action', label: t('system.audit.colAction'), width: '140px' },
+  { key: 'result', label: t('system.audit.colResult'), width: '80px', align: 'center' as const },
+  { key: 'ip', label: t('system.audit.colIp'), width: '140px' }
+])
 
 onMounted(async () => {
   // 布局可能尚未完成会话加载，兜底拉取一次
@@ -146,35 +147,35 @@ onMounted(async () => {
 
 <template>
   <div class="space-y-3">
-    <UiCard title="操作日志" flat>
+    <UiCard :title="t('system.audit.title')" flat>
       <template #extra>
         <UiButton variant="primary" size="sm" @click="exportLogs">
-          <UiIcon name="download" :size="14" />导出 CSV
+          <UiIcon name="download" :size="14" />{{ t('system.audit.exportCsv') }}
         </UiButton>
       </template>
 
       <!-- 筛选条件 -->
       <div class="mb-3 flex flex-wrap items-center gap-2 rounded-signal border border-line-soft bg-zone px-3 py-2.5">
-        <span class="flex items-center gap-1 text-xs text-placeholder"><UiIcon name="calendar" :size="13" />时间</span>
+        <span class="flex items-center gap-1 text-xs text-placeholder"><UiIcon name="calendar" :size="13" />{{ t('system.audit.timeLabel') }}</span>
         <UiInput v-model="filters.dateFrom" type="date" size="sm" width="w-40" @enter="search" />
-        <span class="text-placeholder">至</span>
+        <span class="text-placeholder">{{ t('system.audit.dateTo') }}</span>
         <UiInput v-model="filters.dateTo" type="date" size="sm" width="w-40" @enter="search" />
         <UiInput
-          v-model="filters.username" placeholder="操作者" clearable
+          v-model="filters.username" :placeholder="t('system.audit.operator')" clearable
           size="sm" width="w-36" @enter="search" @clear="search"
         />
-        <UiSelect v-model="filters.targetType" :options="TARGET_TYPES" size="sm" width="w-32" placeholder="对象类型" />
+        <UiSelect v-model="filters.targetType" :options="TARGET_TYPES" size="sm" width="w-32" :placeholder="t('system.audit.targetType')" />
         <UiInput
-          v-model="filters.action" placeholder="动作，如 device.add" clearable
+          v-model="filters.action" :placeholder="t('system.audit.actionPlaceholder')" clearable
           size="sm" width="w-45" @enter="search" @clear="search"
         />
         <UiButton variant="primary" size="sm" @click="search">
-          <UiIcon name="search" :size="13" />查询
+          <UiIcon name="search" :size="13" />{{ t('common.query') }}
         </UiButton>
-        <UiButton size="sm" @click="resetFilters">重置</UiButton>
+        <UiButton size="sm" @click="resetFilters">{{ t('common.reset') }}</UiButton>
       </div>
 
-      <UiEmptyState v-if="!loading && !items.length" text="暂无操作日志" icon="history" />
+      <UiEmptyState v-if="!loading && !items.length" :text="t('system.audit.empty')" icon="history" />
       <UiTable v-else :columns="cols" :rows="items" :loading="loading">
         <template #ts="{ row }"><span class="font-mono text-xs text-body">{{ fmtTime(row.ts) }}</span></template>
         <template #username="{ row }">{{ row.username || '-' }}</template>

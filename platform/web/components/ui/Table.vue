@@ -1,4 +1,5 @@
 <script setup lang="ts">
+const { t } = useI18n()
 // 通用数据表格（替代 el-table，PRD 基线：浅灰表头、行悬停、细边框、支持选择列/固定操作列/空状态）
 import { CheckboxRoot, CheckboxIndicator } from 'reka-ui'
 
@@ -22,13 +23,13 @@ const props = withDefaults(defineProps<{
   dense?: boolean
   /** 行的可读名称字段，用于复选框的可访问名称（读屏会念"选择 摄像头A"） */
   rowLabelKey?: string
-}>(), { rowKey: 'id', loading: false, selectable: false, empty: '暂无数据', dense: false, rowLabelKey: 'name' })
+}>(), { rowKey: 'id', loading: false, selectable: false, empty: '', dense: false, rowLabelKey: 'name' })
 
 const emit = defineEmits<{ 'update:selection': [v: any[]] }>()
 
 /** 行名称：优先 rowLabelKey 指定字段，缺失时退回主键，保证复选框始终有名称 */
 function rowLabel(row: any): string {
-  return String(row?.[props.rowLabelKey] ?? row?.[props.rowKey] ?? '该行')
+  return String(row?.[props.rowLabelKey] ?? row?.[props.rowKey] ?? t('table.thisRow'))
 }
 
 const selected = computed(() => props.selection || [])
@@ -54,7 +55,7 @@ function toggleAll() {
           <th v-if="selectable" class="w-10 border-b border-line px-3 py-2.5">
             <CheckboxRoot
               :model-value="allChecked ? true : someChecked ? 'indeterminate' : false"
-              :aria-label="allChecked ? '取消全选' : '全选本页'"
+              :aria-label="allChecked ? t('table.deselectAll') : t('table.selectAllPage')"
               class="flex h-4 w-4 items-center justify-center rounded-sm border border-line bg-surface outline-none ipc-focus-ring transition-colors data-[state=checked]:border-primary data-[state=checked]:bg-primary data-[state=indeterminate]:border-primary"
               @update:model-value="toggleAll"
             >
@@ -77,7 +78,7 @@ function toggleAll() {
           <td v-if="selectable" class="border-b border-line-soft px-3" :class="dense ? 'py-1.5' : 'py-2.5'">
             <CheckboxRoot
               :model-value="isChecked(row)"
-              :aria-label="`选择 ${rowLabel(row)}`"
+              :aria-label="t('table.selectRow', { name: rowLabel(row) })"
               class="flex h-4 w-4 items-center justify-center rounded-sm border border-line bg-surface outline-none ipc-focus-ring transition-colors data-[state=checked]:border-primary data-[state=checked]:bg-primary"
               @update:model-value="toggleRow(row)"
             >

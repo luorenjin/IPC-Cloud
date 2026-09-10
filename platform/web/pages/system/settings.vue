@@ -2,16 +2,17 @@
 // 系统设置（SET-01/02）：全局参数表单 + IDP 服务状态与 CRL 吊销列表管理
 const api = useApi()
 const toast = useToast()
+const { t } = useI18n()
 const { currentProject, loadMe } = useAuth()
 
 const loading = ref(false)
 const saving = ref(false)
 
 /* 左侧二级导航（纯展示分组，不影响下方任何数据/校验/提交逻辑） */
-const sections = [
-  { key: 'general', label: '系统参数', icon: 'sliders' },
-  { key: 'idp', label: 'IDP 证书 / CRL', icon: 'shield' }
-] as const
+const sections = computed(() => [
+  { key: 'general' as const, label: t('system.settings.navGeneral'), icon: 'sliders' },
+  { key: 'idp' as const, label: t('system.settings.navIdp'), icon: 'shield' }
+])
 const activeSection = ref<'general' | 'idp'>('general')
 
 /* 全局参数表单（缺省时使用默认值） */
@@ -40,14 +41,14 @@ const alarmTemplateOptions = computed(() =>
 )
 
 /* 设备侧告警类型（ALM-03）；平台侧事件由「告警策略」页管理，不在此处 */
-const ALARM_KINDS = [
-  { value: 'motion', label: '移动侦测' },
-  { value: 'humanoid', label: '人形侦测' },
-  { value: 'intrusion', label: '区域入侵' },
-  { value: 'linecross', label: '越界侦测' },
-  { value: 'tamper', label: '视频遮挡' },
-  { value: 'io', label: '外接IO' }
-]
+const ALARM_KINDS = computed(() => [
+  { value: 'motion', label: t('system.settings.kindMotion') },
+  { value: 'humanoid', label: t('system.settings.kindHumanoid') },
+  { value: 'intrusion', label: t('system.settings.kindIntrusion') },
+  { value: 'linecross', label: t('system.settings.kindLinecross') },
+  { value: 'tamper', label: t('system.settings.kindTamper') },
+  { value: 'io', label: t('system.settings.kindIo') }
+])
 function toggleAlarmKind(k: string) {
   const i = form.alarmDefaults.kinds.indexOf(k)
   if (i >= 0) form.alarmDefaults.kinds.splice(i, 1)
@@ -84,7 +85,7 @@ async function loadSettings() {
     const cap = pick(map.captchaRate)
     form.captchaRate = cap === undefined || cap === null || cap === '' ? 5 : Number(cap)
   } catch (e: any) {
-    toastApiError(e, '加载设置失败')
+    toastApiError(e, t('system.msg.settingsLoadFailed'))
   } finally {
     loading.value = false
   }
@@ -118,19 +119,19 @@ async function loadRecordDefaults() {
     defaultsLoadFailed.value = false
   } catch (e: any) {
     defaultsLoadFailed.value = true
-    toastApiError(e, '默认策略加载失败')
+    toastApiError(e, t('system.msg.defaultsLoadFailed'))
   }
 }
 
 /* 保存：每个字段单独 PUT /settings { key, value: { value }, scope: 'global' } */
 async function saveSettings() {
-  if (form.streamIdleSec < 5 || form.streamIdleSec > 600) return toast.warning('停流等待秒数应在 5-600 之间')
-  if (form.playTokenTtlMin < 1 || form.playTokenTtlMin > 1440) return toast.warning('token 有效期应在 1-1440 分钟之间')
+  if (form.streamIdleSec < 5 || form.streamIdleSec > 600) return toast.warning(t('system.msg.idleRange'))
+  if (form.playTokenTtlMin < 1 || form.playTokenTtlMin > 1440) return toast.warning(t('system.msg.tokenRange'))
   if (form.recordDefaults.enabled && !form.recordDefaults.templateId) {
-    return toast.warning('已开启默认录像策略，请选择要套用的录像模板')
+    return toast.warning(t('system.msg.needRecordTemplate'))
   }
   if (form.alarmDefaults.enabled && !form.alarmDefaults.kinds.length) {
-    return toast.warning('已开启默认告警策略，请至少选择一种告警类型')
+    return toast.warning(t('system.msg.needAlarmKind'))
   }
   saving.value = true
   try {
@@ -162,9 +163,9 @@ async function saveSettings() {
         scope: pid
       })
     }
-    toast.success('设置已保存')
+    toast.success(t('system.msg.settingsSaved'))
   } catch (e: any) {
-    toastApiError(e, '保存失败')
+    toastApiError(e, t('common.saveFailed'))
   } finally {
     saving.value = false
   }
@@ -172,7 +173,7 @@ async function saveSettings() {
 
 function resetForm() {
   loadSettings()
-  toast.info('已重新加载当前设置')
+  toast.info(t('system.msg.settingsReloaded'))
 }
 
 /* ---------------- 国标 SIP 参数（只读，来自 /projects/:id/gb28181/params） ---------------- */
@@ -219,7 +220,7 @@ async function loadCRL() {
     const res: any = await api.get('/idp/crl')
     crlList.value = res?.items || []
   } catch (e: any) {
-    toastApiError(e, '查询 CRL 列表失败')
+    toastApiError(e, t('system.msg.crlLoadFailed'))
   } finally {
     crlLoading.value = false
   }
@@ -233,7 +234,7 @@ async function queryCRL() {
     const res: any = await api.get('/idp/crl', { deviceId: id })
     crlList.value = res?.items || []
   } catch (e: any) {
-    toastApiError(e, '查询失败')
+    toastApiError(e, t('system.msg.crlQueryFailed'))
   } finally {
     crlLoading.value = false
   }
@@ -250,7 +251,7 @@ async function submitCrlAdd() {
     .split('\n')
     .map((s) => s.trim())
     .filter(Boolean)
-  if (!ids.length) return toast.warning('请输入至少一个设备 ID')
+  if (!ids.length) return toast.warning(t('system.msg.crlNeedDeviceId'))
   crlAdding.value = true
   let done = 0
   let failed = 0
@@ -263,17 +264,27 @@ async function submitCrlAdd() {
     }
   }
   crlAdding.value = false
-  if (done) toast.success('已吊销 ' + done + ' 台设备' + (failed ? '，' + failed + ' 台失败' : ''))
-  else toast.error({ title: 'CRL 提交失败', suggest: '共 ' + failed + ' 条提交失败，请检查设备 ID 与网络后重试。' })
+  if (done) {
+    toast.success(
+      failed
+        ? t('system.msg.crlRevokedPartial', { n: done, failed })
+        : t('system.msg.crlRevoked', { n: done })
+    )
+  } else {
+    toast.error({
+      title: t('system.msg.crlSubmitFailed'),
+      suggest: t('system.msg.crlSubmitFailedSuggest', { n: failed })
+    })
+  }
   if (done) crlAddVisible.value = false
   await loadCRL()
 }
 
-const crlCols = [
-  { key: 'deviceId', label: '设备 ID', width: '200px' },
-  { key: 'revokedAt', label: '吊销时间', width: '170px' },
-  { key: 'reason', label: '原因', width: '140px' }
-]
+const crlCols = computed(() => [
+  { key: 'deviceId', label: t('system.settings.crlDeviceId'), width: '200px' },
+  { key: 'revokedAt', label: t('system.settings.crlRevokedAt'), width: '170px' },
+  { key: 'reason', label: t('system.settings.crlReason'), width: '140px' }
+])
 
 
 watch(currentProject, () => loadGbParams())
@@ -303,56 +314,56 @@ onMounted(async () => {
     <div class="min-w-0 flex-1 space-y-3">
       <!-- 系统参数：停流/播放策略 + 信令与接入参数 -->
       <template v-if="activeSection === 'general'">
-        <UiCard title="停流与播放策略" flat>
+        <UiCard :title="t('system.settings.streamCard')" flat>
           <UiLoading :loading="loading">
             <div class="grid grid-cols-[160px_1fr] items-center gap-x-3 gap-y-3">
-              <span class="text-right text-sm text-body">停流等待时长</span>
+              <span class="text-right text-sm text-body">{{ t('system.settings.streamIdle') }}</span>
               <div class="flex items-center gap-2">
                 <UiInput v-model="form.streamIdleSec" width="w-28" :maxlength="4" />
-                <span class="text-xs text-placeholder">秒（5-600）：流空闲超过该时长后自动停流</span>
+                <span class="text-xs text-placeholder">{{ t('system.settings.streamIdleHint') }}</span>
               </div>
-              <span class="text-right text-sm text-body">播放 token 有效期</span>
+              <span class="text-right text-sm text-body">{{ t('system.settings.playToken') }}</span>
               <div class="flex items-center gap-2">
                 <UiInput v-model="form.playTokenTtlMin" width="w-28" :maxlength="5" />
-                <span class="text-xs text-placeholder">分钟（1-1440）：播放令牌的有效时长</span>
+                <span class="text-xs text-placeholder">{{ t('system.settings.playTokenHint') }}</span>
               </div>
-              <span class="text-right text-sm text-body">默认录像策略</span>
+              <span class="text-right text-sm text-body">{{ t('system.settings.recordDefaults') }}</span>
               <div class="flex flex-wrap items-center gap-2">
-                <UiSwitch v-model="form.recordDefaults.enabled" aria-label="新设备默认开启录像" />
-                <span class="text-xs text-placeholder">新接入设备的通道自动套用录像计划（ADD-09），仅对本项目生效</span>
+                <UiSwitch v-model="form.recordDefaults.enabled" :aria-label="t('system.settings.recordDefaultsAria')" />
+                <span class="text-xs text-placeholder">{{ t('system.settings.recordDefaultsHint') }}</span>
                 <template v-if="form.recordDefaults.enabled">
                   <div class="flex w-full items-center gap-2 pt-1">
                     <UiSelect
                       v-model="form.recordDefaults.templateId"
                       :options="recordTemplateOptions"
-                      placeholder="选择录像模板"
+                      :placeholder="t('system.settings.pickRecordTemplate')"
                       width="w-44"
                     />
                     <UiSelect
                       v-model="form.recordDefaults.profile"
-                      :options="[{ label: '主码流', value: 'main' }, { label: '子码流', value: 'sub' }]"
+                      :options="[{ label: t('system.settings.profileMain'), value: 'main' }, { label: t('system.settings.profileSub'), value: 'sub' }]"
                       width="w-28"
                     />
                     <span v-if="!recordTemplateOptions.length" class="text-xs text-warning">
-                      本项目暂无录像模板，请先在「计划 → 计划模板」创建
+                      {{ t('system.settings.noRecordTemplate') }}
                     </span>
                   </div>
                 </template>
               </div>
-              <span class="text-right text-sm text-body">默认告警策略</span>
+              <span class="text-right text-sm text-body">{{ t('system.settings.alarmDefaults') }}</span>
               <div class="flex flex-wrap items-center gap-2">
-                <UiSwitch v-model="form.alarmDefaults.enabled" aria-label="新设备默认开启告警" />
-                <span class="text-xs text-placeholder">新接入设备的通道自动套用告警规则（ADD-09），仅对本项目生效</span>
+                <UiSwitch v-model="form.alarmDefaults.enabled" :aria-label="t('system.settings.alarmDefaultsAria')" />
+                <span class="text-xs text-placeholder">{{ t('system.settings.alarmDefaultsHint') }}</span>
                 <template v-if="form.alarmDefaults.enabled">
                   <div class="flex w-full flex-wrap items-center gap-2 pt-1">
                     <UiSelect
                       v-model="form.alarmDefaults.templateId"
                       :options="alarmTemplateOptions"
-                      placeholder="选择布防模板"
+                      :placeholder="t('system.settings.pickAlarmTemplate')"
                       width="w-44"
                     />
                     <span v-if="!alarmTemplateOptions.length" class="text-xs text-warning">
-                      本项目暂无布防模板，请先在「告警 → 布防模板」创建
+                      {{ t('system.settings.noAlarmTemplate') }}
                     </span>
                   </div>
                   <div class="flex w-full flex-wrap items-center gap-1.5 pt-1">
@@ -367,106 +378,106 @@ onMounted(async () => {
                   </div>
                 </template>
                 <span v-else class="w-full pt-1 text-xs text-warning">
-                  关闭后，本项目新接入设备的通道不会自动创建告警规则，其移动侦测、人形侦测等设备侧告警会被永久拦截且不可补发（严格模式下无规则的通道等同于全部丢弃事件）；如需该通道产生告警，请到「告警 → 告警规则」手动创建
+                  {{ t('system.settings.alarmDefaultsOffHint') }}
                 </span>
               </div>
-              <span class="text-right text-sm text-body">时区</span>
+              <span class="text-right text-sm text-body">{{ t('system.settings.tz') }}</span>
               <UiInput v-model="form.tz" placeholder="Asia/Shanghai" :maxlength="64" width="w-60" />
             </div>
           </UiLoading>
         </UiCard>
 
-        <UiCard title="信令与接入参数" flat>
+        <UiCard :title="t('system.settings.signalCard')" flat>
           <div class="grid grid-cols-[160px_1fr] items-center gap-x-3 gap-y-3">
-            <span class="text-right text-sm text-body">国标 SIP 密码</span>
+            <span class="text-right text-sm text-body">{{ t('system.settings.gbPassword') }}</span>
             <div class="flex items-center gap-2">
-              <UiInput v-model="form.gbPassword" type="password" placeholder="国标设备统一 SIP 认证密码" :maxlength="64" width="w-72" />
-              <span class="text-xs text-placeholder">用于 GB28181 设备注册鉴权</span>
+              <UiInput v-model="form.gbPassword" type="password" :placeholder="t('system.settings.gbPasswordPlaceholder')" :maxlength="64" width="w-72" />
+              <span class="text-xs text-placeholder">{{ t('system.settings.gbPasswordHint') }}</span>
             </div>
-            <span class="text-right text-sm text-body">SIP 参数生成规则</span>
+            <span class="text-right text-sm text-body">{{ t('system.settings.gbParams') }}</span>
             <div class="flex flex-wrap items-center gap-2 text-xs text-muted">
               <template v-if="gbParams">
-                <UiTag color="default">服务器 ID <span class="font-mono">{{ gbParams.serverId || '—' }}</span></UiTag>
-                <UiTag color="default">域 <span class="font-mono">{{ gbParams.domain || '—' }}</span></UiTag>
-                <UiTag color="default">端口 <span class="font-mono">{{ gbParams.port || '—' }}</span></UiTag>
+                <UiTag color="default">{{ t('system.settings.gbServerId') }} <span class="font-mono">{{ gbParams.serverId || '—' }}</span></UiTag>
+                <UiTag color="default">{{ t('system.settings.gbDomain') }} <span class="font-mono">{{ gbParams.domain || '—' }}</span></UiTag>
+                <UiTag color="default">{{ t('system.settings.gbPort') }} <span class="font-mono">{{ gbParams.port || '—' }}</span></UiTag>
                 <UiTag color="default">
-                  {{ gbParams.transport || 'UDP' }} · 注册 <span class="font-mono">{{ gbParams.expires || 3600 }}s</span>
-                  · 心跳 <span class="font-mono">{{ gbParams.keepalive || 60 }}s</span>
+                  {{ gbParams.transport || 'UDP' }} · {{ t('system.settings.gbRegister') }} <span class="font-mono">{{ gbParams.expires || 3600 }}s</span>
+                  · {{ t('system.settings.gbKeepalive') }} <span class="font-mono">{{ gbParams.keepalive || 60 }}s</span>
                 </UiTag>
-                <span class="text-placeholder">（由部署配置生成，只读）</span>
+                <span class="text-placeholder">{{ t('system.settings.gbReadonly') }}</span>
               </template>
-              <span v-else class="text-placeholder">当前项目暂无 SIP 参数</span>
+              <span v-else class="text-placeholder">{{ t('system.settings.gbNoParams') }}</span>
             </div>
-            <span class="text-right text-sm text-body">验证码限速</span>
+            <span class="text-right text-sm text-body">{{ t('system.settings.captchaRate') }}</span>
             <div class="flex items-center gap-2">
               <UiInput v-model="form.captchaRate" width="w-28" :maxlength="3" />
-              <span class="text-xs text-placeholder">次/分钟：设备接入验证码请求限速</span>
+              <span class="text-xs text-placeholder">{{ t('system.settings.captchaRateHint') }}</span>
             </div>
           </div>
         </UiCard>
 
         <div class="flex items-center justify-end gap-2 pb-2">
-          <UiButton @click="resetForm">重置</UiButton>
-          <UiTooltip v-if="defaultsLoadFailed" label="默认策略加载失败，重新加载成功后才能保存">
-            <span><UiButton variant="primary" disabled>保存设置</UiButton></span>
+          <UiButton @click="resetForm">{{ t('common.reset') }}</UiButton>
+          <UiTooltip v-if="defaultsLoadFailed" :label="t('system.settings.defaultsLoadFailedTip')">
+            <span><UiButton variant="primary" disabled>{{ t('system.settings.saveSettings') }}</UiButton></span>
           </UiTooltip>
           <UiButton v-else variant="primary" :disabled="saving || loading" @click="saveSettings">
-            {{ saving ? '保存中…' : '保存设置' }}
+            {{ saving ? t('common.saving') : t('system.settings.saveSettings') }}
           </UiButton>
         </div>
       </template>
 
       <!-- IDP 证书 / CRL -->
       <template v-else>
-        <UiCard title="IDP 服务" flat>
+        <UiCard :title="t('system.settings.idpCard')" flat>
           <template #extra>
             <UiButton size="sm" :disabled="idpLoading" @click="loadIdp">
-              <UiIcon name="refresh" :size="13" />刷新
+              <UiIcon name="refresh" :size="13" />{{ t('common.refresh') }}
             </UiButton>
           </template>
           <UiLoading :loading="idpLoading">
             <div v-if="idp" class="space-y-3">
               <div class="grid grid-cols-[160px_1fr] items-center gap-x-3 gap-y-3">
-                <span class="text-right text-sm text-body">Broker 连接状态</span>
+                <span class="text-right text-sm text-body">{{ t('system.settings.brokerStatus') }}</span>
                 <div class="flex items-center gap-2">
-                  <UiTag v-if="brokerOnline === true" color="success" dot>在线</UiTag>
-                  <UiTag v-else-if="brokerOnline === false" color="danger" dot>离线</UiTag>
-                  <UiTag v-else color="info" dot>未知</UiTag>
-                  <span class="text-xs text-placeholder" :class="idp.broker ? 'font-mono' : ''">{{ idp.broker || '未配置 Broker 地址' }}</span>
+                  <UiTag v-if="brokerOnline === true" color="success" dot>{{ t('common.online') }}</UiTag>
+                  <UiTag v-else-if="brokerOnline === false" color="danger" dot>{{ t('common.offline') }}</UiTag>
+                  <UiTag v-else color="info" dot>{{ t('common.unknown') }}</UiTag>
+                  <span class="text-xs text-placeholder" :class="idp.broker ? 'font-mono' : ''">{{ idp.broker || t('system.settings.brokerUnset') }}</span>
                 </div>
                 <span class="text-right text-sm text-body">TLS</span>
-                <UiTag :color="idp.tls ? 'success' : 'info'">{{ idp.tls ? '已启用' : '未启用' }}</UiTag>
-                <span class="text-right text-sm text-body">设备 CA 信息</span>
+                <UiTag :color="idp.tls ? 'success' : 'info'">{{ idp.tls ? t('common.enabled') : t('common.disabled') }}</UiTag>
+                <span class="text-right text-sm text-body">{{ t('system.settings.caInfo') }}</span>
                 <div class="flex flex-wrap items-center gap-2 text-sm text-body">
-                  <span>状态：<UiTag :color="idp.caStatus === 'active' ? 'success' : 'warning'">{{ idp.caStatus || '—' }}</UiTag></span>
-                  <span v-if="idp.idpCount !== undefined" class="text-xs text-placeholder">已接入 IDP 设备 {{ idp.idpCount }} 台</span>
+                  <span>{{ t('system.settings.caStatus') }}<UiTag :color="idp.caStatus === 'active' ? 'success' : 'warning'">{{ idp.caStatus || '—' }}</UiTag></span>
+                  <span v-if="idp.idpCount !== undefined" class="text-xs text-placeholder">{{ t('system.settings.idpCount', { n: idp.idpCount }) }}</span>
                 </div>
               </div>
             </div>
-            <UiEmptyState v-else text="IDP 服务未配置" />
+            <UiEmptyState v-else :text="t('system.settings.idpUnconfigured')" />
           </UiLoading>
 
           <!-- CRL 吊销列表管理 -->
           <div class="mt-4 border-t border-line-soft pt-3">
             <div class="mb-3 flex flex-wrap items-center gap-2">
-              <span class="text-sm font-semibold text-ink">CRL 吊销列表</span>
-              <UiInput v-model="crlQuery" placeholder="按设备 ID 查询" clearable width="w-52" size="sm" @enter="queryCRL" @clear="loadCRL" />
+              <span class="text-sm font-semibold text-ink">{{ t('system.settings.crlTitle') }}</span>
+              <UiInput v-model="crlQuery" :placeholder="t('system.settings.crlQueryPlaceholder')" clearable width="w-52" size="sm" @enter="queryCRL" @clear="loadCRL" />
               <UiButton size="sm" :disabled="crlLoading" @click="queryCRL">
-                <UiIcon name="search" :size="13" />查询
+                <UiIcon name="search" :size="13" />{{ t('common.query') }}
               </UiButton>
               <div class="ml-auto flex items-center gap-2">
                 <UiButton variant="primary" size="sm" @click="openCrlAddDlg">
-                  <UiIcon name="plus" :size="13" />添加吊销设备
+                  <UiIcon name="plus" :size="13" />{{ t('system.settings.crlAdd') }}
                 </UiButton>
               </div>
             </div>
-            <UiTable :columns="crlCols" :rows="crlList" :loading="crlLoading" dense empty="暂无吊销记录">
+            <UiTable :columns="crlCols" :rows="crlList" :loading="crlLoading" dense :empty="t('system.settings.crlEmpty')">
               <template #deviceId="{ row }"><span class="font-mono text-body">{{ row.deviceId }}</span></template>
               <template #revokedAt="{ row }"><span class="font-mono">{{ fmtTime(row.revokedAt || row.ts || row.createdAt) }}</span></template>
-              <template #reason="{ row }">{{ row.reason || '手动吊销' }}</template>
+              <template #reason="{ row }">{{ row.reason || t('system.settings.crlReasonManual') }}</template>
             </UiTable>
             <p class="mt-2 text-xs text-placeholder">
-              设备 ID 一经吊销将无法再接入 IDP 服务。
+              {{ t('system.settings.crlNote') }}
             </p>
           </div>
         </UiCard>
@@ -474,19 +485,19 @@ onMounted(async () => {
     </div>
 
     <!-- 添加吊销设备对话框 -->
-    <UiDialog v-model:open="crlAddVisible" title="添加吊销设备" width="max-w-md">
+    <UiDialog v-model:open="crlAddVisible" :title="t('system.settings.crlAdd')" width="max-w-md">
       <div class="space-y-2">
-        <p class="text-sm text-body">输入吊销设备 ID（多行，每行一个）</p>
+        <p class="text-sm text-body">{{ t('system.settings.crlAddHint') }}</p>
         <textarea
           v-model="crlAddText"
           rows="6"
-          placeholder="设备 ID，每行一个"
+          :placeholder="t('system.settings.crlAddPlaceholder')"
           class="w-full rounded-chrome border border-line bg-surface px-3 py-2 font-mono text-sm text-ink outline-none focus-visible:border-primary"
         />
       </div>
       <template #footer>
-        <UiButton @click="crlAddVisible = false">取消</UiButton>
-        <UiButton variant="primary" :disabled="crlAdding" @click="submitCrlAdd">{{ crlAdding ? '提交中…' : '确定' }}</UiButton>
+        <UiButton @click="crlAddVisible = false">{{ t('common.cancel') }}</UiButton>
+        <UiButton variant="primary" :disabled="crlAdding" @click="submitCrlAdd">{{ crlAdding ? t('system.settings.submitting') : t('common.confirm') }}</UiButton>
       </template>
     </UiDialog>
   </div>

@@ -3,8 +3,10 @@
 const api = useApi()
 const toast = useToast()
 const confirm = useConfirm()
+const { t } = useI18n()
 
-const KIND_MAP: Record<string, string> = { timer: '定时录像', event: '事件录像' }
+/** 录像类型展示名（定时/事件），随语言切换 */
+const kindName = (k: string) => (k === 'event' ? t('record.kind.event') : k === 'timer' ? t('record.kind.timer') : k)
 
 // ---------- 列表 ----------
 const items = ref<any[]>([])
@@ -23,7 +25,7 @@ function refChannels(id: string) {
   return plans.value
     .filter((p) => p.templateId === id)
     .map((p) => channelMap.value[p.channelId] || p.channelId)
-    .join('、')
+    .join(t('record.msg.listSep'))
 }
 
 async function load() {
@@ -32,7 +34,7 @@ async function load() {
     const res: any = await api.get('/record-templates')
     items.value = res.items || []
   } catch (e: any) {
-    toastApiError(e, '加载录像模板失败')
+    toastApiError(e, t('record.msg.loadTemplatesFailed'))
   } finally {
     loading.value = false
   }
@@ -48,7 +50,7 @@ async function loadRefs() {
     refsLoadFailed.value = false
   } catch (e: any) {
     refsLoadFailed.value = true
-    toastApiError(e, '引用统计加载失败')
+    toastApiError(e, t('record.msg.loadRefsFailed'))
   }
 }
 
@@ -74,17 +76,17 @@ function openDlg(row?: any) {
 }
 
 async function save() {
-  if (!form.name.trim()) { toast.warning('请填写模板名称'); return }
+  if (!form.name.trim()) { toast.warning(t('record.msg.nameRequired')); return }
   // A7：修改自定义模板前，级联提示将同步影响引用该模板的通道
   const target = editing.value
   if (target) {
     const n = refCount.value[target.id] || 0
     if (n > 0) {
       const ok = await confirm.ask({
-        title: '修改录像模板',
-        message: `修改后将同步更新使用该模板的 ${n} 个通道`,
-        detail: `受影响通道：${refChannels(target.id)}`,
-        confirmText: '继续保存'
+        title: t('record.msg.tplCascadeTitle'),
+        message: t('record.msg.tplCascadeMessage', { n }),
+        detail: t('record.msg.tplCascadeDetail', { channels: refChannels(target.id) }),
+        confirmText: t('record.msg.tplCascadeConfirm')
       })
       if (!ok) return
     }
@@ -97,19 +99,19 @@ async function save() {
         kind: form.kind,
         schedule: form.schedule
       })
-      toast.success('模板已更新')
+      toast.success(t('record.msg.tplUpdated'))
     } else {
       await api.post('/record-templates', {
         name: form.name.trim(),
         kind: form.kind,
         schedule: form.schedule
       })
-      toast.success('模板已创建')
+      toast.success(t('record.msg.tplCreated'))
     }
     dlg.value = false
     load()
   } catch (e: any) {
-    toastApiError(e, '保存失败')
+    toastApiError(e, t('common.saveFailed'))
   } finally {
     saving.value = false
   }
@@ -117,13 +119,13 @@ async function save() {
 
 // 复制：以现有模板内容新建副本（服务端仅有创建接口）
 async function copy(row: any) {
-  const name = `${row.name}（副本）`
+  const name = t('record.templates.copySuffix', { name: row.name })
   try {
     await api.post('/record-templates', { name, kind: row.kind, schedule: row.schedule })
-    toast.success(`已复制为「${name}」`)
+    toast.success(t('record.msg.copiedOk', { name }))
     load()
   } catch (e: any) {
-    toastApiError(e, '复制失败')
+    toastApiError(e, t('record.msg.copyFailed'))
   }
 }
 
@@ -132,22 +134,22 @@ async function del(row: any) {
   if (row.builtin) return // 内置模板不可删
   const n = refCount.value[row.id] || 0
   if (n > 0) {
-    toast.warning(`该模板正被 ${n} 个通道使用，请先在录像计划中解绑后再删除`)
+    toast.warning(t('record.msg.tplInUse', { n }))
     return
   }
   const ok = await confirm.ask({
-    title: '删除确认',
-    message: `确定删除录像模板「${row.name}」？`,
-    detail: '删除后该模板不可恢复，已产生的录像文件不受影响。',
-    danger: true, confirmText: '删除'
+    title: t('record.msg.deleteTplTitle'),
+    message: t('record.msg.deleteTplMessage', { name: row.name }),
+    detail: t('record.msg.deleteTplDetail'),
+    danger: true, confirmText: t('common.delete')
   })
   if (!ok) return
   try {
     await api.del(`/record-templates/${row.id}`)
-    toast.success('已删除')
+    toast.success(t('common.deletedOk'))
     load()
   } catch (e: any) {
-    toastApiError(e, '删除失败')
+    toastApiError(e, t('common.deleteFailed'))
   }
 }
 
@@ -166,32 +168,32 @@ const { page: pgPage, pageSize: pgSize, total: pgTotal, pageItems: pgItems } = u
     <UiCard flat>
       <template #header>
         <div class="flex w-full items-center justify-between">
-          <span class="text-[15px] font-semibold text-ink">录像计划模板</span>
+          <span class="text-[15px] font-semibold text-ink">{{ t('record.templates.title') }}</span>
           <div class="flex items-center gap-2">
-            <UiButton size="sm" @click="() => { load(); loadRefs() }"><UiIcon name="refresh" :size="13" />刷新</UiButton>
-            <UiButton variant="primary" size="sm" @click="openDlg()"><UiIcon name="plus" :size="14" />新建模板</UiButton>
+            <UiButton size="sm" @click="() => { load(); loadRefs() }"><UiIcon name="refresh" :size="13" />{{ t('common.refresh') }}</UiButton>
+            <UiButton variant="primary" size="sm" @click="openDlg()"><UiIcon name="plus" :size="14" />{{ t('record.templates.create') }}</UiButton>
           </div>
         </div>
       </template>
 
       <UiTable
         :columns="[
-          { key: 'name', label: '模板名称', width: '180px' },
-          { key: 'kind', label: '类型', width: '110px' },
-          { key: 'schedule', label: '计划时间', width: '280px' },
-          { key: 'builtin', label: '内置', width: '80px', align: 'center' },
-          { key: 'ref', label: '通道引用数', width: '110px', align: 'center' },
-          { key: 'ops', label: '操作', width: '180px', align: 'center', ellipsis: false }
+          { key: 'name', label: t('record.templates.colName'), width: '180px' },
+          { key: 'kind', label: t('record.templates.colKind'), width: '110px' },
+          { key: 'schedule', label: t('record.templates.colSchedule'), width: '280px' },
+          { key: 'builtin', label: t('record.templates.colBuiltin'), width: '80px', align: 'center' },
+          { key: 'ref', label: t('record.templates.colRef'), width: '110px', align: 'center' },
+          { key: 'ops', label: t('common.action'), width: '180px', align: 'center', ellipsis: false }
         ]"
-        :rows="pgItems" :loading="loading" :row-key="'id'" empty="暂无录像模板，点击「新建模板」开始配置"
+        :rows="pgItems" :loading="loading" :row-key="'id'" :empty="t('record.templates.empty')"
       >
         <template #kind="{ row }">
           <!-- 录像三色语义（REC-02）：定时=primary/信号青，事件=success/绿，与 playback.vue 一致 -->
-          <UiTag :color="row.kind === 'event' ? 'success' : 'primary'" plain>{{ KIND_MAP[row.kind] || row.kind }}</UiTag>
+          <UiTag :color="row.kind === 'event' ? 'success' : 'primary'" plain>{{ kindName(row.kind) }}</UiTag>
         </template>
         <template #schedule="{ row }">{{ fmtSchedule(row.schedule) }}</template>
         <template #builtin="{ row }">
-          <UiTag v-if="row.builtin" color="info">内置</UiTag>
+          <UiTag v-if="row.builtin" color="info">{{ t('record.templates.builtin') }}</UiTag>
           <span v-else class="text-placeholder">—</span>
         </template>
         <template #ref="{ row }">
@@ -200,12 +202,12 @@ const { page: pgPage, pageSize: pgSize, total: pgTotal, pageItems: pgItems } = u
         <template #ops="{ row }">
           <div class="flex items-center justify-center gap-1">
             <!-- 内置模板：编辑/删除真正禁用且视觉置灰 -->
-            <UiButton variant="text" size="sm" :disabled="row.builtin" @click="openDlg(row)">编辑</UiButton>
-            <UiButton variant="text" size="sm" @click="copy(row)">复制</UiButton>
-            <UiTooltip v-if="!row.builtin && refsLoadFailed" label="引用统计不可用，暂不能删除">
-              <span><UiButton variant="dangerText" size="sm" disabled>删除</UiButton></span>
+            <UiButton variant="text" size="sm" :disabled="row.builtin" @click="openDlg(row)">{{ t('common.edit') }}</UiButton>
+            <UiButton variant="text" size="sm" @click="copy(row)">{{ t('record.templates.copy') }}</UiButton>
+            <UiTooltip v-if="!row.builtin && refsLoadFailed" :label="t('record.templates.deleteBlocked')">
+              <span><UiButton variant="dangerText" size="sm" disabled>{{ t('common.delete') }}</UiButton></span>
             </UiTooltip>
-            <UiButton v-else variant="dangerText" size="sm" :disabled="row.builtin" @click="del(row)">删除</UiButton>
+            <UiButton v-else variant="dangerText" size="sm" :disabled="row.builtin" @click="del(row)">{{ t('common.delete') }}</UiButton>
           </div>
         </template>
       </UiTable>
@@ -219,28 +221,28 @@ const { page: pgPage, pageSize: pgSize, total: pgTotal, pageItems: pgItems } = u
     </UiCard>
 
     <!-- 新建 / 编辑模板 -->
-    <UiDialog v-model:open="dlg" :title="editing ? '编辑录像模板' : '新建录像模板'" width="max-w-2xl">
+    <UiDialog v-model:open="dlg" :title="editing ? t('record.templates.editTitle') : t('record.templates.createTitle')" width="max-w-2xl">
       <div class="space-y-4">
         <div class="flex items-center gap-3">
-          <label class="shrink-0 text-sm text-body"><span class="text-danger">*</span> 模板名称</label>
-          <UiInput v-model="form.name" placeholder="如：全天定时录像" :maxlength="30" width="w-64" />
+          <label class="shrink-0 text-sm text-body"><span class="text-danger">*</span> {{ t('record.templates.nameLabel') }}</label>
+          <UiInput v-model="form.name" :placeholder="t('record.templates.namePlaceholder')" :maxlength="30" width="w-64" />
         </div>
         <div class="flex items-center gap-3">
-          <label class="shrink-0 text-sm text-body">类型</label>
-          <UiSegmented v-model="form.kind" :items="[{ label: '定时录像', value: 'timer' }, { label: '事件录像', value: 'event' }]" />
+          <label class="shrink-0 text-sm text-body">{{ t('record.templates.kindLabel') }}</label>
+          <UiSegmented v-model="form.kind" :items="[{ label: t('record.kind.timer'), value: 'timer' }, { label: t('record.kind.event'), value: 'event' }]" />
         </div>
         <div>
-          <p class="mb-1.5 text-sm text-muted">{{ form.kind === 'event' ? '事件触发时段（事件发生时在时段内才录像）' : '录像时间（在网格上拖选时段）' }}</p>
+          <p class="mb-1.5 text-sm text-muted">{{ form.kind === 'event' ? t('record.templates.scheduleEvent') : t('record.templates.scheduleTimer') }}</p>
           <ScheduleGrid v-model="form.schedule" :kind="form.kind" />
         </div>
         <p v-if="editing && (refCount[editing.id] || 0) > 0" class="flex items-center gap-1.5 rounded-signal bg-warning-soft px-3 py-2 text-xs text-warning">
           <UiIcon name="alert-triangle" :size="13" />
-          该模板正被 {{ refCount[editing.id] }} 个通道使用，保存后将同步更新这些通道的录像计划
+          {{ t('record.templates.refWarn', { n: refCount[editing.id] }) }}
         </p>
       </div>
       <template #footer>
-        <UiButton @click="dlg = false">取消</UiButton>
-        <UiButton variant="primary" :disabled="saving" @click="save">确定</UiButton>
+        <UiButton @click="dlg = false">{{ t('common.cancel') }}</UiButton>
+        <UiButton variant="primary" :disabled="saving" @click="save">{{ t('common.confirm') }}</UiButton>
       </template>
     </UiDialog>
   </div>

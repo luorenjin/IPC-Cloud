@@ -8,6 +8,7 @@ const route = useRoute()
 const toast = useToast()
 const confirmBox = useConfirm()
 const { upsert: upsertTask, open: taskOpen } = useTasks()
+const { t } = useI18n()
 
 const DAY = 86400000
 const fmt = (ts: any) => new Date(Number(ts)).toLocaleString('zh-CN', { hour12: false })
@@ -25,7 +26,7 @@ const treeData = computed(() =>
 )
 const channelId = ref('')
 const deviceId = computed(() => channels.value.find((c) => c.id === channelId.value)?.deviceId || '')
-const curChannelName = computed(() => channels.value.find((c) => c.id === channelId.value)?.name || '未选择通道')
+const curChannelName = computed(() => channels.value.find((c) => c.id === channelId.value)?.name || t('live.playback.noChannel'))
 function onNodeClick(data: any) { if (data.id) channelId.value = data.id }
 
 // ---------- 日期 / 存储位置（无能力项不显示 REC-01） ----------
@@ -41,7 +42,7 @@ async function loadCapability() {
     canDevice.value = (d.capabilities || []).includes('record.device.query')
   } catch (e: any) {
     // 能力探测失败会让"设备录像"入口静默消失，需说明原因
-    toastApiError(e, '设备能力查询失败，暂时只能检索平台录像')
+    toastApiError(e, t('live.msg.capabilityFailed'))
   }
   if (!canDevice.value && source.value === 'device') source.value = 'platform'
 }
@@ -79,7 +80,7 @@ function shiftDay(n: number) { dateVal.value = new Date(dayStart.value + n * DAY
 // ---------- 录像段与时间轴（三色 + 类型过滤 + 滚轮缩放 24h→10min） ----------
 const segments = ref<{ s: number; e: number; type: string }[]>([])
 const TYPE_COLOR: Record<string, string> = { timer: 'var(--color-rec-timer)', event: 'var(--color-rec-event)', manual: 'var(--color-rec-manual)' }
-const TYPE_NAME: Record<string, string> = { timer: '定时录像', event: '事件录像', manual: '手动录像' }
+const TYPE_NAME: Record<string, string> = { timer: 'live.playback.typeTimerFull', event: 'live.playback.typeEventFull', manual: 'live.playback.typeManualFull' }
 const typeFilter = reactive({ timer: true, event: true, manual: true })
 const shownSegs = computed(() => segments.value.filter((s) => typeFilter[s.type] !== false))
 
@@ -91,7 +92,7 @@ async function loadRecords() {
       start: dayStart.value, end: dayStart.value + DAY, source: source.value
     })
     segments.value = res.segments || []
-  } catch (e: any) { toastApiError(e, '录像检索失败') }
+  } catch (e: any) { toastApiError(e, t('live.msg.recordLoadFailed')) }
 }
 
 const view = reactive({ s: 0, e: DAY })
@@ -157,22 +158,22 @@ function onTlUp() {
   if (!dragSel.active) return
   dragSel.active = false
   const a = Math.min(dragSel.a, dragSel.b), b = Math.max(dragSel.a, dragSel.b)
-  if (b - a < 30_000) { toast.warning('框选范围过小（至少 30 秒）'); return }
+  if (b - a < 30_000) { toast.warning(t('live.msg.rangeTooSmall')); return }
   downloadRange(a, b)
 }
 async function downloadRange(a: number, b: number) {
-  const ok = await confirmBox.ask({ title: '下载录像片段', message: `将 ${fmt(a)} ~ ${fmt(b)} 的录像加入下载任务？`, confirmText: '加入任务' })
+  const ok = await confirmBox.ask({ title: t('live.playback.downloadTitle'), message: t('live.playback.downloadConfirm', { start: fmt(a), end: fmt(b) }), confirmText: t('live.playback.downloadConfirmText') })
   if (!ok) return
   const tid = 'dl_' + Date.now()
-  upsertTask({ id: tid, type: 'download', title: `下载 ${curChannelName.value} ${Math.round((b - a) / 60000)} 分钟片段`, status: 'running', progress: 0 })
+  upsertTask({ id: tid, type: 'download', title: t('live.playback.downloadTaskTitle', { name: curChannelName.value, n: Math.round((b - a) / 60000) }), status: 'running', progress: 0 })
   taskOpen.value = true
   try {
     const res: any = await api.post(`/channels/${channelId.value}/records/download`, { start: Math.round(a), end: Math.round(b), source: source.value })
-    upsertTask({ id: tid, status: 'success', progress: 100, detail: res?.file ? '文件已生成' : '任务已提交' })
-    toast.success('下载任务已创建')
+    upsertTask({ id: tid, status: 'success', progress: 100, detail: res?.file ? t('live.playback.downloadFileReady') : t('live.playback.downloadSubmitted') })
+    toast.success(t('live.msg.downloadCreated'))
   } catch (e: any) {
-    upsertTask({ id: tid, status: 'failed', detail: e?.msg || '创建失败' })
-    toastApiError(e, '下载失败')
+    upsertTask({ id: tid, status: 'failed', detail: e?.msg || t('live.msg.downloadCreateFailed') })
+    toastApiError(e, t('live.msg.downloadFailed'))
   }
 }
 const dragStyle = computed(() => {
@@ -195,14 +196,14 @@ let pendingTs = 0
 
 async function onTimelineClick(e: MouseEvent) {
   if (selectMode.value) return
-  if (!channelId.value) { toast.warning('请先选择通道'); return }
+  if (!channelId.value) { toast.warning(t('live.msg.pickChannelFirst')); return }
   const ts = normalizeTs(tsFromEvent(e) ?? NaN)
   if (ts == null) return
   if (!session.value) { startPlay(ts); return }
   if (sessionSource.value === 'platform') {
     if (currentSeg.value && ts >= currentSeg.value.s && ts <= currentSeg.value.e) seekLocal(ts)
     else if (segCovering(ts)) { closeSession(); startPlay(ts) }
-    else toast.warning('该时间点无平台录像，请点击录像色块')
+    else toast.warning(t('live.msg.noPlatformRecord'))
     return
   }
   seekTo(ts)
@@ -214,7 +215,7 @@ async function startPlay(ts: number) {
   let seg: { s: number; e: number } | null = null
   if (source.value === 'platform') {
     seg = segCovering(t)
-    if (!seg) { toast.warning('该时间点无平台录像，请点击录像色块'); return }
+    if (!seg) { toast.warning(t('live.msg.noPlatformRecord')); return }
   }
   try {
     const res: any = await api.post(`/channels/${channelId.value}/playback`, { start: t, end: dayStart.value + DAY, source: source.value })
@@ -227,8 +228,8 @@ async function startPlay(ts: number) {
     if ((res.source || source.value) === 'platform') pendingVideoSeek = t
     else startDeviceTick()
   } catch (e: any) {
-    if (e.code === 'E6003') toast.error({ title: '该设备不支持设备端回放' })
-    else toastApiError(e, '起播失败')
+    if (e.code === 'E6003') toast.error({ title: t('live.msg.devicePlaybackUnsupported') })
+    else toastApiError(e, t('live.msg.playbackStartFailed'))
   }
 }
 
@@ -238,7 +239,7 @@ async function seekTo(ts: number) {
     await api.put(`/playback/${session.value.sessionId}`, { op: 'seek', seekTs: ts, baseTs: startTs.value })
     startTs.value = ts; curTs.value = ts
   } catch (e: any) {
-    toastApiError(e, '定位失败')
+    toastApiError(e, t('live.msg.seekFailed'))
     if (String(e.code) === 'E0404' || String(e.msg || '').includes('E0404')) { session.value = null; stopDeviceTick() }
   }
 }
@@ -254,7 +255,7 @@ async function togglePause() {
   try {
     await api.put(`/playback/${session.value.sessionId}`, { op: paused.value ? 'resume' : 'pause' })
     paused.value = !paused.value
-  } catch (e: any) { toastApiError(e, '操作失败') }
+  } catch (e: any) { toastApiError(e, t('live.msg.opFailed')) }
 }
 
 async function onSpeedChange(v: any) {
@@ -266,11 +267,11 @@ async function onSpeedChange(v: any) {
     const old = vid.playbackRate || 1
     try { vid.playbackRate = nv } catch {
       vid.playbackRate = old; speed.value = old
-      toast.warning('当前浏览器不支持该倍速')
+      toast.warning(t('live.msg.speedUnsupported'))
     }
     return
   }
-  try { await api.put(`/playback/${session.value.sessionId}`, { op: 'speed', speed: nv }) } catch (e: any) { toastApiError(e, '倍速设置失败') }
+  try { await api.put(`/playback/${session.value.sessionId}`, { op: 'speed', speed: nv }) } catch (e: any) { toastApiError(e, t('live.msg.speedFailed')) }
 }
 
 function forward30() {
@@ -340,15 +341,15 @@ function seekLocal(ts: number) {
   if (!v || !currentSeg.value) return
   const maxOff = Number.isFinite(v.duration) ? Math.max(0, v.duration - 0.25) : 0
   const off = Math.min(Math.max((ts - currentSeg.value.s) / 1000, 0), maxOff)
-  try { v.currentTime = off; curTs.value = currentSeg.value.s + off * 1000 } catch { toast.error({ title: '定位失败，请重试' }) }
+  try { v.currentTime = off; curTs.value = currentSeg.value.s + off * 1000 } catch { toast.error({ title: t('live.msg.seekRetry') }) }
 }
 function onVideoMeta() { if (pendingVideoSeek && currentSeg.value) { seekLocal(pendingVideoSeek); pendingVideoSeek = 0 } }
 function onVideoTime() { const v = videoEl.value; if (v && currentSeg.value) curTs.value = currentSeg.value.s + v.currentTime * 1000 }
-function onVideoErr() { if (session.value && sessionSource.value === 'platform') toast.error({ title: '录像文件加载失败', suggest: '请重试或选择其他时间段' }) }
+function onVideoErr() { if (session.value && sessionSource.value === 'platform') toast.error({ title: t('live.msg.recordFileFailed'), suggest: t('live.msg.recordFileFailedSuggest') }) }
 function toggleMute() { muted.value = !muted.value; if (videoEl.value) videoEl.value.muted = muted.value }
 function doSnapshot() {
   if (sessionSource.value === 'device') players0.value?.snapshot?.()
-  else toast.info('平台回放请使用播放器原生截图')
+  else toast.info(t('live.msg.platformSnapshotHint'))
 }
 function startDeviceTick() {
   stopDeviceTick()
@@ -366,7 +367,7 @@ onMounted(async () => {
     const [dRes, cRes]: any[] = await Promise.all([api.get('/devices'), api.get('/channels')])
     devices.value = dRes.items || dRes || []
     channels.value = cRes.items || cRes || []
-  } catch (e: any) { toastApiError(e, '通道加载失败') }
+  } catch (e: any) { toastApiError(e, t('live.msg.treeLoadFailed')) }
   // 消息中心"回放此刻"跳转：/playback?channelId=xx&ts=
   const q: any = route.query
   if (q.channelId) channelId.value = String(q.channelId)
@@ -385,28 +386,28 @@ onMounted(async () => {
       v-if="treeCollapsed"
       type="button"
       class="flex w-8 shrink-0 flex-col items-center justify-center gap-2 rounded-signal border border-line bg-surface text-muted transition-colors hover:border-primary hover:text-primary"
-      aria-label="展开通道列表"
+      :aria-label="t('live.tree.expand')"
       :aria-expanded="false"
       @click="treeCollapsed = false"
     >
       <Icon name="chevron-right" :size="14" />
-      <span class="text-[11px] [writing-mode:vertical-rl]">通道</span>
+      <span class="text-[11px] [writing-mode:vertical-rl]">{{ t('live.tree.collapsedLabel') }}</span>
     </button>
     <div v-else class="flex w-48 shrink-0 flex-col overflow-hidden rounded-signal border border-line bg-surface lg:w-tree">
       <div class="border-b border-line-soft p-3">
         <div class="mb-2 flex items-center justify-between">
-          <p class="text-sm font-semibold text-ink">选择通道</p>
+          <p class="text-sm font-semibold text-ink">{{ t('live.tree.pickTitle') }}</p>
           <button
             type="button"
             class="rounded-chrome p-0.5 text-placeholder transition-colors hover:text-primary"
-            aria-label="收起通道列表"
+            :aria-label="t('live.tree.collapse')"
             :aria-expanded="true"
             @click="treeCollapsed = true"
           >
             <Icon name="chevron-left" :size="14" />
           </button>
         </div>
-        <UiInput v-model="treeSearch" placeholder="搜索通道" size="sm" clearable>
+        <UiInput v-model="treeSearch" :placeholder="t('live.tree.searchPlaceholder')" size="sm" clearable>
           <template #prefix><Icon name="search" :size="13" class="text-placeholder" /></template>
         </UiInput>
       </div>
@@ -414,7 +415,7 @@ onMounted(async () => {
         <UiTree :nodes="treeData" :search="treeSearch" :selected="channelId" @select="onNodeClick">
           <template #node="{ node }"><span class="truncate">{{ node.label }}</span></template>
         </UiTree>
-        <UiEmptyState v-if="!treeData.length" text="暂无通道" icon="video" />
+        <UiEmptyState v-if="!treeData.length" :text="t('live.tree.empty')" icon="video" />
       </div>
     </div>
 
@@ -423,7 +424,7 @@ onMounted(async () => {
       <div class="flex flex-wrap items-center gap-3 rounded-signal border border-line bg-surface px-3 py-2">
         <span class="text-sm font-semibold text-ink">{{ curChannelName }}</span>
         <div class="flex items-center gap-1">
-          <button type="button" class="flex h-7 w-7 items-center justify-center rounded-chrome border border-line text-muted hover:border-primary hover:text-primary" aria-label="前一天" @click="shiftDay(-1)"><Icon name="chevron-left" :size="14" /></button>
+          <button type="button" class="flex h-7 w-7 items-center justify-center rounded-chrome border border-line text-muted hover:border-primary hover:text-primary" :aria-label="t('live.playback.prevDay')" @click="shiftDay(-1)"><Icon name="chevron-left" :size="14" /></button>
           <UiPopover v-model:open="calOpen" width="w-64">
             <template #trigger>
               <button class="flex h-7 items-center gap-1.5 rounded-chrome border border-line bg-surface px-2.5 text-sm text-body hover:border-primary">
@@ -432,12 +433,12 @@ onMounted(async () => {
             </template>
             <div>
               <div class="mb-1 flex items-center justify-between">
-                <button type="button" class="rounded-chrome p-1 text-muted hover:bg-zone" aria-label="上个月" @click="calMonth = new Date(calMonth.getFullYear(), calMonth.getMonth() - 1, 1)"><Icon name="chevron-left" :size="14" /></button>
-                <span class="text-sm font-medium text-ink">{{ calMonth.getFullYear() }} 年 {{ calMonth.getMonth() + 1 }} 月</span>
-                <button type="button" class="rounded-chrome p-1 text-muted hover:bg-zone" aria-label="下个月" @click="calMonth = new Date(calMonth.getFullYear(), calMonth.getMonth() + 1, 1)"><Icon name="chevron-right" :size="14" /></button>
+                <button type="button" class="rounded-chrome p-1 text-muted hover:bg-zone" :aria-label="t('live.playback.prevMonth')" @click="calMonth = new Date(calMonth.getFullYear(), calMonth.getMonth() - 1, 1)"><Icon name="chevron-left" :size="14" /></button>
+                <span class="text-sm font-medium text-ink">{{ t('live.playback.calMonthLabel', { y: calMonth.getFullYear(), m: calMonth.getMonth() + 1 }) }}</span>
+                <button type="button" class="rounded-chrome p-1 text-muted hover:bg-zone" :aria-label="t('live.playback.nextMonth')" @click="calMonth = new Date(calMonth.getFullYear(), calMonth.getMonth() + 1, 1)"><Icon name="chevron-right" :size="14" /></button>
               </div>
               <div class="grid grid-cols-7 gap-0.5 text-center text-[11px] text-placeholder">
-                <span v-for="w in ['一', '二', '三', '四', '五', '六', '日']" :key="w" class="py-1">{{ w }}</span>
+                <span v-for="w in ['live.playback.weekMon', 'live.playback.weekTue', 'live.playback.weekWed', 'live.playback.weekThu', 'live.playback.weekFri', 'live.playback.weekSat', 'live.playback.weekSun']" :key="w" class="py-1">{{ t(w) }}</span>
               </div>
               <div class="grid grid-cols-7 gap-0.5">
                 <template v-for="(d, i) in calDays" :key="i">
@@ -454,22 +455,22 @@ onMounted(async () => {
                 </template>
               </div>
               <p class="mt-1.5 border-t border-line-soft pt-1.5 text-[11px] text-placeholder">
-                <span class="mr-1 inline-block h-1.5 w-1.5 rounded-full bg-primary align-middle" />圆点表示当天有录像
+                <span class="mr-1 inline-block h-1.5 w-1.5 rounded-full bg-primary align-middle" />{{ t('live.playback.calDotHint') }}
               </p>
             </div>
           </UiPopover>
-          <button type="button" class="flex h-7 w-7 items-center justify-center rounded-chrome border border-line text-muted hover:border-primary hover:text-primary" aria-label="后一天" @click="shiftDay(1)"><Icon name="chevron-right" :size="14" /></button>
+          <button type="button" class="flex h-7 w-7 items-center justify-center rounded-chrome border border-line text-muted hover:border-primary hover:text-primary" :aria-label="t('live.playback.nextDay')" @click="shiftDay(1)"><Icon name="chevron-right" :size="14" /></button>
         </div>
         <UiSegmented
           :model-value="source" @update:model-value="source = $event as any"
-          :items="[...(canDevice ? [{ label: '设备存储', value: 'device' }] : []), { label: '平台存储', value: 'platform' }]"
+          :items="[...(canDevice ? [{ label: t('live.playback.srcDevice'), value: 'device' }] : []), { label: t('live.playback.srcPlatform'), value: 'platform' }]"
         />
         <div class="ml-auto flex items-center gap-2">
           <button
             class="flex h-7 items-center gap-1 rounded-chrome border px-2 text-xs transition-colors"
             :class="selectMode ? 'border-primary bg-primary-soft text-primary' : 'border-line text-muted hover:border-primary hover:text-primary'"
             @click="selectMode = !selectMode"
-          ><Icon name="sliders" :size="13" />框选下载</button>
+          ><Icon name="sliders" :size="13" />{{ t('live.playback.rangeDownload') }}</button>
         </div>
       </div>
 
@@ -486,7 +487,7 @@ onMounted(async () => {
           <div
             v-for="(seg, i) in shownSegs" :key="i" class="absolute bottom-1.5 top-1.5 rounded-signal transition-opacity hover:opacity-85"
             :style="{ ...segStyle(seg), background: TYPE_COLOR[seg.type] || 'var(--color-rec-timer)' }"
-            :title="`${fmt(seg.s)} ~ ${fmt(seg.e)}（${TYPE_NAME[seg.type] || seg.type}）`"
+            :title="t('live.playback.segTitle', { start: fmt(seg.s), end: fmt(seg.e), type: TYPE_NAME[seg.type] ? t(TYPE_NAME[seg.type]) : seg.type })"
           />
           <div v-if="dragStyle.left" class="pointer-events-none absolute bottom-0 top-0 rounded-signal border border-primary bg-primary/25" :style="dragStyle" />
           <div v-if="curTs" class="pointer-events-none absolute -bottom-1.5 -top-1.5 w-[2px] bg-primary shadow-[0_0_6px_var(--color-primary)]" :style="{ left: curLeft }">
@@ -497,30 +498,30 @@ onMounted(async () => {
         <div class="mt-2.5 flex flex-wrap items-center gap-4 border-t border-line-soft pt-2.5">
           <div class="flex items-center gap-4">
             <UiCheckbox v-model="typeFilter.timer">
-              <span class="inline-flex items-center gap-1.5"><span class="h-1.5 w-1.5 rounded-full" :style="{ background: TYPE_COLOR.timer }" />定时</span>
+              <span class="inline-flex items-center gap-1.5"><span class="h-1.5 w-1.5 rounded-full" :style="{ background: TYPE_COLOR.timer }" />{{ t('live.playback.typeTimer') }}</span>
             </UiCheckbox>
             <UiCheckbox v-model="typeFilter.event">
-              <span class="inline-flex items-center gap-1.5"><span class="h-1.5 w-1.5 rounded-full" :style="{ background: TYPE_COLOR.event }" />事件</span>
+              <span class="inline-flex items-center gap-1.5"><span class="h-1.5 w-1.5 rounded-full" :style="{ background: TYPE_COLOR.event }" />{{ t('live.playback.typeEvent') }}</span>
             </UiCheckbox>
             <UiCheckbox v-model="typeFilter.manual">
-              <span class="inline-flex items-center gap-1.5"><span class="h-1.5 w-1.5 rounded-full" :style="{ background: TYPE_COLOR.manual }" />手动</span>
+              <span class="inline-flex items-center gap-1.5"><span class="h-1.5 w-1.5 rounded-full" :style="{ background: TYPE_COLOR.manual }" />{{ t('live.playback.typeManual') }}</span>
             </UiCheckbox>
           </div>
           <div class="h-3.5 w-px bg-line-soft" />
           <div class="flex items-center gap-1.5 text-xs text-placeholder">
-            <Icon name="zoom-in" :size="13" />滚轮缩放
+            <Icon name="zoom-in" :size="13" />{{ t('live.playback.wheelZoom') }}
             <span class="font-mono text-body">{{ zoomLabel }}</span>
-            <button v-if="zoomLabel !== '24h'" class="text-primary hover:underline" @click="resetZoom">重置</button>
+            <button v-if="zoomLabel !== '24h'" class="text-primary hover:underline" @click="resetZoom">{{ t('live.playback.resetZoom') }}</button>
           </div>
           <div class="h-3.5 w-px bg-line-soft" />
           <div class="flex items-center gap-2">
-            <span class="text-xs text-placeholder">倍速</span>
+            <span class="text-xs text-placeholder">{{ t('live.playback.speed') }}</span>
             <UiSelect
               :model-value="String(speed)" width="w-24" size="sm" :disabled="!session"
               :options="speeds.map((s) => ({ label: s + 'x', value: String(s) }))" @update:model-value="onSpeedChange"
             />
           </div>
-          <span class="ml-auto text-[11px] text-placeholder">共 {{ shownSegs.length }} 段</span>
+          <span class="ml-auto text-[11px] text-placeholder">{{ t('live.playback.segCount', { n: shownSegs.length }) }}</span>
         </div>
       </div>
 
@@ -534,11 +535,11 @@ onMounted(async () => {
         />
         <div v-else class="absolute inset-0 flex flex-col items-center justify-center gap-2 text-placeholder">
           <Icon name="film" :size="30" :stroke="1.4" />
-          <span class="text-sm">{{ channelId ? '点击上方时间轴录像段开始回放' : '请先在左侧选择通道' }}</span>
+          <span class="text-sm">{{ channelId ? t('live.playback.emptyPickSeg') : t('live.playback.emptyPickChannel') }}</span>
         </div>
         <div v-if="session" class="absolute left-2 top-2">
           <UiTag :color="sessionSource === 'platform' ? 'primary' : 'success'" plain>
-            {{ sessionSource === 'platform' ? '平台录像' : '设备录像' }}
+            {{ sessionSource === 'platform' ? t('live.playback.tagPlatform') : t('live.playback.tagDevice') }}
           </UiTag>
         </div>
       </div>
@@ -546,16 +547,16 @@ onMounted(async () => {
       <!-- 控制条（REC-03：9 档倍速——控件随时间轴放置于其正下方 / 30s 快进 / 静音 / 截图） -->
       <div class="flex flex-wrap items-center gap-2 rounded-signal border border-line bg-surface px-3 py-2">
         <UiButton size="sm" :disabled="!session" @click="togglePause">
-          <Icon :name="paused ? 'play' : 'pause'" :size="13" />{{ paused ? '继续' : '暂停' }}
+          <Icon :name="paused ? 'play' : 'pause'" :size="13" />{{ paused ? t('live.playback.resume') : t('live.playback.pause') }}
         </UiButton>
         <UiButton size="sm" :disabled="!session" @click="forward30"><Icon name="fast-forward" :size="13" />30s</UiButton>
         <UiButton size="sm" :disabled="!session" @click="toggleMute">
-          <Icon :name="muted ? 'volume-x' : 'volume-2'" :size="13" />{{ muted ? '取消静音' : '静音' }}
+          <Icon :name="muted ? 'volume-x' : 'volume-2'" :size="13" />{{ muted ? t('live.playback.unmute') : t('live.playback.mute') }}
         </UiButton>
-        <UiButton size="sm" :disabled="!session" @click="doSnapshot"><Icon name="camera" :size="13" />截图</UiButton>
+        <UiButton size="sm" :disabled="!session" @click="doSnapshot"><Icon name="camera" :size="13" />{{ t('live.playback.snapshot') }}</UiButton>
         <span v-if="curTs" class="ml-1 font-mono text-xs text-muted">{{ fmt(curTs) }}</span>
-        <span class="ml-auto text-xs text-placeholder">会话 {{ session?.sessionId || '—' }}</span>
-        <UiButton size="sm" variant="dangerText" :disabled="!session" @click="closeSession"><Icon name="x" :size="13" />关闭回放</UiButton>
+        <span class="ml-auto text-xs text-placeholder">{{ t('live.playback.sessionId', { id: session?.sessionId || '—' }) }}</span>
+        <UiButton size="sm" variant="dangerText" :disabled="!session" @click="closeSession"><Icon name="x" :size="13" />{{ t('live.playback.closeSession') }}</UiButton>
       </div>
     </div>
   </div>

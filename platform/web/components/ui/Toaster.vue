@@ -1,4 +1,5 @@
 <script setup lang="ts">
+const { t } = useI18n()
 // 全局消息提示容器（挂载于 app.vue；通过 useToast().success/error 调用）
 import { ToastProvider, ToastViewport, ToastRoot, ToastTitle, ToastDescription, ToastClose } from 'reka-ui'
 
@@ -12,7 +13,7 @@ const style: Record<string, { icon: string; cls: string }> = {
 </script>
 
 <template>
-  <ToastProvider :duration="4000" label="通知">
+  <ToastProvider :duration="4000" :label="t('common.notifications')">
     <ToastViewport class="fixed left-1/2 top-4 z-[70] flex w-full max-w-md -translate-x-1/2 flex-col items-center gap-2 outline-none">
       <ToastRoot
         v-for="t in items" :key="t.id" :default-open="true"

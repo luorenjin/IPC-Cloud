@@ -21,7 +21,7 @@ export type Rule<T = any> = (value: T, all: Record<string, any>) => string | nul
 
 // ---------- 常用规则 ----------
 
-export function required(msg = '此项不能为空'): Rule {
+export function required(msg = 'common.requiredField'): Rule {
   return (v) => {
     if (v == null) return msg
     if (typeof v === 'string' && v.trim() === '') return msg
@@ -31,11 +31,11 @@ export function required(msg = '此项不能为空'): Rule {
 }
 
 export function maxLen(n: number, msg?: string): Rule<string> {
-  return (v) => (v && String(v).length > n ? msg || `不能超过 ${n} 个字符` : null)
+  return (v) => (v && String(v).length > n ? msg || 'form.maxLen' : null)
 }
 
 export function minLen(n: number, msg?: string): Rule<string> {
-  return (v) => (v && String(v).length < n ? msg || `至少需要 ${n} 个字符` : null)
+  return (v) => (v && String(v).length < n ? msg || 'form.minLen' : null)
 }
 
 /** 整数区间校验：非整数或越界都算失败，不静默改写用户输入 */
@@ -43,7 +43,7 @@ export function intRange(min: number, max: number, msg?: string): Rule {
   return (v) => {
     if (v === '' || v == null) return null // 是否必填交给 required
     const n = Number(v)
-    if (!Number.isInteger(n) || n < min || n > max) return msg || `须为 ${min}–${max} 之间的整数`
+    if (!Number.isInteger(n) || n < min || n > max) return msg || 'form.intRange'
     return null
   }
 }
@@ -53,7 +53,7 @@ export function pattern(re: RegExp, msg: string): Rule<string> {
 }
 
 /** 与另一字段相等（改密码的「确认密码」） */
-export function sameAs(field: string, msg = '两次输入不一致'): Rule {
+export function sameAs(field: string, msg = 'form.sameAs'): Rule {
   return (v, all) => (v !== all[field] ? msg : null)
 }
 

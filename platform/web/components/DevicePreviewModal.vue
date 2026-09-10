@@ -21,6 +21,7 @@ const emit = defineEmits<{
 
 const api = useApi()
 const toast = useToast()
+const { t } = useI18n()
 
 // 激活的 Tab
 const activeTab = ref<'preview' | 'playback'>('preview')
@@ -31,7 +32,7 @@ const curChannel = computed(() => {
   if (props.device?.channels?.length) return props.device.channels[0]
   return {
     id: props.device?.id || '',
-    name: props.device?.name || '默认通道',
+    name: props.device?.name || t('live.preview.defaultChannel'),
     streamState: props.device?.status === 'online' ? 'online' : 'offline'
   }
 })
@@ -58,7 +59,7 @@ const snapshotLoading = ref(false)
 // 切换静音
 function toggleMute() {
   isMuted.value = !isMuted.value
-  toast.info(isMuted.value ? '已静音' : '声音已开启')
+  toast.info(isMuted.value ? t('live.msg.muted') : t('live.msg.unmuted'))
 }
 
 // 切换码流（主码流 / 子码流）
@@ -76,12 +77,12 @@ async function takeSnapshot() {
     const res: any = await api.post(`/channels/${curChannel.value.id}/snapshot`)
     if (res?.url) {
       snapshotUrl.value = res.url
-      toast.success('已抓拍')
+      toast.success(t('live.msg.snapshotOk'))
     } else {
-      toast.warning('抓拍未返回图片')
+      toast.warning(t('live.msg.snapshotNoImage'))
     }
   } catch (e: any) {
-    toastApiError(e, '抓拍失败')
+    toastApiError(e, t('live.msg.snapshotFailed'))
   } finally {
     snapshotLoading.value = false
   }
@@ -107,7 +108,7 @@ async function fetchLiveStream() {
     liveStreamUrl.value = pickFlv(res)
   } catch (e: any) {
     liveStreamUrl.value = ''
-    toastApiError(e, '起流失败')
+    toastApiError(e, t('live.msg.playFailed'))
   } finally {
     liveLoading.value = false
   }
@@ -163,7 +164,7 @@ onBeforeUnmount(() => {
       <div class="flex items-center justify-between px-5 pt-4 pb-2">
         <div class="flex items-center gap-2">
           <h2 class="text-base font-semibold text-ink">
-            {{ device?.name || curChannel?.name || '设备预览' }}
+            {{ device?.name || curChannel?.name || t('live.preview.title') }}
           </h2>
           <span
             v-if="device?.status"
@@ -171,13 +172,13 @@ onBeforeUnmount(() => {
             :class="device.status === 'online' ? 'bg-success-soft text-success' : 'bg-danger-soft text-danger'"
           >
             <span class="h-1.5 w-1.5 rounded-full" :class="device.status === 'online' ? 'bg-success' : 'bg-danger'" />
-            {{ device.status === 'online' ? '在线' : '离线' }}
+            {{ device.status === 'online' ? t('common.online') : t('common.offline') }}
           </span>
         </div>
         <button
           class="rounded-chrome p-1 text-muted transition-colors hover:bg-zone hover:text-ink"
-          title="关闭"
-          aria-label="关闭"
+          :title="t('common.close')"
+          :aria-label="t('common.close')"
           @click="close"
         >
           <Icon name="x" :size="18" />
@@ -193,7 +194,7 @@ onBeforeUnmount(() => {
             :class="activeTab === 'preview' ? 'bg-primary text-white' : 'text-muted hover:text-primary'"
             @click="activeTab = 'preview'; fetchLiveStream()"
           >
-            预览
+            {{ t('live.preview.tabPreview') }}
           </button>
           <!-- 回放 Tab -->
           <button
@@ -202,7 +203,7 @@ onBeforeUnmount(() => {
             @click="activeTab = 'playback'; stopLiveStream(); liveStreamUrl = ''"
           >
             <Icon name="video" :size="13" />
-            <span>回放</span>
+            <span>{{ t('live.preview.tabPlayback') }}</span>
           </button>
         </div>
       </div>
@@ -223,16 +224,16 @@ onBeforeUnmount(() => {
         <!-- 无流占位：与 live.vue 一致的图标 + 文案 -->
         <div v-else class="flex flex-col items-center justify-center gap-2 text-placeholder">
           <Icon :name="liveLoading ? 'refresh' : 'video'" :size="30" :stroke="1.4" :class="liveLoading ? 'ipc-spin' : ''" />
-          <span class="text-xs">{{ liveLoading ? '正在拉流…' : '暂无画面' }}</span>
+          <span class="text-xs">{{ liveLoading ? t('live.preview.loading') : t('live.preview.noStream') }}</span>
         </div>
       </div>
 
       <!-- ==================== 回放 Tab：说明 + 跳转按钮（完整回放见 Task 18） ==================== -->
       <div v-else class="relative aspect-video w-full flex flex-col items-center justify-center gap-3 bg-zone text-center">
         <Icon name="video" :size="30" class="text-placeholder" :stroke="1.4" />
-        <p class="max-w-xs text-xs text-muted">录像回放需要按通道选择日期与时间轴，请前往回放页查看「{{ curChannel?.name || '该通道' }}」的录像。</p>
+        <p class="max-w-xs text-xs text-muted">{{ t('live.preview.playbackHint', { name: curChannel?.name || t('live.preview.playbackFallbackName') }) }}</p>
         <UiButton variant="primary" size="sm" :disabled="!curChannel?.id" @click="openPlaybackPage">
-          打开录像回放
+          {{ t('live.preview.openPlayback') }}
         </UiButton>
       </div>
 
@@ -243,8 +244,8 @@ onBeforeUnmount(() => {
           <!-- 音量 / 静音切换 -->
           <button
             class="flex h-7 w-7 items-center justify-center rounded-chrome text-muted transition-colors hover:bg-zone hover:text-primary"
-            :title="isMuted ? '开启声音' : '静音'"
-            :aria-label="isMuted ? '开启声音' : '静音'"
+            :title="isMuted ? t('live.preview.unmute') : t('live.preview.mute')"
+            :aria-label="isMuted ? t('live.preview.unmute') : t('live.preview.mute')"
             @click="toggleMute"
           >
             <Icon :name="isMuted ? 'volume-x' : 'volume-2'" :size="15" />
@@ -257,14 +258,14 @@ onBeforeUnmount(() => {
               :class="profile === 'main' ? 'bg-primary-soft text-primary font-medium' : 'text-muted hover:text-primary'"
               @click="selectProfile('main')"
             >
-              主码流
+              {{ t('live.player.mainStream') }}
             </button>
             <button
               class="px-2 py-0.5 border-l border-line transition-colors"
               :class="profile === 'sub' ? 'bg-primary-soft text-primary font-medium' : 'text-muted hover:text-primary'"
               @click="selectProfile('sub')"
             >
-              子码流
+              {{ t('live.player.subStream') }}
             </button>
           </div>
         </div>
@@ -277,11 +278,11 @@ onBeforeUnmount(() => {
             target="_blank"
             rel="noopener"
             class="text-xs text-primary hover:underline"
-          >查看抓拍图片</a>
+          >{{ t('live.preview.viewSnapshot') }}</a>
           <button
             class="flex h-7 w-7 items-center justify-center rounded-chrome text-muted transition-colors hover:bg-zone hover:text-primary disabled:cursor-not-allowed disabled:opacity-40"
-            title="抓拍图片"
-            aria-label="抓拍图片"
+            :title="t('live.preview.snapshot')"
+            :aria-label="t('live.preview.snapshot')"
             :disabled="snapshotLoading || !liveStreamUrl"
             @click="takeSnapshot"
           >
@@ -289,8 +290,8 @@ onBeforeUnmount(() => {
           </button>
           <button
             class="flex h-7 w-7 items-center justify-center rounded-chrome text-muted transition-colors hover:bg-zone hover:text-primary"
-            title="全屏"
-            aria-label="全屏"
+            :title="t('live.preview.fullscreen')"
+            :aria-label="t('live.preview.fullscreen')"
             @click="toggleFullscreen"
           >
             <Icon name="maximize" :size="15" />

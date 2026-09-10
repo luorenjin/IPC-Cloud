@@ -8,7 +8,9 @@ const props = withDefaults(defineProps<{
 }>(), { kind: 'timer' })
 const emit = defineEmits(['update:modelValue'])
 
-const days = ['周一', '周二', '周三', '周四', '周五', '周六', '周日']
+const { t } = useI18n()
+// 星期名走词条（enum.day.1..7），随语言切换
+const days = computed(() => [1, 2, 3, 4, 5, 6, 7].map((d) => t(`enum.day.${d}`)))
 const grid = computed(() => {
   // grid[day][minute/30] = true
   const g: boolean[][] = Array.from({ length: 7 }, () => Array(48).fill(false))

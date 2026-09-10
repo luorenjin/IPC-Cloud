@@ -2,6 +2,7 @@
 // 项目与分组管理（ACC-03/04）：左侧项目列表与启停/重命名，右侧当前项目分组树（≤4 级、同级唯一、拖拽同级排序）
 const api = useApi()
 const toast = useToast()
+const { t } = useI18n()
 const confirm = useConfirm()
 const { currentProject, switchProject, loadMe } = useAuth()
 
@@ -15,7 +16,7 @@ async function loadProjects() {
     const res: any = await api.get('/projects')
     projects.value = res?.items || []
   } catch (e: any) {
-    toastApiError(e, '加载项目列表失败')
+    toastApiError(e, t('system.msg.projectsLoadFailed'))
   } finally {
     projLoading.value = false
   }
@@ -40,21 +41,21 @@ function openProjDlg(mode: 'create' | 'edit', row?: any) {
 }
 
 async function saveProj() {
-  if (!projDlg.name.trim()) return toast.warning('请输入项目名称')
+  if (!projDlg.name.trim()) return toast.warning(t('system.msg.needProjectName'))
   projDlg.saving = true
   try {
     if (projDlg.mode === 'create') {
       await api.post('/projects', { name: projDlg.name.trim(), tz: projDlg.tz.trim() || undefined })
-      toast.success('项目已创建')
+      toast.success(t('system.msg.projectCreated'))
     } else {
       await api.put('/projects/' + projDlg.id, { name: projDlg.name.trim(), tz: projDlg.tz.trim() || undefined })
-      toast.success('已重命名')
+      toast.success(t('system.msg.projectRenamed'))
     }
     projDlg.visible = false
     await loadProjects()
     loadMe() // 同步顶栏项目选择器
   } catch (e: any) {
-    toastApiError(e, '保存失败')
+    toastApiError(e, t('common.saveFailed'))
   } finally {
     projDlg.saving = false
   }
@@ -65,10 +66,10 @@ async function toggleProject(row: any, v: boolean) {
   try {
     await api.put('/projects/' + row.id, { enabled: v })
     row.enabled = v
-    toast.success(v ? '已启用' : '已停用')
+    toast.success(v ? t('system.msg.projectEnabled') : t('system.msg.projectDisabled'))
     loadMe()
   } catch (e: any) {
-    toastApiError(e, '操作失败')
+    toastApiError(e, t('system.msg.opFailed'))
     await loadProjects() // 失败回显真实状态
   }
 }
@@ -76,18 +77,17 @@ async function toggleProject(row: any, v: boolean) {
 /* 删除项目（仅空项目可删，含设备/通道时后端拦截并给出具体数量） */
 async function removeProject(row: any) {
   const ok = await confirm.ask({
-    title: '删除项目',
-    message: '确定删除项目「' + row.name + '」？',
-    detail:
-      '仅可删除空项目，项目下存在设备或通道时无法删除。删除后该项目的分组、角色、成员授权及告警与录像模板将一并清除，且不可恢复。',
+    title: t('system.projects.deleteTitle'),
+    message: t('system.projects.deleteMsg', { name: row.name }),
+    detail: t('system.projects.deleteDetail'),
     danger: true,
-    confirmText: '删除'
+    confirmText: t('common.delete')
   })
   if (!ok) return
   const wasCurrent = row.id === currentProject.value?.id
   try {
     await api.del('/projects/' + row.id)
-    toast.success('项目「' + row.name + '」已删除')
+    toast.success(t('system.msg.projectDeleted', { name: row.name }))
     await loadProjects()
     // 删掉的是当前项目时，切到剩余项目（优先启用中的），避免顶栏与列表停留在已删项目上
     if (wasCurrent) {
@@ -96,14 +96,14 @@ async function removeProject(row: any) {
     }
     loadMe()
   } catch (e: any) {
-    toastApiError(e, '删除失败')
+    toastApiError(e, t('common.deleteFailed'))
   }
 }
 
 /* 切换当前项目 */
 function useProject(row: any) {
   switchProject(row)
-  toast.success('已切换到项目「' + row.name + '」')
+  toast.success(t('system.msg.projectSwitched', { name: row.name }))
 }
 
 /* ---------------- 分组树 ---------------- */
@@ -117,7 +117,7 @@ async function loadGroups() {
     const res: any = await api.get('/groups', { projectId: currentProject.value.id })
     groups.value = res?.items || []
   } catch (e: any) {
-    toastApiError(e, '加载分组失败')
+    toastApiError(e, t('system.msg.groupsLoadFailed'))
   } finally {
     treeLoading.value = false
   }
@@ -179,7 +179,7 @@ const grpDlg = reactive({
 // create：传 node 则为"新增子分组"（父节点为 node），否则为"新增根分组"
 function openGrpDlg(mode: 'create' | 'edit', node?: any) {
   if (mode === 'create' && node && depthOf(node) >= 4) {
-    return toast.warning('分组层级最多 4 级，不能在末级分组下继续新增')
+    return toast.warning(t('system.msg.groupDepthLimit'))
   }
   grpDlg.mode = mode
   if (mode === 'edit') {
@@ -196,12 +196,12 @@ function openGrpDlg(mode: 'create' | 'edit', node?: any) {
 
 async function saveGrp() {
   const name = grpDlg.name.trim()
-  if (!name) return toast.warning('请输入分组名称')
+  if (!name) return toast.warning(t('system.msg.needGroupName'))
   // 同级唯一（前端预检，后端同样校验）
   const dup = groups.value.some(
     (g) => (g.parentId || '') === (grpDlg.parentId || '') && g.name === name && g.id !== grpDlg.id
   )
-  if (dup) return toast.warning('同级分组名已存在，请更换名称')
+  if (dup) return toast.warning(t('system.msg.groupNameDup'))
   grpDlg.saving = true
   try {
     if (grpDlg.mode === 'edit') {
@@ -209,11 +209,11 @@ async function saveGrp() {
     } else {
       await api.post('/groups', { name, parentId: grpDlg.parentId })
     }
-    toast.success('已保存')
+    toast.success(t('common.savedOk'))
     grpDlg.visible = false
     await loadGroups()
   } catch (e: any) {
-    toastApiError(e, '保存失败')
+    toastApiError(e, t('common.saveFailed'))
   } finally {
     grpDlg.saving = false
   }
@@ -222,19 +222,19 @@ async function saveGrp() {
 /* 删除分组（含设备的分组后端拦截："分组下存在设备，请先转移"） */
 async function removeGroup(node: any) {
   const ok = await confirm.ask({
-    title: '删除分组',
-    message: '确定删除分组「' + node.name + '」？',
-    detail: '分组下存在设备或子分组时无法删除，请先转移。',
+    title: t('system.groups.deleteTitle'),
+    message: t('system.groups.deleteMsg', { name: node.name }),
+    detail: t('system.groups.deleteDetail'),
     danger: true,
-    confirmText: '删除'
+    confirmText: t('common.delete')
   })
   if (!ok) return
   try {
     await api.del('/groups/' + node.id)
-    toast.success('已删除')
+    toast.success(t('common.deletedOk'))
     await loadGroups()
   } catch (e: any) {
-    toastApiError(e, '删除失败')
+    toastApiError(e, t('common.deleteFailed'))
   }
 }
 
@@ -263,7 +263,7 @@ async function onNodeDrop(targetId: string) {
   const g2 = groups.value.find((g) => String(g.id) === String(targetId))
   if (!g1 || !g2) return
   if ((g1.parentId || '') !== (g2.parentId || '')) {
-    toast.warning('分组暂不支持跨级移动，仅支持同级拖拽排序')
+    toast.warning(t('system.msg.groupCrossLevel'))
     return
   }
   const parentId = g1.parentId || ''
@@ -284,9 +284,9 @@ async function onNodeDrop(targetId: string) {
   if (!updates.length) return
   try {
     await Promise.all(updates.map((u) => api.put('/groups/' + u.g.id, { sort: u.sort })))
-    toast.success('分组顺序已更新')
+    toast.success(t('system.msg.groupSorted'))
   } catch (e: any) {
-    toastApiError(e, '分组排序保存失败')
+    toastApiError(e, t('system.msg.groupSortFailed'))
     await loadGroups() // 回滚本地顺序为后端实际状态
   }
 }
@@ -312,10 +312,10 @@ onMounted(async () => {
 <template>
   <div class="flex items-start gap-3">
     <!-- 左侧：项目列表 -->
-    <UiCard title="项目列表" class="w-[400px] shrink-0 self-start">
+    <UiCard :title="t('system.projects.title')" class="w-[400px] shrink-0 self-start">
       <template #extra>
         <UiButton variant="primary" size="sm" @click="openProjDlg('create')">
-          <UiIcon name="plus" :size="14" />新建项目
+          <UiIcon name="plus" :size="14" />{{ t('system.projects.create') }}
         </UiButton>
       </template>
       <UiLoading :loading="projLoading">
@@ -335,16 +335,16 @@ onMounted(async () => {
               <div class="min-w-0 flex-1">
                 <div class="flex flex-wrap items-center gap-1.5">
                   <span class="truncate text-sm font-semibold text-ink">{{ p.name }}</span>
-                  <UiTag v-if="!p.enabled" color="info">已停用</UiTag>
-                  <UiTag v-else-if="p.id === currentProject?.id" color="primary" dot>当前项目</UiTag>
+                  <UiTag v-if="!p.enabled" color="info">{{ t('system.projects.disabled') }}</UiTag>
+                  <UiTag v-else-if="p.id === currentProject?.id" color="primary" dot>{{ t('system.projects.current') }}</UiTag>
                 </div>
                 <div class="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-placeholder">
-                  <span>时区 {{ p.tz || '-' }}</span>
+                  <span>{{ t('system.projects.tz', { tz: p.tz || '-' }) }}</span>
                   <span>·</span>
-                  <span>{{ fmtTime(p.createdAt) }} 创建</span>
+                  <span>{{ t('system.projects.createdAt', { time: fmtTime(p.createdAt) }) }}</span>
                   <template v-if="p.id === currentProject?.id">
                     <span>·</span>
-                    <span>{{ groups.length }} 个分组</span>
+                    <span>{{ t('system.projects.groupCount', { n: groups.length }) }}</span>
                   </template>
                 </div>
               </div>
@@ -353,7 +353,7 @@ onMounted(async () => {
             <!-- 关键运行参数迷你数据条（替代纯文字堆砌） -->
             <div class="mt-3 space-y-1.5">
               <div class="flex items-center gap-2">
-                <span class="w-16 shrink-0 text-[11px] text-placeholder">运行状态</span>
+                <span class="w-16 shrink-0 text-[11px] text-placeholder">{{ t('system.projects.runState') }}</span>
                 <div class="h-1 flex-1 overflow-hidden rounded-full bg-line">
                   <div
                     class="h-full rounded-full transition-all"
@@ -362,11 +362,11 @@ onMounted(async () => {
                   />
                 </div>
                 <span class="w-12 shrink-0 text-right text-[11px]" :class="p.enabled ? 'text-success' : 'text-muted'">
-                  {{ p.enabled ? '启用中' : '已停用' }}
+                  {{ p.enabled ? t('system.projects.enabledState') : t('system.projects.disabled') }}
                 </span>
               </div>
               <div class="flex items-center gap-2">
-                <span class="w-16 shrink-0 text-[11px] text-placeholder">停流响应</span>
+                <span class="w-16 shrink-0 text-[11px] text-placeholder">{{ t('system.projects.idleResponse') }}</span>
                 <div class="h-1 flex-1 overflow-hidden rounded-full bg-line">
                   <div class="h-full rounded-full bg-primary transition-all" :style="{ width: idlePct(p) + '%' }" />
                 </div>
@@ -375,34 +375,34 @@ onMounted(async () => {
             </div>
 
             <div class="mt-3 flex flex-wrap items-center gap-2 border-t border-line-soft pt-2.5">
-              <UiSwitch :model-value="!!p.enabled" size="sm" :aria-label="`启用项目 ${p.name || p.id}`" @update:model-value="(v: boolean) => toggleProject(p, v)" />
-              <UiButton variant="text" size="sm" class="ml-auto" @click="openProjDlg('edit', p)">重命名</UiButton>
-              <UiButton v-if="p.id !== currentProject?.id" variant="text" size="sm" @click="useProject(p)">切换到此项目</UiButton>
+              <UiSwitch :model-value="!!p.enabled" size="sm" :aria-label="t('system.projects.enableAria', { name: p.name || p.id })" @update:model-value="(v: boolean) => toggleProject(p, v)" />
+              <UiButton variant="text" size="sm" class="ml-auto" @click="openProjDlg('edit', p)">{{ t('system.projects.rename') }}</UiButton>
+              <UiButton v-if="p.id !== currentProject?.id" variant="text" size="sm" @click="useProject(p)">{{ t('system.projects.switchTo') }}</UiButton>
               <UiButton
                 variant="dangerText"
                 size="sm"
                 :disabled="projects.length <= 1"
-                :title="projects.length <= 1 ? '至少需要保留一个项目' : '仅可删除空项目'"
+                :title="projects.length <= 1 ? t('system.projects.keepOneTip') : t('system.projects.deleteEmptyOnlyTip')"
                 @click="removeProject(p)"
               >
-                删除
+                {{ t('common.delete') }}
               </UiButton>
             </div>
           </div>
         </div>
-        <UiEmptyState v-else-if="!projLoading" text="暂无项目">
+        <UiEmptyState v-else-if="!projLoading" :text="t('system.projects.empty')">
           <template #action>
-            <UiButton variant="primary" @click="openProjDlg('create')">新建项目</UiButton>
+            <UiButton variant="primary" @click="openProjDlg('create')">{{ t('system.projects.create') }}</UiButton>
           </template>
         </UiEmptyState>
       </UiLoading>
     </UiCard>
 
     <!-- 右侧：当前项目的分组树 -->
-    <UiCard :title="'分组管理' + (currentProject ? ' - ' + currentProject.name : '')" class="min-w-0 flex-1 self-start">
+    <UiCard :title="currentProject ? t('system.groups.titleWithProject', { name: currentProject.name }) : t('system.groups.title')" class="min-w-0 flex-1 self-start">
       <template #extra>
         <UiButton variant="primary" size="sm" @click="openGrpDlg('create')">
-          <UiIcon name="plus" :size="14" />新增根分组
+          <UiIcon name="plus" :size="14" />{{ t('system.groups.createRoot') }}
         </UiButton>
       </template>
       <UiLoading :loading="treeLoading">
@@ -424,53 +424,53 @@ onMounted(async () => {
             </template>
             <template #node-extra="{ node }">
               <span class="ml-auto hidden shrink-0 items-center gap-1 group-hover/node:flex" @click.stop>
-                <UiButton variant="text" size="sm" :disabled="depthOf(node.meta) >= 4" @click="openGrpDlg('create', node.meta)">子分组</UiButton>
-                <UiButton variant="text" size="sm" @click="openGrpDlg('edit', node.meta)">重命名</UiButton>
-                <UiButton variant="dangerText" size="sm" @click="removeGroup(node.meta)">删除</UiButton>
+                <UiButton variant="text" size="sm" :disabled="depthOf(node.meta) >= 4" @click="openGrpDlg('create', node.meta)">{{ t('system.groups.child') }}</UiButton>
+                <UiButton variant="text" size="sm" @click="openGrpDlg('edit', node.meta)">{{ t('system.groups.rename') }}</UiButton>
+                <UiButton variant="dangerText" size="sm" @click="removeGroup(node.meta)">{{ t('common.delete') }}</UiButton>
               </span>
             </template>
           </UiTree>
           <p class="mt-3 border-t border-line-soft pt-2 text-xs text-placeholder">
-            提示：按住分组名称拖拽到同级其他分组上可调整顺序；层级最多 4 级，同级名称需唯一。
+            {{ t('system.groups.tip') }}
           </p>
         </template>
-        <UiEmptyState v-else-if="!treeLoading" text="当前项目暂无分组">
+        <UiEmptyState v-else-if="!treeLoading" :text="t('system.groups.empty')">
           <template #action>
-            <UiButton variant="primary" @click="openGrpDlg('create')">新增根分组</UiButton>
+            <UiButton variant="primary" @click="openGrpDlg('create')">{{ t('system.groups.createRoot') }}</UiButton>
           </template>
         </UiEmptyState>
       </UiLoading>
     </UiCard>
 
     <!-- 项目新建/重命名对话框 -->
-    <UiDialog v-model:open="projDlg.visible" :title="projDlg.mode === 'create' ? '新建项目' : '重命名项目'" width="max-w-md">
+    <UiDialog v-model:open="projDlg.visible" :title="projDlg.mode === 'create' ? t('system.projects.createDlgTitle') : t('system.projects.renameDlgTitle')" width="max-w-md">
       <div class="grid grid-cols-[100px_1fr] items-center gap-x-3 gap-y-3">
-        <span class="text-right text-sm text-body"><span class="text-danger">*</span>项目名称</span>
-        <UiInput v-model="projDlg.name" placeholder="请输入项目名称" :maxlength="50" @enter="saveProj" />
-        <span class="text-right text-sm text-body">时区</span>
+        <span class="text-right text-sm text-body"><span class="text-danger">*</span>{{ t('system.projects.name') }}</span>
+        <UiInput v-model="projDlg.name" :placeholder="t('system.projects.namePlaceholder')" :maxlength="50" @enter="saveProj" />
+        <span class="text-right text-sm text-body">{{ t('system.projects.tzLabel') }}</span>
         <UiInput v-model="projDlg.tz" placeholder="Asia/Shanghai" :maxlength="64" />
       </div>
       <template #footer>
-        <UiButton @click="projDlg.visible = false">取消</UiButton>
-        <UiButton variant="primary" :disabled="projDlg.saving" @click="saveProj">{{ projDlg.saving ? '保存中…' : '确定' }}</UiButton>
+        <UiButton @click="projDlg.visible = false">{{ t('common.cancel') }}</UiButton>
+        <UiButton variant="primary" :disabled="projDlg.saving" @click="saveProj">{{ projDlg.saving ? t('common.saving') : t('common.confirm') }}</UiButton>
       </template>
     </UiDialog>
 
     <!-- 分组新增/重命名对话框 -->
     <UiDialog
       v-model:open="grpDlg.visible"
-      :title="grpDlg.mode === 'create' ? (grpDlg.parentId ? '新增子分组' : '新增根分组') : '重命名分组'"
+      :title="grpDlg.mode === 'create' ? (grpDlg.parentId ? t('system.groups.createChild') : t('system.groups.createRoot')) : t('system.groups.renameTitle')"
       width="max-w-md"
     >
       <div class="grid grid-cols-[100px_1fr] items-center gap-x-3 gap-y-3">
-        <span class="text-right text-sm text-body">上级分组</span>
-        <UiInput :model-value="grpDlg.parentId ? groupName(grpDlg.parentId) : '（根分组）'" disabled />
-        <span class="text-right text-sm text-body"><span class="text-danger">*</span>分组名称</span>
-        <UiInput v-model="grpDlg.name" placeholder="请输入分组名称" :maxlength="50" @enter="saveGrp" />
+        <span class="text-right text-sm text-body">{{ t('system.groups.parent') }}</span>
+        <UiInput :model-value="grpDlg.parentId ? groupName(grpDlg.parentId) : t('system.groups.rootParent')" disabled />
+        <span class="text-right text-sm text-body"><span class="text-danger">*</span>{{ t('system.groups.name') }}</span>
+        <UiInput v-model="grpDlg.name" :placeholder="t('system.groups.namePlaceholder')" :maxlength="50" @enter="saveGrp" />
       </div>
       <template #footer>
-        <UiButton @click="grpDlg.visible = false">取消</UiButton>
-        <UiButton variant="primary" :disabled="grpDlg.saving" @click="saveGrp">{{ grpDlg.saving ? '保存中…' : '确定' }}</UiButton>
+        <UiButton @click="grpDlg.visible = false">{{ t('common.cancel') }}</UiButton>
+        <UiButton variant="primary" :disabled="grpDlg.saving" @click="saveGrp">{{ grpDlg.saving ? t('common.saving') : t('common.confirm') }}</UiButton>
       </template>
     </UiDialog>
   </div>

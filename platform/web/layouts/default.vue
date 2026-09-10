@@ -164,11 +164,12 @@ function isActive(path: string) {
 }
 menu.value.forEach((m: any) => { if (m.children) expanded[m.label] = groupActive(m) })
 
-const userMenu = [
+// computed：语言切换后菜单文案与当前语言标记要跟着变
+const userMenu = computed(() => [
   { label: t('user.profile'), value: 'profile' },
-  { label: t('user.language') + '：' + (locale.value === 'zh-CN' ? '中文' : 'EN'), value: 'lang' },
+  { label: t('user.language') + t('common.colon') + (locale.value === 'zh-CN' ? t('lang.zh') : t('lang.en')), value: 'lang' },
   { label: t('user.logout'), value: 'logout', danger: true, divided: true }
-]
+])
 /** 打开任务中心：每次打开拉一次最新列表，避免常驻轮询 */
 function openTasks() {
   taskOpen.value = true
@@ -185,7 +186,7 @@ function onUserMenu(v: string) {
 <template>
   <div class="flex h-screen overflow-hidden bg-canvas" @keydown.esc="drawerOpen = false">
     <!-- 键盘用户跳过导航直达正文 -->
-    <a href="#ipc-main" class="ipc-skip-link">跳转到主内容</a>
+    <a href="#ipc-main" class="ipc-skip-link">{{ t('nav.skipToMain') }}</a>
 
     <!-- 侧栏 -->
     <!-- 窄屏抽屉遮罩：点击关闭；Esc 由 @keydown.esc 在根容器处理 -->
@@ -209,7 +210,7 @@ function onUserMenu(v: string) {
         <span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-signal bg-primary text-sidebar"><Icon name="video" :size="14" /></span>
         <span v-if="!collapsed" class="text-[17px] font-bold tracking-wide text-ink">IpcCloud</span>
       </div>
-      <nav class="flex-1 overflow-y-auto py-2" aria-label="主导航">
+      <nav class="flex-1 overflow-y-auto py-2" :aria-label="t('nav.main')">
         <template v-for="m in menu" :key="m.label">
           <!-- 单条目：语义上是"去某处"，用链接而非按钮 -->
           <NuxtLink
@@ -234,7 +235,7 @@ function onUserMenu(v: string) {
               :class="collapsed ? 'absolute right-1 top-1 h-1.5 w-1.5 p-0' : 'ml-auto px-1.5'"
             >
               <template v-if="!collapsed">{{ m.badge > 99 ? '99+' : m.badge }}</template>
-              <span v-else class="sr-only">{{ m.badge }} 项待办</span>
+              <span v-else class="sr-only">{{ t('nav.pendingCount', { n: m.badge }) }}</span>
             </span>
           </NuxtLink>
 
@@ -284,7 +285,7 @@ function onUserMenu(v: string) {
         <button
           type="button"
           class="rounded-chrome p-1.5 text-muted transition-colors hover:bg-zone hover:text-primary"
-          :aria-label="isNarrow ? (drawerOpen ? '关闭导航' : '打开导航') : (collapsed ? '展开侧栏' : '收起侧栏')"
+          :aria-label="isNarrow ? (drawerOpen ? t('nav.closeNav') : t('nav.openNav')) : (collapsed ? t('nav.expandSidebar') : t('nav.collapseSidebar'))"
           :aria-expanded="isNarrow ? drawerOpen : !collapsed"
           @click="toggleSidebar"
         >
@@ -300,8 +301,8 @@ function onUserMenu(v: string) {
           <button
             type="button"
             class="p-1.5 rounded-chrome text-muted hover:bg-zone hover:text-primary"
-            aria-label="所有企业及项目"
-            title="所有企业及项目"
+            :aria-label="t('nav.allProjects')"
+            :title="t('nav.allProjects')"
             @click="navigateTo('/console')"
           >
             <Icon name="grid" :size="15" />
@@ -313,7 +314,7 @@ function onUserMenu(v: string) {
             <Icon name="search" :size="14" class="text-placeholder" />
             <input
               v-model="search" class="w-full bg-transparent text-sm outline-none placeholder:text-placeholder"
-              :placeholder="t('common.search') + '（设备 / 通道）'" @focus="searchResults.length && (searchOpen = true)"
+              :placeholder="t('nav.searchPlaceholder')" @focus="searchResults.length && (searchOpen = true)"
             />
           </div>
           <div v-if="searchOpen && searchResults.length" class="absolute left-0 top-9 z-50 w-72 rounded-chrome border border-line bg-surface-2 p-1 shadow-pop">
@@ -332,7 +333,7 @@ function onUserMenu(v: string) {
 
         <div class="ml-auto flex items-center gap-4">
           <!-- 节点健康小图标 -->
-          <UiTooltip :label="nodeHealthy ? '流媒体节点正常' : '存在离线节点'">
+          <UiTooltip :label="nodeHealthy ? t('nav.nodeHealthy') : t('nav.nodeUnhealthy')">
             <span class="flex items-center gap-1 text-xs" :class="nodeHealthy ? 'text-success' : 'text-danger'">
               <Icon name="server" :size="15" />
               <span class="h-1.5 w-1.5 rounded-full" :class="nodeHealthy ? 'bg-success' : 'bg-danger'" />
@@ -347,14 +348,14 @@ function onUserMenu(v: string) {
           </UiTooltip>
           <!-- 消息 -->
           <UiBadge :value="unread" class="mt-1">
-            <button type="button" class="rounded-chrome text-muted transition-colors hover:text-primary" :aria-label="unread ? t('nav.messageCenter') + '，' + unread + ' 条未读' : t('nav.messageCenter')" @click="navigateTo('/alarms')">
+            <button type="button" class="rounded-chrome text-muted transition-colors hover:text-primary" :aria-label="unread ? t('nav.messageCenter') + t('common.comma') + t('nav.unreadCount', { n: unread }) : t('nav.messageCenter')" @click="navigateTo('/alarms')">
               <Icon name="bell" :size="18" />
             </button>
           </UiBadge>
           <!-- 用户 -->
           <UiDropdown :items="userMenu" @select="onUserMenu">
             <span class="flex cursor-pointer items-center gap-1 text-sm text-body hover:text-primary">
-              <Icon name="user" :size="15" />{{ user?.name || user?.username || '用户' }}
+              <Icon name="user" :size="15" />{{ user?.name || user?.username || t('user.fallbackName') }}
               <Icon name="chevron-down" :size="13" />
             </span>
           </UiDropdown>
@@ -370,13 +371,13 @@ function onUserMenu(v: string) {
         <Icon name="refresh" :size="20" class="ipc-spin text-primary" />
       </div>
       <div v-else-if="!tasks.length" class="p-5">
-        <UiEmptyState text="暂无任务" hint="设备发现、批量导入、录像下载等长任务会显示在这里" />
+        <UiEmptyState :text="t('task.empty')" :hint="t('task.emptyHint')" />
       </div>
       <ul v-else class="divide-y divide-line-soft">
         <li v-for="tk in tasks" :key="tk.id" class="px-5 py-3">
           <div class="flex items-center justify-between gap-2">
             <span class="truncate text-sm text-ink">{{ tk.title }}</span>
-            <UiTag :color="taskStatusInfo(tk.status).color">{{ taskStatusInfo(tk.status).label }}</UiTag>
+            <UiTag :color="taskStatusInfo(tk.status).color">{{ t(taskStatusInfo(tk.status).labelKey) }}</UiTag>
           </div>
           <div class="mt-2 h-1 overflow-hidden rounded-full bg-line">
             <div class="h-full rounded-full bg-primary transition-all" :style="{ width: (tk.progress || 0) + '%' }" />
