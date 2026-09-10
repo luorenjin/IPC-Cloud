@@ -1,5 +1,8 @@
 # -*- coding: utf-8 -*-
 """
+注意：须在 platform/web 目录下运行（脚本用相对路径 glob）：
+    cd platform/web && python scripts/i18n-check.py
+
 i18n 一致性检查（结果写入 UTF-8 文件，终端编码不可靠）：
  1. 中英词条键是否一一对应
  2. 是否有重复键（模块间撞键会被后者静默覆盖）

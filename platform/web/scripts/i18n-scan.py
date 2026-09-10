@@ -1,5 +1,8 @@
 # -*- coding: utf-8 -*-
-"""扫描仍含中文的源文件，输出到 UTF-8 文件（终端编码不可靠，一律写文件再读）。"""
+"""
+注意：须在 platform/web 目录下运行（脚本用相对路径 glob）：
+    cd platform/web && python scripts/i18n-scan.py
+扫描仍含中文的源文件，输出到 UTF-8 文件（终端编码不可靠，一律写文件再读）。"""
 import io, re, glob, sys, os
 
 CN = re.compile(r'[一-龥]')
