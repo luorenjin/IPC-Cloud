@@ -26,6 +26,30 @@ async function loadBase() {
   }
 }
 
+// ---------- 存储概览（REC-07）----------
+// 后端 /storage/overview 已实现（用量、总量、片段数、保留天数），此前前端零调用。
+const storage = ref<any>(null)
+const storageErr = ref('')
+
+async function loadStorage() {
+  storageErr.value = ''
+  try {
+    storage.value = await api.get('/storage/overview')
+  } catch (e: any) {
+    // 不弹 toast：这是页面上的一张辅助卡片，失败就地显示原因即可
+    storage.value = null
+    storageErr.value = e?.msg || '存储概览加载失败'
+  }
+}
+
+/** 用量条颜色：越接近上限越警戒；90% 以上后端会产生 disk_full 告警 */
+const storageColor = computed(() => {
+  const pct = Number(storage.value?.percent) || 0
+  if (pct >= 90) return 'var(--color-danger)'
+  if (pct >= 75) return 'var(--color-warning)'
+  return 'var(--color-primary)'
+})
+
 // ---------- 计划列表 ----------
 const plans = ref<any[]>([])
 const loading = ref(false)
@@ -198,6 +222,7 @@ async function saveEditProfile() {
 }
 
 onMounted(() => {
+  loadStorage()
   loadBase()
   loadPlans()
 })
@@ -205,6 +230,46 @@ onMounted(() => {
 
 <template>
   <div class="space-y-3">
+    <!-- 存储概览（REC-07）：录像占了多少空间、还能存多久 -->
+    <div class="rounded-signal border border-line bg-surface px-4 py-3">
+      <div class="flex flex-wrap items-center justify-between gap-3">
+        <div class="flex items-center gap-2">
+          <Icon name="hard-drive" :size="15" class="text-muted" />
+          <span class="text-sm font-medium text-ink">录像存储</span>
+        </div>
+        <button
+          type="button"
+          class="rounded-chrome text-xs text-muted transition-colors hover:text-primary"
+          @click="loadStorage"
+        >重新计算</button>
+      </div>
+
+      <p v-if="storageErr" class="mt-2 text-xs text-danger">{{ storageErr }}</p>
+
+      <template v-else-if="storage">
+        <div class="mt-2.5 h-1.5 overflow-hidden rounded-full bg-line">
+          <div
+            class="h-full rounded-full transition-all"
+            :style="{ width: Math.min(100, Number(storage.percent) || 0) + '%', background: storageColor }"
+          />
+        </div>
+        <div class="mt-2 flex flex-wrap items-center gap-x-6 gap-y-1 text-xs">
+          <span class="text-body">
+            已用 <span class="font-mono text-ink">{{ fmtBytes(storage.usedBytes) }}</span>
+            / <span class="font-mono">{{ fmtBytes(storage.totalBytes) }}</span>
+            <span class="ml-1 text-placeholder">（{{ storage.percent ?? 0 }}%）</span>
+          </span>
+          <span class="text-placeholder">录像片段 <span class="font-mono text-body">{{ storage.segments ?? 0 }}</span> 段</span>
+          <span class="text-placeholder">保留 <span class="font-mono text-body">{{ storage.keepDays ?? 30 }}</span> 天</span>
+        </div>
+        <p v-if="Number(storage.percent) >= 90" class="mt-1.5 text-xs text-danger">
+          存储即将写满，超出后最早的录像会被覆盖。请清理录像或扩容后再继续。
+        </p>
+      </template>
+
+      <p v-else class="mt-2 text-xs text-placeholder">正在统计…</p>
+    </div>
+
     <UiCard flat>
       <template #header>
         <div class="flex w-full items-center justify-between">

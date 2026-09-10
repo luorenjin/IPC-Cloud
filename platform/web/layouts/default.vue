@@ -5,7 +5,7 @@ const { user, projects, currentProject, switchProject, loadMe, logout } = useAut
 const { t, locale, setLocale } = useI18n()
 const route = useRoute()
 const router = useRouter()
-const { tasks, open: taskOpen, running: runningTasks, upsert } = useTasks()
+const { tasks, open: taskOpen, loading: tasksLoading, running: runningTasks, load: loadTasks, applyEvent: applyTaskEvent } = useTasks()
 
 const unread = useState('unreadAlarms', () => 0)
 const pendingCount = useState('gbPending', () => 0)
@@ -41,10 +41,7 @@ useWs((ev: any) => {
   if (ev.type === 'alarm.new') unread.value++
   if (ev.type === 'alarms.readall') unread.value = 0
   if (ev.type === 'gb.pending') refreshBadges()
-  if (ev.type === 'task.progress') {
-    const d = ev.data || {}
-    if (d.id) upsert({ id: d.id, type: d.type || 'task', title: d.title || d.id, status: d.status, progress: d.progress ?? 0, detail: d.detail })
-  }
+  if (ev.type === 'task.progress') applyTaskEvent(ev.data || {})
 })
 
 // 全局搜索（设备/通道）
@@ -86,7 +83,8 @@ const menu = computed(() => [
     label: t('nav.alarms'), icon: 'bell', children: [
       { label: t('nav.messageCenter'), path: '/alarms' },
       { label: t('nav.alarmRules'), path: '/alarms/rules' },
-      { label: t('nav.alarmTemplates'), path: '/alarms/templates' }
+      { label: t('nav.alarmTemplates'), path: '/alarms/templates' },
+      { label: t('nav.alarmPolicies'), path: '/alarms/policies' }
     ]
   },
   // 命名为「计划」而非「录像」：后者会与「视频」下的"录像回放"撞概念，
@@ -171,6 +169,12 @@ const userMenu = [
   { label: t('user.language') + '：' + (locale.value === 'zh-CN' ? '中文' : 'EN'), value: 'lang' },
   { label: t('user.logout'), value: 'logout', danger: true, divided: true }
 ]
+/** 打开任务中心：每次打开拉一次最新列表，避免常驻轮询 */
+function openTasks() {
+  taskOpen.value = true
+  loadTasks()
+}
+
 function onUserMenu(v: string) {
   if (v === 'profile') navigateTo('/account')
   else if (v === 'lang') setLocale(locale.value === 'zh-CN' ? 'en' : 'zh-CN')
@@ -336,7 +340,7 @@ function onUserMenu(v: string) {
           </UiTooltip>
           <!-- 任务中心 -->
           <UiTooltip :label="t('nav.tasks')">
-            <button type="button" class="relative rounded-chrome text-muted transition-colors hover:text-primary" :aria-label="t('nav.tasks')" @click="taskOpen = true">
+            <button type="button" class="relative rounded-chrome text-muted transition-colors hover:text-primary" :aria-label="t('nav.tasks')" @click="openTasks">
               <Icon name="list" :size="18" />
               <span v-if="runningTasks()" class="absolute -right-1 -top-1 h-2 w-2 rounded-full bg-primary" />
             </button>
@@ -362,14 +366,17 @@ function onUserMenu(v: string) {
 
     <!-- 任务中心抽屉（P-18） -->
     <UiDrawer v-model:open="taskOpen" :title="t('nav.tasks')">
-      <div v-if="!tasks.length" class="p-5"><UiEmptyState text="暂无任务" /></div>
+      <div v-if="tasksLoading && !tasks.length" class="flex justify-center p-8">
+        <Icon name="refresh" :size="20" class="ipc-spin text-primary" />
+      </div>
+      <div v-else-if="!tasks.length" class="p-5">
+        <UiEmptyState text="暂无任务" hint="设备发现、批量导入、录像下载等长任务会显示在这里" />
+      </div>
       <ul v-else class="divide-y divide-line-soft">
         <li v-for="tk in tasks" :key="tk.id" class="px-5 py-3">
           <div class="flex items-center justify-between gap-2">
             <span class="truncate text-sm text-ink">{{ tk.title }}</span>
-            <UiTag :color="tk.status === 'success' ? 'success' : tk.status === 'failed' ? 'danger' : tk.status === 'partial' ? 'warning' : 'primary'">
-              {{ tk.status === 'running' ? '进行中' : tk.status === 'pending' ? '排队中' : tk.status === 'success' ? '完成' : tk.status === 'failed' ? '失败' : '部分成功' }}
-            </UiTag>
+            <UiTag :color="taskStatusInfo(tk.status).color">{{ taskStatusInfo(tk.status).label }}</UiTag>
           </div>
           <div class="mt-2 h-1 overflow-hidden rounded-full bg-line">
             <div class="h-full rounded-full bg-primary transition-all" :style="{ width: (tk.progress || 0) + '%' }" />

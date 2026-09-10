@@ -262,14 +262,17 @@ func handleRecordDownload(c *gin.Context) {
 // handleStorageOverview REC-07 存储概览。
 func handleStorageOverview(c *gin.Context) {
 	ctx := getCtx(c)
+	// 表名用 GORM 的命名策略推导，不要硬编码：RecordIndex 实际建表为
+	// record_indices 而非 record_indexes，写错会让 JOIN 静默失败、用量恒为 0。
+	tbl := store.DB.NamingStrategy.TableName("RecordIndex")
 	var used int64
 	store.DB.Model(&models.RecordIndex{}).
-		Joins("JOIN channels c ON c.id = record_indexes.channel_id").
+		Joins("JOIN channels c ON c.id = "+tbl+".channel_id").
 		Where("c.project_id = ?", ctx.ProjectID).
-		Select("COALESCE(SUM(record_indexes.size),0)").Scan(&used)
+		Select("COALESCE(SUM(" + tbl + ".size),0)").Scan(&used)
 	var count int64
 	store.DB.Model(&models.RecordIndex{}).
-		Joins("JOIN channels c ON c.id = record_indexes.channel_id").
+		Joins("JOIN channels c ON c.id = "+tbl+".channel_id").
 		Where("c.project_id = ?", ctx.ProjectID).Count(&count)
 	// 总容量从设置读取，默认 500GB
 	var st models.Setting

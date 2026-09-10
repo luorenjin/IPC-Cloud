@@ -153,6 +153,56 @@ const showCol = (k: string) => !hiddenCols.value.includes(k)
 // ================= 批量操作（批量工具条） =================
 const batchMoveDlg = reactive({ show: false, groupId: '', saving: false })
 
+// 跨项目转移（MGR-12）：与「移动到分组」不同——后者只改 group_id，
+// 这里会把设备连同其通道一起划到另一个项目下，并通知适配器（cmd.transfer）。
+const xferDlg = reactive({ show: false, projectId: '', saving: false })
+const xferProjects = ref<any[]>([])
+
+async function openTransfer() {
+  if (!selection.value.length) return toast.warning('请先勾选需要转移的设备')
+  xferDlg.projectId = ''
+  xferDlg.show = true
+  if (!xferProjects.value.length) {
+    try {
+      const res: any = await api.get('/projects')
+      // 排除当前项目：转到自己没有意义
+      xferProjects.value = (res?.items || res || []).filter((p: any) => p.id !== currentProject.value?.id)
+    } catch (e: any) {
+      toastApiError(e, '加载项目列表失败')
+    }
+  }
+}
+
+async function doTransfer() {
+  if (!xferDlg.projectId) return toast.warning('请选择目标项目')
+  xferDlg.saving = true
+  const ids = [...selection.value]
+  const failed: string[] = []
+  try {
+    // 后端按单台提供转移端点，这里逐台调用并汇总结果，
+    // 不能因为中间一台失败就假装整批成功。
+    for (const id of ids) {
+      try {
+        await api.post(`/devices/${id}/transfer`, { projectId: xferDlg.projectId })
+      } catch {
+        failed.push(id)
+      }
+    }
+    if (!failed.length) {
+      toast.success(`已将 ${ids.length} 台设备转移到目标项目`)
+    } else if (failed.length === ids.length) {
+      toast.error({ title: '转移失败', suggest: '请确认对目标项目有配置权限后重试。' })
+    } else {
+      toast.warning(`${ids.length - failed.length} 台转移成功，${failed.length} 台失败`)
+    }
+    xferDlg.show = false
+    selection.value = []
+    load()
+  } finally {
+    xferDlg.saving = false
+  }
+}
+
 function openBatchMove() {
   if (!selection.value.length) return toast.warning('请先勾选需要转移的设备')
   batchMoveDlg.groupId = ''
@@ -306,9 +356,12 @@ async function saveEditDev() {
 }
 
 // ================= 【添加设备弹窗】 =================
+// Tab 对应平台真实支持的四种接入方式（ADD-01/03/05/06/07/08），
+// 与 device.source 的四个字面判别值一一对应；不再保留竞品原型里的
+// 「MAC地址添加/智能配置/物联APP」等本平台并不存在的方式。
 const addDlg = reactive({ show: false })
-const addTab = ref('idp') // idp (设备ID添加) | gb (国标) | onvif | app | pwd | other
-const addSubTab = ref<'single' | 'batch'>('single') // 单台添加 | 批量导入ID
+const addTab = ref<'idp' | 'onvif' | 'rtsp' | 'gb28181'>('idp')
+const addSubTab = ref<'single' | 'batch'>('single') // 仅 idp 支持批量导入
 
 const addForm = reactive({
   groupId: '',
@@ -316,6 +369,17 @@ const addForm = reactive({
   name: '',
   verifyCode: ''
 })
+
+// ONVIF：发现列表 + 手动填写（后端 /devices/onvif/discover 与 /devices/onvif）
+const onvifForm = reactive({ ip: '', port: '80', user: '', pass: '', name: '' })
+const onvifDiscover = reactive({ loading: false, items: [] as any[], done: false })
+
+// RTSP：完整 URL 直连（后端 /devices/rtsp）
+const rtspForm = reactive({ url: '', subUrl: '', name: '' })
+
+// 国标白名单：设备主动注册前先登记 ID + 密码（ADD-05）
+const gbForm = reactive({ gbId: '', pwd: '', name: '' })
+const gbWhitelist = reactive({ loading: false, items: [] as any[] })
 
 const batchIdText = ref('')
 const adding = ref(false)
@@ -326,12 +390,62 @@ function openAddModal() {
   addForm.verifyCode = ''
   addForm.groupId = groups.value[0]?.id || ''
   batchIdText.value = ''
+  Object.assign(onvifForm, { ip: '', port: '80', user: '', pass: '', name: '' })
+  Object.assign(onvifDiscover, { loading: false, items: [], done: false })
+  Object.assign(rtspForm, { url: '', subUrl: '', name: '' })
+  Object.assign(gbForm, { gbId: '', pwd: '', name: '' })
   addSubTab.value = 'single'
   addTab.value = 'idp'
   addDlg.show = true
 }
 
+/** 切到国标 Tab 时拉取现有白名单，让用户看到已登记了哪些 */
+watch(addTab, (t) => {
+  if (t === 'gb28181' && !gbWhitelist.items.length) loadGbWhitelist()
+})
+
+async function loadGbWhitelist() {
+  gbWhitelist.loading = true
+  try {
+    const res: any = await api.get('/devices/gb28181/whitelist')
+    gbWhitelist.items = res?.items || []
+  } catch (e: any) {
+    toastApiError(e, '加载国标白名单失败')
+  } finally {
+    gbWhitelist.loading = false
+  }
+}
+
+async function doOnvifDiscover() {
+  onvifDiscover.loading = true
+  onvifDiscover.done = false
+  try {
+    const res: any = await api.post('/devices/onvif/discover')
+    onvifDiscover.items = res?.items || []
+    onvifDiscover.done = true
+    if (!onvifDiscover.items.length) toast.info('未发现同网段的 ONVIF 设备')
+  } catch (e: any) {
+    toastApiError(e, 'ONVIF 发现失败')
+  } finally {
+    onvifDiscover.loading = false
+  }
+}
+
+/** 从发现结果选一台：回填 IP/端口，用户仍需补账号密码 */
+function pickDiscovered(it: any) {
+  onvifForm.ip = it.ip || ''
+  const m = String(it.xaddr || '').match(/:(\d+)\//)
+  onvifForm.port = m ? m[1] : '80'
+}
+
 async function submitAdd() {
+  if (addTab.value === 'idp') return submitIdp()
+  if (addTab.value === 'onvif') return submitOnvif()
+  if (addTab.value === 'rtsp') return submitRtsp()
+  if (addTab.value === 'gb28181') return submitGb()
+}
+
+async function submitIdp() {
   if (addSubTab.value === 'single') {
     if (!addForm.deviceId.trim()) return toast.warning('请输入设备标贴上的设备ID')
     if (addForm.verifyCode.trim().length < 6) return toast.warning('请输入 6 位及以上验证码')
@@ -343,7 +457,7 @@ async function submitAdd() {
         groupId: addForm.groupId || undefined,
         name: addForm.name.trim() || undefined
       })
-      toast.success('设备添加成功！')
+      toast.success('设备添加成功')
       addDlg.show = false
       load()
     } catch (e: any) {
@@ -364,7 +478,7 @@ async function submitAdd() {
     adding.value = true
     try {
       await api.post('/devices/idp/preadd', { items })
-      toast.success(`已提交 ${items.length} 台设备的批量导入任务`)
+      toast.success(`已提交 ${items.length} 台设备的预添加登记`)
       addDlg.show = false
       load()
     } catch (e: any) {
@@ -372,6 +486,86 @@ async function submitAdd() {
     } finally {
       adding.value = false
     }
+  }
+}
+
+async function submitOnvif() {
+  if (!onvifForm.ip.trim()) return toast.warning('请输入设备 IP')
+  if (!onvifForm.user.trim() || !onvifForm.pass) return toast.warning('请输入 ONVIF 账号与密码')
+  adding.value = true
+  try {
+    await api.post('/devices/onvif', {
+      ip: onvifForm.ip.trim(),
+      port: onvifForm.port.trim() || '80',
+      user: onvifForm.user.trim(),
+      pass: onvifForm.pass,
+      groupId: addForm.groupId || undefined,
+      name: onvifForm.name.trim() || undefined
+    })
+    toast.success('ONVIF 设备添加成功')
+    addDlg.show = false
+    load()
+  } catch (e: any) {
+    toastApiError(e, 'ONVIF 设备添加失败')
+  } finally {
+    adding.value = false
+  }
+}
+
+async function submitRtsp() {
+  if (!rtspForm.url.trim()) return toast.warning('请输入 RTSP 地址')
+  adding.value = true
+  try {
+    await api.post('/devices/rtsp', {
+      url: rtspForm.url.trim(),
+      subUrl: rtspForm.subUrl.trim() || undefined,
+      groupId: addForm.groupId || undefined,
+      name: rtspForm.name.trim() || undefined
+    })
+    toast.success('RTSP 设备添加成功')
+    addDlg.show = false
+    load()
+  } catch (e: any) {
+    toastApiError(e, 'RTSP 设备添加失败')
+  } finally {
+    adding.value = false
+  }
+}
+
+async function submitGb() {
+  if (!gbForm.gbId.trim()) return toast.warning('请输入国标设备编号')
+  if (!gbForm.pwd) return toast.warning('请输入接入密码')
+  adding.value = true
+  try {
+    await api.post('/devices/gb28181/whitelist', {
+      gbId: gbForm.gbId.trim(),
+      pwd: gbForm.pwd,
+      groupId: addForm.groupId || undefined,
+      name: gbForm.name.trim() || undefined
+    })
+    toast.success('已登记到白名单，设备注册后将自动接入')
+    Object.assign(gbForm, { gbId: '', pwd: '', name: '' })
+    loadGbWhitelist()
+  } catch (e: any) {
+    toastApiError(e, '登记白名单失败')
+  } finally {
+    adding.value = false
+  }
+}
+
+async function delGbWhitelist(row: any) {
+  const ok = await confirm.ask({
+    title: '移除白名单',
+    message: `确定移除国标编号 ${row.gbId}？移除后该设备再注册将被拒绝。`,
+    confirmText: '移除', danger: true
+  })
+  if (!ok) return
+  try {
+    await api.del('/devices/gb28181/whitelist/' + row.id)
+    toast.success('已移除')
+    loadGbWhitelist()
+  } catch (e: any) {
+    toastApiError(e, '移除失败')
   }
 }
 
@@ -545,7 +739,8 @@ onMounted(async () => {
               </div>
             </UiPopover>
 
-            <UiButton size="sm" :disabled="!selection.length" @click="openBatchMove">设备转移</UiButton>
+            <UiButton size="sm" :disabled="!selection.length" @click="openBatchMove">移动到分组</UiButton>
+            <UiButton size="sm" :disabled="!selection.length" @click="openTransfer">转移到项目</UiButton>
             <UiButton size="sm" :disabled="!selection.length" @click="doBatchReboot">重启设备</UiButton>
             <UiButton variant="dangerText" size="sm" :disabled="!selection.length" @click="doBatchDelete">删除设备</UiButton>
             <UiButton size="sm" @click="exportCsv">导出设备信息</UiButton>
@@ -712,97 +907,195 @@ onMounted(async () => {
 
     <!-- ================= 添加设备弹窗 ================= -->
     <UiDialog v-model:open="addDlg.show" title="添加设备" width="max-w-2xl">
-      <!-- 顶部 Tab 栏 -->
+      <!-- 四种接入方式，与 device.source 的四个判别值一一对应 -->
       <UiTabs
         v-model="addTab"
         :items="[
-          { label: '设备ID添加', value: 'idp' },
-          { label: 'MAC地址添加', value: 'mac' },
-          { label: '智能配置添加', value: 'smart' },
-          { label: '来自物联APP的设备', value: 'app' },
-          { label: '设备密码添加', value: 'pwd' },
-          { label: '其他添加方式', value: 'other' }
+          { label: '自有设备', value: 'idp' },
+          { label: 'ONVIF', value: 'onvif' },
+          { label: 'RTSP', value: 'rtsp' },
+          { label: '国标 GB/T 28181', value: 'gb28181' }
         ]"
       />
 
-      <!-- 固定前置提示条 -->
-      <div class="mt-3 rounded-signal bg-zone p-3 text-xs leading-relaxed text-muted">
-        <div>请确认要添加的设备都已接入互联网，再进行添加操作。</div>
-        <div class="mt-0.5 text-placeholder">* 添加AC设备后系统会自动识别并添加关联的FIT AP，无需再次添加FIT AP设备。</div>
+      <!-- 所属分组：四种方式共用 -->
+      <div class="mt-4 flex items-center gap-3">
+        <label class="w-24 shrink-0 text-right text-xs font-medium text-muted">所属分组</label>
+        <div class="flex flex-1 items-center gap-2 text-sm">
+          <span class="font-medium text-ink">{{ groupMap[addForm.groupId] || '未分组' }}</span>
+          <button type="button" class="rounded-chrome text-primary hover:text-primary-deep" aria-label="修改所属分组" title="修改所属分组" @click="openAddGroup">
+            <Icon name="edit" :size="13" />
+          </button>
+        </div>
       </div>
 
-      <!-- 二级子 Tab 分段按钮（单台添加 | 批量导入ID） -->
-      <UiSegmented
-        v-model="addSubTab"
-        class="mt-4"
-        :items="[{ label: '单台添加', value: 'single' }, { label: '批量导入ID', value: 'batch' }]"
-      />
+      <!-- ---------- 自有设备（IDP）---------- -->
+      <template v-if="addTab === 'idp'">
+        <UiSegmented
+          v-model="addSubTab"
+          class="mt-4"
+          :items="[{ label: '单台添加', value: 'single' }, { label: '批量登记', value: 'batch' }]"
+        />
 
-      <!-- 单台添加表单 -->
-      <div v-if="addSubTab === 'single'" class="mt-6 space-y-4 max-w-md mx-auto">
-        <!-- 所属分组 -->
-        <div class="flex items-center gap-3">
-          <label class="w-24 text-right text-xs font-medium text-muted"><span class="text-danger">*</span> 所属分组</label>
-          <div class="flex items-center gap-2 flex-1 text-sm">
-            <span class="font-bold text-ink">{{ groupMap[addForm.groupId] || '默认' }}</span>
-            <button type="button" class="rounded-chrome text-primary hover:text-primary-deep" aria-label="修改所属分组" title="修改所属分组" @click="openAddGroup">
-              <Icon name="edit" :size="13" />
+        <div v-if="addSubTab === 'single'" class="mx-auto mt-5 max-w-md space-y-4">
+          <div class="flex items-center gap-3">
+            <label class="w-24 shrink-0 text-right text-xs font-medium text-muted"><span class="text-danger">*</span> 设备ID</label>
+            <UiInput v-model="addForm.deviceId" class="flex-1 uppercase" placeholder="设备标贴上的设备ID，不区分大小写" />
+          </div>
+          <div class="flex items-center gap-3">
+            <label class="w-24 shrink-0 text-right text-xs font-medium text-muted"><span class="text-danger">*</span> 验证码</label>
+            <UiInput v-model="addForm.verifyCode" class="flex-1" placeholder="设备标贴上的 6 位及以上验证码" />
+          </div>
+          <div class="flex items-center gap-3">
+            <label class="w-24 shrink-0 text-right text-xs font-medium text-muted">设备名称</label>
+            <UiInput v-model="addForm.name" class="flex-1" placeholder="选填，留空则用设备型号自动命名" />
+          </div>
+          <div class="flex flex-col items-center pt-2">
+            <UiButton variant="primary" size="lg" class="w-64" :loading="adding" @click="submitAdd">添加设备</UiButton>
+            <button type="button" class="mt-3 text-xs text-primary hover:underline" @click="router.push('/scan')">
+              用手机扫码录入
             </button>
           </div>
         </div>
 
-        <!-- 设备 ID -->
-        <div class="flex items-center gap-3">
-          <label class="w-24 text-right text-xs font-medium text-muted"><span class="text-danger">*</span> 设备ID</label>
-          <UiInput v-model="addForm.deviceId" class="flex-1 uppercase" placeholder="请输入标贴上的设备ID，不区分大小写" />
-        </div>
-
-        <!-- 验证码 -->
-        <div class="flex items-center gap-3">
-          <label class="w-24 text-right text-xs font-medium text-muted"><span class="text-danger">*</span> 验证码</label>
-          <UiInput v-model="addForm.verifyCode" class="flex-1" placeholder="请输入标贴上的 6 位及以上验证码" />
-        </div>
-
-        <!-- 设备名称 -->
-        <div class="flex items-center gap-3">
-          <label class="w-24 text-right text-xs font-medium text-muted">设备名称</label>
-          <UiInput v-model="addForm.name" class="flex-1" placeholder="选填" />
-        </div>
-
-        <!-- 居中大按钮：+ 添加设备 -->
-        <div class="pt-4 flex flex-col items-center">
-          <UiButton variant="primary" size="lg" class="w-64" :disabled="adding" @click="submitAdd">
-            <Icon v-if="adding" name="refresh" :size="14" class="ipc-spin" />+ 添加设备
-          </UiButton>
-
-          <!-- 底部帮助链接 -->
-          <div class="mt-3 flex items-center gap-1 text-xs text-muted">
-            <Icon name="help-circle" :size="13" />
-            <button type="button" class="hover:text-primary hover:underline">如何查找设备ID</button>
-            <span class="mx-2 text-line">|</span>
-            <button type="button" class="text-primary hover:underline" @click="router.push('/scan')">手机扫码录入 &gt;</button>
+        <div v-else class="mx-auto mt-5 max-w-md space-y-4">
+          <div>
+            <label class="mb-1 block text-xs font-medium text-muted">
+              <span class="text-danger">*</span> 设备列表（每行一台，格式「设备ID,验证码」）
+            </label>
+            <textarea
+              v-model="batchIdText"
+              rows="6"
+              class="w-full rounded-chrome border border-line bg-surface p-2.5 font-mono text-xs text-body outline-none focus:border-primary"
+              placeholder="A1B2C3D4E5F678901,123456&#10;B2C3D4E5F67890123,654321"
+            />
+            <p class="mt-1 text-xs text-placeholder">
+              登记后设备上电联网即自动接入，无需逐台操作。
+            </p>
+          </div>
+          <div class="flex flex-col items-center pt-1">
+            <UiButton variant="primary" size="lg" class="w-64" :loading="adding" @click="submitAdd">提交登记</UiButton>
           </div>
         </div>
-      </div>
+      </template>
 
-      <!-- 批量导入表单 -->
-      <div v-else class="mt-6 space-y-4 max-w-md mx-auto">
-        <div>
-          <label class="mb-1 block text-xs font-medium text-muted">设备 ID 列表（每行一台，格式「设备ID,验证码」）*</label>
-          <textarea
-            v-model="batchIdText"
-            rows="6"
-            class="w-full rounded-chrome border border-line bg-surface p-2.5 text-xs font-mono text-body outline-none focus:border-primary"
-            placeholder="A1B2C3D4E5F678901,123456&#10;B2C3D4E5F67890123,654321"
-          />
+      <!-- ---------- ONVIF ---------- -->
+      <template v-else-if="addTab === 'onvif'">
+        <div class="mt-4 flex items-center justify-between gap-3 rounded-signal border border-line bg-canvas px-3 py-2">
+          <p class="text-xs text-muted">扫描本网段内的 ONVIF 设备（约 10 秒）</p>
+          <UiButton size="sm" :loading="onvifDiscover.loading" @click="doOnvifDiscover">搜索设备</UiButton>
         </div>
 
-        <div class="flex flex-col items-center pt-2">
-          <UiButton variant="primary" size="lg" class="w-64" :disabled="adding" @click="submitAdd">
-            <Icon v-if="adding" name="refresh" :size="14" class="ipc-spin" />开始批量导入
-          </UiButton>
+        <div v-if="onvifDiscover.items.length" class="mt-2 max-h-40 overflow-auto rounded-signal border border-line">
+          <table class="w-full text-xs">
+            <tbody>
+              <tr v-for="it in onvifDiscover.items" :key="it.xaddr" class="border-b border-line-soft last:border-0">
+                <td class="px-3 py-2 font-mono text-body">{{ it.ip }}</td>
+                <td class="px-3 py-2 text-placeholder">{{ (it.scopes || []).join(' ') || '—' }}</td>
+                <td class="px-3 py-2 text-right">
+                  <UiTag v-if="it.added" color="info">已添加</UiTag>
+                  <UiButton v-else variant="text" size="sm" @click="pickDiscovered(it)">选择</UiButton>
+                </td>
+              </tr>
+            </tbody>
+          </table>
         </div>
-      </div>
+        <p v-else-if="onvifDiscover.done" class="mt-2 text-xs text-placeholder">
+          未发现设备。设备与平台需在同一网段，且已开启 ONVIF；也可在下方直接填写 IP 添加。
+        </p>
+
+        <div class="mx-auto mt-5 max-w-md space-y-4">
+          <div class="flex items-center gap-3">
+            <label class="w-24 shrink-0 text-right text-xs font-medium text-muted"><span class="text-danger">*</span> 设备 IP</label>
+            <UiInput v-model="onvifForm.ip" class="flex-1" placeholder="192.168.1.64" />
+            <UiInput v-model="onvifForm.port" width="w-20" placeholder="80" />
+          </div>
+          <div class="flex items-center gap-3">
+            <label class="w-24 shrink-0 text-right text-xs font-medium text-muted"><span class="text-danger">*</span> 账号</label>
+            <UiInput v-model="onvifForm.user" class="flex-1" placeholder="ONVIF 账号（通常与 Web 登录一致）" />
+          </div>
+          <div class="flex items-center gap-3">
+            <label class="w-24 shrink-0 text-right text-xs font-medium text-muted"><span class="text-danger">*</span> 密码</label>
+            <UiInput v-model="onvifForm.pass" type="password" class="flex-1" placeholder="ONVIF 密码" />
+          </div>
+          <div class="flex items-center gap-3">
+            <label class="w-24 shrink-0 text-right text-xs font-medium text-muted">设备名称</label>
+            <UiInput v-model="onvifForm.name" class="flex-1" placeholder="选填" />
+          </div>
+          <div class="flex flex-col items-center pt-2">
+            <UiButton variant="primary" size="lg" class="w-64" :loading="adding" @click="submitAdd">添加设备</UiButton>
+          </div>
+        </div>
+      </template>
+
+      <!-- ---------- RTSP ---------- -->
+      <template v-else-if="addTab === 'rtsp'">
+        <div class="mx-auto mt-5 max-w-md space-y-4">
+          <div class="flex items-start gap-3">
+            <label class="w-24 shrink-0 pt-1.5 text-right text-xs font-medium text-muted"><span class="text-danger">*</span> 主码流地址</label>
+            <div class="flex-1">
+              <UiInput v-model="rtspForm.url" placeholder="rtsp://user:pass@192.168.1.64:554/Streaming/Channels/101" />
+              <p class="mt-1 text-xs text-placeholder">账号密码写在地址中；添加前平台会先探测该地址是否可达。</p>
+            </div>
+          </div>
+          <div class="flex items-center gap-3">
+            <label class="w-24 shrink-0 text-right text-xs font-medium text-muted">子码流地址</label>
+            <UiInput v-model="rtspForm.subUrl" class="flex-1" placeholder="选填，用于多画面预览省带宽" />
+          </div>
+          <div class="flex items-center gap-3">
+            <label class="w-24 shrink-0 text-right text-xs font-medium text-muted">设备名称</label>
+            <UiInput v-model="rtspForm.name" class="flex-1" placeholder="选填" />
+          </div>
+          <div class="flex flex-col items-center pt-2">
+            <UiButton variant="primary" size="lg" class="w-64" :loading="adding" @click="submitAdd">添加设备</UiButton>
+          </div>
+        </div>
+      </template>
+
+      <!-- ---------- 国标白名单 ---------- -->
+      <template v-else>
+        <p class="mt-4 rounded-signal bg-zone p-3 text-xs leading-relaxed text-muted">
+          国标设备由设备侧主动向平台注册。请先在此登记设备编号与接入密码，
+          并在设备上填写平台的 SIP 服务器信息（见 系统设置 → 国标参数）。
+        </p>
+
+        <div class="mx-auto mt-4 max-w-md space-y-4">
+          <div class="flex items-center gap-3">
+            <label class="w-24 shrink-0 text-right text-xs font-medium text-muted"><span class="text-danger">*</span> 设备编号</label>
+            <UiInput v-model="gbForm.gbId" class="flex-1 font-mono" placeholder="20 位国标编号，如 34020000001320000001" />
+          </div>
+          <div class="flex items-center gap-3">
+            <label class="w-24 shrink-0 text-right text-xs font-medium text-muted"><span class="text-danger">*</span> 接入密码</label>
+            <UiInput v-model="gbForm.pwd" type="password" class="flex-1" placeholder="需与设备端 SIP 注册密码一致" />
+          </div>
+          <div class="flex items-center gap-3">
+            <label class="w-24 shrink-0 text-right text-xs font-medium text-muted">设备名称</label>
+            <UiInput v-model="gbForm.name" class="flex-1" placeholder="选填" />
+          </div>
+          <div class="flex flex-col items-center pt-1">
+            <UiButton variant="primary" size="lg" class="w-64" :loading="adding" @click="submitAdd">登记到白名单</UiButton>
+          </div>
+        </div>
+
+        <div class="mt-5">
+          <p class="mb-2 text-xs font-medium text-muted">已登记的编号</p>
+          <div v-if="gbWhitelist.loading" class="py-4 text-center"><Icon name="refresh" :size="16" class="ipc-spin text-primary" /></div>
+          <p v-else-if="!gbWhitelist.items.length" class="py-3 text-center text-xs text-placeholder">暂无登记，登记后设备注册才会被接受。</p>
+          <div v-else class="max-h-40 overflow-auto rounded-signal border border-line">
+            <table class="w-full text-xs">
+              <tbody>
+                <tr v-for="w in gbWhitelist.items" :key="w.id" class="border-b border-line-soft last:border-0">
+                  <td class="px-3 py-2 font-mono text-body">{{ w.gbId }}</td>
+                  <td class="px-3 py-2 text-placeholder">{{ dash(w.name) }}</td>
+                  <td class="px-3 py-2 text-right">
+                    <UiButton variant="dangerText" size="sm" @click="delGbWhitelist(w)">移除</UiButton>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </template>
     </UiDialog>
 
     <!-- 分组管理弹窗 -->
@@ -818,7 +1111,26 @@ onMounted(async () => {
     </UiDialog>
 
     <!-- 批量转移分组弹窗 -->
-    <UiDialog v-model:open="batchMoveDlg.show" title="批量转移分组" width="max-w-sm">
+    <!-- 跨项目转移（MGR-12） -->
+    <UiDialog v-model:open="xferDlg.show" title="转移到其他项目" width="max-w-sm">
+      <div class="space-y-3 p-1">
+        <p class="text-xs text-placeholder">
+          将选中的 {{ selection.length }} 台设备连同其通道一并划归目标项目。
+          转移后本项目将不再看到这些设备，其录像计划与告警规则需在新项目中重新配置。
+        </p>
+        <div>
+          <label class="mb-1 block text-xs font-medium text-muted">目标项目</label>
+          <UiSelect v-model="xferDlg.projectId" :options="xferProjects.map((p: any) => ({ label: p.name, value: p.id }))" placeholder="选择目标项目" class="w-full" />
+          <p v-if="!xferProjects.length" class="mt-1 text-xs text-placeholder">没有其他可选项目。</p>
+        </div>
+      </div>
+      <template #footer>
+        <UiButton size="sm" @click="xferDlg.show = false">取消</UiButton>
+        <UiButton variant="primary" size="sm" :loading="xferDlg.saving" :disabled="!xferDlg.projectId" @click="doTransfer">确定转移</UiButton>
+      </template>
+    </UiDialog>
+
+    <UiDialog v-model:open="batchMoveDlg.show" title="移动到分组" width="max-w-sm">
       <div class="space-y-3">
         <label class="block text-xs text-muted">选择目标分组</label>
         <UiSelect v-model="batchMoveDlg.groupId" :options="groupOptions" class="w-full" />

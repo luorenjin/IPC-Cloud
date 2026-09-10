@@ -1,6 +1,7 @@
 <script setup lang="ts">
 // 空状态（PRD §9.1：插画 + 主按钮 + 帮助链接）
-const props = withDefaults(defineProps<{ text?: string; icon?: string }>(), { text: '暂无数据', icon: 'box' })
+// hint：空状态应告诉用户下一步能做什么，而不只是"暂无数据"
+const props = withDefaults(defineProps<{ text?: string; hint?: string; icon?: string }>(), { text: '暂无数据', icon: 'box' })
 </script>
 
 <template>
@@ -12,6 +13,7 @@ const props = withDefaults(defineProps<{ text?: string; icon?: string }>(), { te
       <circle cx="60" cy="20" r="4" opacity=".5" />
     </svg>
     <p class="text-sm text-placeholder">{{ text }}</p>
+    <p v-if="hint" class="-mt-1 max-w-xs text-xs text-placeholder/80">{{ hint }}</p>
     <div v-if="$slots.action" class="flex items-center gap-3"><slot name="action" /></div>
   </div>
 </template>
