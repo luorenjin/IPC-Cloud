@@ -25,10 +25,16 @@ func handleLogin(c *gin.Context) {
 		fail(c, errs.EBadRequest)
 		return
 	}
+	// 先把用户查出来（鉴权判定仍在下面，这里兼为取租户）：
+	// 登录事件没有项目，必须带租户，否则按租户过滤后各租户的登录记录会互相可见。
+	// 用户名不存在时取不到租户（记空），该行对任何租户都不可见——失败尝试无法归属到租户是已知限制。
+	var u models.User
+	_ = store.DB.First(&u, "username = ?", req.Username).Error
 	auditLogin := func(result string) {
 		store.DB.Create(&models.AuditLog{
 			ID: "lg_" + models.NewID(), UserID: req.Username, Username: req.Username,
-			Action: "login", Target: "session:" + req.Username, Result: result,
+			TenantID: u.TenantID,
+			Action:   "login", Target: "session:" + req.Username, Result: result,
 			IP: c.ClientIP(), Detail: models.JSONB{"path": "/auth/login"}, Ts: models.NowMilli(),
 		})
 	}
@@ -38,9 +44,9 @@ func handleLogin(c *gin.Context) {
 		fail(c, e)
 		return
 	}
-	var u models.User
-	if err := store.DB.First(&u, "username = ?", req.Username).Error; err != nil ||
-		!crypto.VerifyPassword(req.Password, u.PwdHash) {
+	// u 已在上方为取租户而加载；这里只做鉴权判定（u.ID 为空 = 用户名不存在，
+	// 短路避免拿空哈希去验密码）
+	if u.ID == "" || !crypto.VerifyPassword(req.Password, u.PwdHash) {
 		auditLogin("fail")
 		if auth.RecordFail(req.Username) {
 			fail(c, errs.EAccountLocked.WithMsg("连续 5 次登录失败，账号锁定 15 分钟"))

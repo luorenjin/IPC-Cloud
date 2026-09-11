@@ -84,7 +84,10 @@ func (e *Engine) fireScheduledReboot(dev models.Device, key string) {
 		detail["reason"] = err.Error()
 	}
 	_ = store.DB.Create(&models.AuditLog{
-		ID: "lg_" + models.NewID(), ProjectID: dev.ProjectID,
+		ID: "lg_" + models.NewID(),
+		// 定时任务无登录上下文，租户/项目从设备所属项目倒推，
+		// 否则该行 tenant_id 为空，租户过滤后谁都看不到（或反过来对所有人可见）。
+		TenantID: store.ProjectTenant(dev.ProjectID), ProjectID: dev.ProjectID,
 		Username: "定时重启", Action: "reboot", Target: "device:" + dev.ID,
 		Result: res, Detail: detail, Ts: models.NowMilli(),
 	}).Error

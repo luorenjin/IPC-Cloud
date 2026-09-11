@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 
 	"github.com/jetscam/ipccloud/server/internal/errs"
 	"github.com/jetscam/ipccloud/server/internal/models"
@@ -128,10 +129,17 @@ func handleIdpCRLList(c *gin.Context) {
 
 // ---------- 操作日志 ACC-08 ----------
 
-func handleListAuditLogs(c *gin.Context) {
-	ctx := getCtx(c)
-	page, size := pageParams(c)
-	q := store.DB.Model(&models.AuditLog{}).Where("project_id = ? OR project_id = ''", ctx.ProjectID)
+// auditFilter 操作日志的筛选条件（列表与导出共用）。
+//
+// 两端口径必须一致：导出按钮承诺的是「导出当前筛选结果」，
+// 此前导出只按项目过滤，带筛选导出会拿到未筛选的全量（且与页面显示不符）。
+// 返回 false 表示参数非法，错误响应已在函数内发出，调用方直接 return。
+func auditFilter(c *gin.Context, ctx *Ctx) (*gorm.DB, bool) {
+	// 租户维度必须先加：登录事件没有项目（project_id 为空），
+	// 只按 project_id 过滤会让各租户的登录记录互相可见。
+	q := store.DB.Model(&models.AuditLog{}).
+		Where("tenant_id = ?", ctx.TenantID).
+		Where("project_id = ? OR project_id = ''", ctx.ProjectID)
 	if a := c.Query("action"); a != "" {
 		q = q.Where("action = ?", a)
 	}
@@ -141,8 +149,40 @@ func handleListAuditLogs(c *gin.Context) {
 	if tt := c.Query("targetType"); tt != "" {
 		// 对象类型在 target 里（`device:<id>`；无 ID 的写操作只有 `device`，如 POST /devices）。
 		// 用 `= tt OR LIKE 'tt:%'` 而不是 `LIKE 'tt%'`：后者会让 alarm 误命中 alarm_rule。
-		// 过滤下沉到 SQL，前端不再对当前页做 filter（那样 total/分页与实际列表会对不上）。
 		q = q.Where("(target = ? OR target LIKE ?)", tt, tt+":%")
+	}
+	// 时间范围按**项目时区**的自然日、闭开区间 [startDate 00:00, endDate+1 00:00)。
+	// 前端传 YYYY-MM-DD，不传浏览器侧算出的毫秒：那会把浏览器时区烘进筛选条件，
+	// 而值班看的是项目时区的“这一天”（server 容器 TZ 为 UTC，不能用 time.Local）。
+	// 时区要查库，所以只在真带了日期参数时才算。
+	if s, e := c.Query("startDate"), c.Query("endDate"); s != "" || e != "" {
+		loc := store.ProjectLocation(ctx.ProjectID)
+		if s != "" {
+			t, err := time.ParseInLocation("2006-01-02", s, loc)
+			if err != nil {
+				fail(c, errs.EBadRequest.WithMsg("startDate 需为 YYYY-MM-DD 格式"))
+				return nil, false
+			}
+			q = q.Where("ts >= ?", t.UnixMilli())
+		}
+		if e != "" {
+			t, err := time.ParseInLocation("2006-01-02", e, loc)
+			if err != nil {
+				fail(c, errs.EBadRequest.WithMsg("endDate 需为 YYYY-MM-DD 格式"))
+				return nil, false
+			}
+			q = q.Where("ts < ?", timeutil.NextDayStart(t, loc).UnixMilli())
+		}
+	}
+	return q, true
+}
+
+func handleListAuditLogs(c *gin.Context) {
+	ctx := getCtx(c)
+	page, size := pageParams(c)
+	q, valid := auditFilter(c, ctx)
+	if !valid {
+		return
 	}
 	var total int64
 	q.Count(&total)
@@ -153,8 +193,13 @@ func handleListAuditLogs(c *gin.Context) {
 
 func handleExportAuditLogs(c *gin.Context) {
 	ctx := getCtx(c)
+	q, valid := auditFilter(c, ctx)
+	if !valid {
+		return
+	}
 	var items []models.AuditLog
-	store.DB.Where("project_id = ?", ctx.ProjectID).Order("ts DESC").Limit(10000).Find(&items)
+	// 与列表同一套筛选；上限 10000 行，超出部分不导（保持原有防护，避免一次拉爆内存）
+	q.Order("ts DESC").Limit(10000).Find(&items)
 	c.Header("Content-Disposition", "attachment; filename=audit-logs.csv")
 	c.Header("Content-Type", "text/csv; charset=utf-8")
 	c.Writer.WriteString("time,user,action,target,result,ip\n")

@@ -51,11 +51,11 @@ async function loadLogs() {
       // 对象类型交服务端按 target 前缀过滤（原先是在前端对当前页做 filter，与 total/分页口径相冲）
       targetType: filters.targetType || undefined
     }
-    // 时间范围：目前后端未实现 start/end 过滤（handleListAuditLogs 只认 action/username/targetType），
-    // 发送但会被忽略。若要补上，得先定「按哪个时区的自然日」——server 容器 TZ 为 UTC、
-    // 项目时区在 projects.tz，不能直接用 ts 比较。
-    if (filters.dateFrom) params.start = Date.parse(filters.dateFrom + 'T00:00:00')
-    if (filters.dateTo) params.end = Date.parse(filters.dateTo + 'T23:59:59')
+    // 时间范围按**项目时区**的自然日过滤，后端把 YYYY-MM-DD 换算成 [当日 00:00, 次日 00:00)。
+    // 不要在这里用 Date.parse 算毫秒：那会把浏览器时区烘进筛选条件（服务端 TZ 是 UTC，
+    // 项目时区在 projects.tz），跨时区值班会看错一天。
+    if (filters.dateFrom) params.startDate = filters.dateFrom
+    if (filters.dateTo) params.endDate = filters.dateTo
     const res: any = await api.get('/audit-logs', params)
     items.value = res?.items || []
     total.value = res?.total || 0
@@ -80,16 +80,16 @@ function resetFilters() {
   search()
 }
 
-/* 导出 CSV（带当前筛选条件；后端 /audit-logs/export 输出 CSV）
- * 注意：导出端点目前只按项目过滤，action/username/targetType/start/end 均未应用——
- * 带筛选导出会拿到未筛选的全量，已另行记录，不在此处默默伪装成生效。 */
+/* 导出 CSV（后端 /audit-logs/export 输出 CSV）
+ * 筛选条件与列表同一套（服务端 auditFilter）：action/username/targetType/日期范围都会生效，
+ * 导出就是「现在看到的这批」。上限 10000 行的防护在服务端。 */
 async function exportLogs() {
   const params: any = {}
   if (filters.action.trim()) params.action = filters.action.trim()
   if (filters.username.trim()) params.username = filters.username.trim()
   if (filters.targetType) params.targetType = filters.targetType
-  if (filters.dateFrom) params.start = String(Date.parse(filters.dateFrom + 'T00:00:00'))
-  if (filters.dateTo) params.end = String(Date.parse(filters.dateTo + 'T23:59:59'))
+  if (filters.dateFrom) params.startDate = filters.dateFrom
+  if (filters.dateTo) params.endDate = filters.dateTo
   try {
     await api.download('/audit-logs/export', params)
     toast.success(t('system.msg.auditExportStarted'))
