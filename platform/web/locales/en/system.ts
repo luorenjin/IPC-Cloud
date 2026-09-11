@@ -278,14 +278,8 @@ export default {
   'system.audit.colAction': 'Action',
   'system.audit.colResult': 'Result',
   'system.audit.colIp': 'IP',
-  'system.audit.typeDevice': 'Device',
-  'system.audit.typeUser': 'Member',
-  'system.audit.typeRole': 'Role',
-  'system.audit.typeGroup': 'Group',
-  'system.audit.typeNode': 'Node',
-  'system.audit.typeSettings': 'Settings',
-  'system.audit.typeSession': 'Session',
-  'system.audit.typeOther': 'Other',
+  // Target-type and action names come from the AuditLog fields (target prefix / action verb) and
+  // live in utils/enums.ts as enum.auditTarget.* and enum.audit.* — not duplicated here
 
   // ---- Feedback ----
   'system.msg.settingsLoadFailed': 'Could not load settings',

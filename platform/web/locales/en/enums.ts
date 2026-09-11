@@ -117,5 +117,25 @@ export default {
   'enum.audit.password': 'Change password',
   'enum.audit.crl': 'CRL update',
   'enum.audit.login': 'Log in',
-  'enum.audit.logout': 'Log out'
+  'enum.audit.logout': 'Log out',
+
+  // ---- Audit target types (derived from the AuditLog.Target prefix) ----
+  'enum.auditTarget.device': 'Device',
+  'enum.auditTarget.channel': 'Channel',
+  'enum.auditTarget.group': 'Group',
+  'enum.auditTarget.project': 'Project',
+  'enum.auditTarget.user': 'Member',
+  'enum.auditTarget.role': 'Role',
+  'enum.auditTarget.node': 'Node',
+  'enum.auditTarget.alarm': 'Alarm',
+  'enum.auditTarget.alarm_rule': 'Alarm rule',
+  'enum.auditTarget.alarm_policy': 'Alarm policy',
+  'enum.auditTarget.alarm_template': 'Arming template',
+  'enum.auditTarget.record_plan': 'Recording plan',
+  'enum.auditTarget.record_template': 'Plan template',
+  'enum.auditTarget.setting': 'Settings',
+  'enum.auditTarget.idp': 'IDP access',
+  'enum.auditTarget.playback': 'Playback',
+  'enum.auditTarget.upload': 'Upload',
+  'enum.auditTarget.session': 'Session'
 }

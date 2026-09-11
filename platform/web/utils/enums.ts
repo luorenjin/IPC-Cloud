@@ -329,3 +329,53 @@ export function auditActionKey(a?: string): string {
 export function auditActionName(a?: string): string {
   return AUDIT_ACTION_MAP[a || ''] || a || EMPTY
 }
+
+// ---------- 操作日志对象类型（ACC-08） ----------
+
+/**
+ * 资源类型取值集与展示顺序，镜像 `api/audit.go` 的 `auditResType`：
+ * 对象类型**不在 action 里**，而在 `AuditLog.Target`（形如 `device:<id>`，无 ID 的写操作只有 `device`）。
+ * 旧实现用 `action.startsWith('device.')` 判定，而 action 只有动词，于是除登录外全部落「其他」。
+ */
+export const AUDIT_TARGET_TYPES = [
+  'device', 'channel', 'group', 'project', 'user', 'role', 'node',
+  'alarm', 'alarm_rule', 'alarm_policy', 'alarm_template',
+  'record_plan', 'record_template', 'setting', 'idp', 'playback', 'upload', 'session'
+] as const
+
+/** 资源类型 → 中文名（用词与旧的 system.audit.type* 词条保持一致） */
+export const AUDIT_TARGET_TYPE_MAP: Record<string, string> = {
+  device: '设备',
+  channel: '通道',
+  group: '分组',
+  project: '项目',
+  user: '成员',
+  role: '角色',
+  node: '节点',
+  alarm: '告警',
+  alarm_rule: '告警规则',
+  alarm_policy: '告警策略',
+  alarm_template: '布防模板',
+  record_plan: '录像计划',
+  record_template: '计划模板',
+  setting: '设置',
+  idp: 'IDP 接入',
+  playback: '回放',
+  upload: '上传',
+  session: '会话'
+}
+
+/** 资源类型词条键；未收录的类型回落为原始值（便于发现后端新增资源未同步前端） */
+export function auditTargetTypeKey(tt?: string): string {
+  return tt && AUDIT_TARGET_TYPE_MAP[tt] ? `enum.auditTarget.${tt}` : (tt || EMPTY)
+}
+
+/** 中文兜底名（不经 i18n）。界面渲染请用 t(auditTargetTypeKey(tt))。 */
+export function auditTargetTypeName(tt?: string): string {
+  return AUDIT_TARGET_TYPE_MAP[tt || ''] || tt || EMPTY
+}
+
+/** 从 `AuditLog.Target`（`device:<id>` / `device`）取出资源类型 */
+export function auditTargetTypeOf(target?: string): string {
+  return String(target || '').split(':')[0]
+}

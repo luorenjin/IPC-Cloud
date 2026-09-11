@@ -117,5 +117,25 @@ export default {
   'enum.audit.password': '修改密码',
   'enum.audit.crl': 'CRL 更新',
   'enum.audit.login': '登录',
-  'enum.audit.logout': '退出登录'
+  'enum.audit.logout': '退出登录',
+
+  // ---- 操作日志对象类型（取自 AuditLog.Target 的前缀，镜像后端 auditResType）----
+  'enum.auditTarget.device': '设备',
+  'enum.auditTarget.channel': '通道',
+  'enum.auditTarget.group': '分组',
+  'enum.auditTarget.project': '项目',
+  'enum.auditTarget.user': '成员',
+  'enum.auditTarget.role': '角色',
+  'enum.auditTarget.node': '节点',
+  'enum.auditTarget.alarm': '告警',
+  'enum.auditTarget.alarm_rule': '告警规则',
+  'enum.auditTarget.alarm_policy': '告警策略',
+  'enum.auditTarget.alarm_template': '布防模板',
+  'enum.auditTarget.record_plan': '录像计划',
+  'enum.auditTarget.record_template': '计划模板',
+  'enum.auditTarget.setting': '设置',
+  'enum.auditTarget.idp': 'IDP 接入',
+  'enum.auditTarget.playback': '回放',
+  'enum.auditTarget.upload': '上传',
+  'enum.auditTarget.session': '会话'
 }

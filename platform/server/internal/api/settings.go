@@ -138,6 +138,12 @@ func handleListAuditLogs(c *gin.Context) {
 	if u := c.Query("username"); u != "" {
 		q = q.Where("username = ?", u)
 	}
+	if tt := c.Query("targetType"); tt != "" {
+		// 对象类型在 target 里（`device:<id>`；无 ID 的写操作只有 `device`，如 POST /devices）。
+		// 用 `= tt OR LIKE 'tt:%'` 而不是 `LIKE 'tt%'`：后者会让 alarm 误命中 alarm_rule。
+		// 过滤下沉到 SQL，前端不再对当前页做 filter（那样 total/分页与实际列表会对不上）。
+		q = q.Where("(target = ? OR target LIKE ?)", tt, tt+":%")
+	}
 	var total int64
 	q.Count(&total)
 	var items []models.AuditLog

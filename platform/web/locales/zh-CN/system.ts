@@ -271,14 +271,8 @@ export default {
   'system.audit.colAction': '动作',
   'system.audit.colResult': '结果',
   'system.audit.colIp': 'IP',
-  'system.audit.typeDevice': '设备',
-  'system.audit.typeUser': '成员',
-  'system.audit.typeRole': '角色',
-  'system.audit.typeGroup': '分组',
-  'system.audit.typeNode': '节点',
-  'system.audit.typeSettings': '设置',
-  'system.audit.typeSession': '会话',
-  'system.audit.typeOther': '其他',
+  // 对象类型名与动作名一样取自 AuditLog 的字段（target 前缀 / action 动词），
+  // 统一放 utils/enums.ts → enum.auditTarget.* 与 enum.audit.*，不再在页面词条里重复定义
 
   // ---- 提示与反馈 ----
   'system.msg.settingsLoadFailed': '加载设置失败',
