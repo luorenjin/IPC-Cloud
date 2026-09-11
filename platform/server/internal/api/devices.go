@@ -534,9 +534,9 @@ var cfgKeys = []string{
 	"alarm.motion.enable", "alarm.motion.sensitivity",
 	// 时间同步
 	"time.ntp.enable", "time.ntp.server", "time.timezone",
-	// 网络（reboot_required；本阶段前端仅只读展示，见 [id].vue 的 time 页签，
-	// 可编辑的 DHCP 开关/IP 输入框留给带强确认交互的后续任务）
-	"net.dhcp", "net.ip",
+	// 网络（reboot_required；静态地址四件套 + DHCP 开关，编辑交互见 [id].vue 的
+	// NetworkSettings 区块，前端带独立保存与强确认）
+	"net.dhcp", "net.ip", "net.mask", "net.gw", "net.dns",
 	// 本地设置（设备维护页签）
 	"localUser.name", "led.enable",
 }
@@ -544,14 +544,17 @@ var cfgKeys = []string{
 // cfgRebootRequired 是固件配置规则表里 reboot_required=true 项的静态镜像，
 // 不做实时抓取：这个属性在固件侧是编译期常量（cfg_rule_t.reboot_required），
 // 没必要为一个不会在运行时变化的标记多打一次设备往返。
-// 与 firmware/core/src/config.c 的 video.%d.%s.w/h（:266-267）、net.dhcp/net.ip（:304-305）
-// 逐字对齐——这四项是当前固件规则表里*仅有*的 reboot_required 键；
+// 与 firmware/core/src/config.c 的 video.%d.%s.w/h、net.dhcp/net.ip/net.mask/net.gw/net.dns
+// 逐字对齐——这九项（各通道的 w/h 各算一项）是当前固件规则表里*仅有*的 reboot_required 键；
 // 固件规则表调整后需要手动同步这里。
 var cfgRebootRequired = map[string]bool{
 	"video.0.main.w": true,
 	"video.0.main.h": true,
 	"net.dhcp":       true,
 	"net.ip":         true,
+	"net.mask":       true,
+	"net.gw":         true,
+	"net.dns":        true,
 }
 
 func handleDeviceConfigGet(c *gin.Context) {
@@ -580,15 +583,24 @@ func handleDeviceConfigGet(c *gin.Context) {
 	if values == nil {
 		values = map[string]any{}
 	}
-	// 只收集「值为 true 且落在本次 supported 范围内」的键：既不整个暴露 cfgRebootRequired
-	// 这张表本身，也避免未来表扩容后把当前设备/固件版本还不支持的键提前亮给前端。
-	rebootRequired := make([]string, 0, len(cfgRebootRequired))
+	// supported = 平台白名单 ∩ 设备实际回包：设备没有的键既不下发给它，前端也不渲染该字段。
+	// 旧实现直接返回 cfgKeys（平台白名单），于是设备不支持的键也会显示成一个空输入框，
+	// 用户填完下发才在 rejected 里看到失败——属于“看着能改、实际改不了”的假象。
+	supported := make([]string, 0, len(cfgKeys))
 	for _, k := range cfgKeys {
+		if _, has := values[k]; has {
+			supported = append(supported, k)
+		}
+	}
+	// 只收集「reboot_required 且本次 supported 范围内」的键：既不整个暴露 cfgRebootRequired
+	// 这张表本身，也避免把当前设备/固件版本还不支持的键提前亮给前端。
+	rebootRequired := make([]string, 0, len(cfgRebootRequired))
+	for _, k := range supported {
 		if cfgRebootRequired[k] {
 			rebootRequired = append(rebootRequired, k)
 		}
 	}
-	ok(c, gin.H{"config": values, "supported": cfgKeys, "rebootRequired": rebootRequired})
+	ok(c, gin.H{"config": values, "supported": supported, "rebootRequired": rebootRequired})
 }
 
 func handleDeviceConfigSet(c *gin.Context) {

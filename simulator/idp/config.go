@@ -62,10 +62,12 @@ var cfgRules = map[string]cfgRule{
 	"time.ntp.server": {t: cfgStr},
 	"time.timezone":   {t: cfgStr},
 
-	// 网络（固件规则表 reboot_required=true；平台侧当前只做只读展示，见 platform/web
-	// [id].vue 的 time 页签，不开放可编辑交互——避免误改导致设备/云端断连）
+	// 网络（固件规则表四项均为 reboot_required=true)
 	"net.dhcp": {t: cfgBool},
 	"net.ip":   {t: cfgStr},
+	"net.mask": {t: cfgStr},
+	"net.gw":   {t: cfgStr},
+	"net.dns":  {t: cfgStr},
 
 	// 本地设置
 	"localUser.name": {t: cfgStr},
@@ -107,9 +109,14 @@ func cfgDefaults() map[string]any {
 		"time.ntp.server": "pool.ntp.org",
 		"time.timezone":   "Asia/Shanghai",
 
-		// net.ip 为任意占位内网地址，仅用于模拟只读展示，不代表真实网络配置
+		// net.* 全为占位内网地址，仅用于模拟配置读写，不代表真实网络环境。
+		// 注意：cfgDefaults 必须覆盖 cfgRules 的每一个键——平台侧的 supported 是
+		// “平台白名单 ∩ 设备回包”，少了默认值的键会直接从配置面板上消失。
 		"net.dhcp": true,
 		"net.ip":   "192.168.1.64",
+		"net.mask": "255.255.255.0",
+		"net.gw":   "192.168.1.1",
+		"net.dns":  "223.5.5.5",
 
 		"localUser.name": "admin",
 		"led.enable":     true,

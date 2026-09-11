@@ -303,6 +303,12 @@ static void register_common_rules(void)
         { "time.ntp.server",         CFG_T_STR,  0, 0, NULL, false },
         { "net.dhcp",                CFG_T_BOOL, 0, 1, NULL, true },
         { "net.ip",                  CFG_T_STR,  0, 0, NULL, true },
+        /* 静态地址四件套的其余三项：与 dhcp 一样改动后需重启网络栈才生效。
+         * 设备侧不做“dhcp 开启时忽略静态值”的联动校验——那是平台面的交互职责，
+         * 固件只负责逐键校验类型与范围（与 cfg_apply_json 的逐键语义一致）。 */
+        { "net.mask",                CFG_T_STR,  0, 0, NULL, true },
+        { "net.gw",                  CFG_T_STR,  0, 0, NULL, true },
+        { "net.dns",                 CFG_T_STR,  0, 0, NULL, true },
         { "localUser.name",          CFG_T_STR,  0, 0, NULL, false },
         { "osd.channelName.enable",  CFG_T_BOOL, 0, 1, NULL, false },
         { "osd.time.enable",         CFG_T_BOOL, 0, 1, NULL, false },
