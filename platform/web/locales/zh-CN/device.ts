@@ -285,6 +285,10 @@ export default {
   // ---- 移动侦测 ----
   'device.config.motionEnable': '启用侦测',
   'device.config.motionSens': '侦测灵敏度',
+  // ---- 依赖字段的禁用原因（总开关关闭时下游字段灰显，必须说明原因而不是让用户以为页面坏了）----
+  'device.config.dependsMotion': '需先启用侦测',
+  'device.config.dependsRecord': '需先启用录像',
+  'device.config.dependsNtp': '需先启用 NTP',
   // ---- 时间同步 ----
   'device.config.ntpEnable': '启用 NTP',
   'device.config.ntp': 'NTP 服务器',

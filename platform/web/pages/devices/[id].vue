@@ -1,5 +1,7 @@
 <script setup lang="ts">
 // 设备详情（MGR-03）：概览 / 通道 / 配置 / 诊断 / 日志（PRD 五 Tab）
+import ConfigFieldRow, { type CfgField } from '~/components/device/ConfigFieldRow.vue'
+
 const route = useRoute()
 const api = useApi()
 const toast = useToast()
@@ -270,14 +272,10 @@ async function takeSnap(ch: any) {
 
 // ================= 远程配置（MGR-09） =================
 // 字段声明对齐固件 `firmware/core/src/config.c` 的规则表：键名 / 类型 / 取值范围三处一致。
-// 控件由 type 决定（开关 / 下拉 / 数字），不再像旧实现那样把 image.mirror 这种 0/1 开关
-// 渲染成自由文本——那样既容易写出越界值，也看不出合法取值。
+// CfgField 的类型定义与「一行字段怎么渲染」都在 components/device/ConfigFieldRow.vue 里，
+// 本页只负责声明数据（cfgGroups）与持有状态（cfg）：控件类型由 type 决定，
+// 不再像更早的实现那样把 image.mirror 这类 0/1 开关渲染成自由文本。
 // 编码键带通道号：video.<ch>.<name>.<field>，0/main = 主码流。
-type CfgField =
-  | { key: string; labelKey: string; type: 'int'; min: number; max: number }
-  | { key: string; labelKey: string; type: 'bool' }
-  | { key: string; labelKey: string; type: 'enum'; options: { label: string; value: string }[] }
-  | { key: string; labelKey: string; type: 'str' }
 interface CfgGroup { key: string; tab: CfgTabKey; titleKey: string; fields: CfgField[] }
 
 // rebootRequired：固件规则表 reboot_required=true 键的静态镜像（服务端已按 supported 过滤），
@@ -326,6 +324,15 @@ function cfgNum(k: string) {
   const n = Number(cfg.data?.[k])
   return Number.isFinite(n) ? n : 0
 }
+/**
+ * 输入框回显值：原样返回，不做数值归一化。
+ * 与 cfgNum() 的区别是「用户还没改完的值也要照原样显示」——归一化会把清空的数字框立刻变成 0，
+ * 用户既清不掉、也看不出自己刚才填的是什么。
+ */
+function cfgDisplay(k: string) {
+  const raw = cfg.data?.[k]
+  return raw === undefined || raw === null ? '' : String(raw)
+}
 const mirrorMode = computed({
   get() {
     const m = cfgNum('image.mirror') === 1
@@ -367,6 +374,12 @@ function setCfgNum(key: string, v: string) {
   cfg.data[key] = v.trim() === '' || !Number.isFinite(n) ? v : n
 }
 
+/** 字段控件回写：数字字段走 setCfgNum（保留空值/非数字的半成品输入），其余按原值写入 */
+function onCfgFieldInput(f: CfgField, v: any) {
+  if (f.type === 'int') setCfgNum(f.key, String(v))
+  else cfg.data[f.key] = v
+}
+
 /** 数值字段合法区间查找表（画面四项 + 各分组 int 字段）：就地提示与提交前拦截共用，本身是静态表，不需要按 tab 拆 */
 const intBounds = computed(() => {
   const m: Record<string, { min: number; max: number }> = {}
@@ -393,7 +406,11 @@ const invalidKeysByTab = computed(() => {
   const m: Record<CfgTabKey, string[]> = { image: [], encode: [], osd: [], alarm: [], record: [], time: [], maintain: [] }
   m.image = IMAGE_SLIDERS.filter((f) => isOutOfRange(f.key)).map((f) => f.key)
   for (const g of cfgGroups) {
-    const bad = g.fields.filter((f) => f.type === 'int' && isOutOfRange(f.key)).map((f) => f.key)
+    // 被依赖禁用的字段不参与越界计算：禁用后用户看不到它的越界提示（控件已灰），
+    // 若仍拦住保存，就成了「看不见的红点 + 保存变灰」——与重分组前那个跨页签隔空拦截同一性质。
+    const bad = g.fields
+      .filter((f) => f.type === 'int' && !cfgFieldDisabledReason(f) && isOutOfRange(f.key))
+      .map((f) => f.key)
     if (bad.length) m[g.tab] = [...m[g.tab], ...bad]
   }
   return m
@@ -404,7 +421,13 @@ const boundText = (k: string) => {
   return b ? `${b.min}–${b.max}` : ''
 }
 
-// 其余分组：键名已与固件对齐、按类型渲染，精细 UI（子页签/联动）待后续补充。
+// 三组「总开关 + 下游字段」的依赖声明。抽成常量是为了让同一组的下游字段共用一份定义，
+// 避免三处各写一遍 hintKey 而出现文案不一致。
+const MOTION_DEPENDS = { key: 'alarm.motion.enable', equals: true, hintKey: 'device.config.dependsMotion' }
+const RECORD_DEPENDS = { key: 'record.enabled', equals: true, hintKey: 'device.config.dependsRecord' }
+const NTP_DEPENDS = { key: 'time.ntp.enable', equals: true, hintKey: 'device.config.dependsNtp' }
+
+// 各分组：键名与固件规则表对齐，控件类型与依赖关系由 CfgField 声明，渲染统一交给 ConfigFieldRow。
 const cfgGroups: CfgGroup[] = [
   {
     key: 'video', tab: 'encode', titleKey: 'device.config.group.video',
@@ -429,27 +452,28 @@ const cfgGroups: CfgGroup[] = [
     key: 'record', tab: 'record', titleKey: 'device.config.group.record',
     fields: [
       { key: 'record.enabled', labelKey: 'device.config.recordEnable', type: 'bool' },
-      { key: 'record.mode', labelKey: 'device.config.recordMode', type: 'enum', options: [
+      { key: 'record.mode', labelKey: 'device.config.recordMode', type: 'enum', dependsOn: RECORD_DEPENDS, options: [
         { label: t('device.config.rec_continuous'), value: 'continuous' },
         { label: t('device.config.rec_event'), value: 'event' },
         { label: t('device.config.rec_schedule'), value: 'schedule' }
       ] },
-      { key: 'record.retention_days', labelKey: 'device.config.retention', type: 'int', min: 1, max: 365 },
-      { key: 'record.channel', labelKey: 'device.config.recordChannel', type: 'int', min: 0, max: 2 }
+      { key: 'record.retention_days', labelKey: 'device.config.retention', type: 'int', min: 1, max: 365, dependsOn: RECORD_DEPENDS },
+      { key: 'record.channel', labelKey: 'device.config.recordChannel', type: 'int', min: 0, max: 2, dependsOn: RECORD_DEPENDS }
     ]
   },
   {
     key: 'alarm', tab: 'alarm', titleKey: 'device.config.group.alarm',
     fields: [
       { key: 'alarm.motion.enable', labelKey: 'device.config.motionEnable', type: 'bool' },
-      { key: 'alarm.motion.sensitivity', labelKey: 'device.config.motionSens', type: 'int', min: 0, max: 100 }
+      { key: 'alarm.motion.sensitivity', labelKey: 'device.config.motionSens', type: 'int', min: 0, max: 100, dependsOn: MOTION_DEPENDS }
     ]
   },
   {
     key: 'time', tab: 'time', titleKey: 'device.config.group.time',
     fields: [
       { key: 'time.ntp.enable', labelKey: 'device.config.ntpEnable', type: 'bool' },
-      { key: 'time.ntp.server', labelKey: 'device.config.ntp', type: 'str' },
+      // 关掉 NTP 后服务器地址写了也不会被使用：禁用而非隐藏，让用户仍能看到当前配置
+      { key: 'time.ntp.server', labelKey: 'device.config.ntp', type: 'str', dependsOn: NTP_DEPENDS },
       // 时区与 net.dhcp/net.ip 不同：改动不涉及断网风险，走通用可编辑渲染即可，
       // 不需要 net.* 那种只读 + 强确认处理（见本文件下方 time 页签的只读网络区块）。
       { key: 'time.timezone', labelKey: 'device.config.timezone', type: 'str' }
@@ -466,6 +490,16 @@ const cfgGroups: CfgGroup[] = [
     ]
   }
 ]
+
+/**
+ * 字段当前是否因上游总开关而不可用；返回禁用原因文案（空串=可用）。
+ * 设备侧对这些键照常保存，只是主开关关闭时不会生效，所以这里只禁用交互、不清空值、不隐藏字段。
+ */
+function cfgFieldDisabledReason(f: CfgField): string {
+  const dep = f.dependsOn
+  if (!dep) return ''
+  return cfg.data?.[dep.key] === dep.equals ? '' : t(dep.hintKey)
+}
 
 /** gop / rc 改动频率低，收进「编码策略」页签的折叠区，降低主网格的字段密度 */
 const ADVANCED_VIDEO_KEYS = ['video.0.main.gop', 'video.0.main.rc']
@@ -1017,22 +1051,25 @@ onMounted(load)
                         <label class="w-16 shrink-0 text-right text-sm text-muted">{{ t('device.config.mirror') }}</label>
                         <UiSelect v-model="mirrorMode" :options="mirrorOptions" size="sm" width="w-36" />
                       </div>
-                      <div v-for="f in IMAGE_SLIDERS" :key="f.key" class="flex items-center gap-3">
-                        <label class="w-16 shrink-0 text-right text-sm text-muted">{{ t(f.labelKey) }}</label>
+                      <!-- 滑杆与数字框联动是这一组特有的结构，用 #control 覆盖控件部分，提示区仍复用同一套优先级 -->
+                      <ConfigFieldRow
+                        v-for="f in IMAGE_SLIDERS" :key="f.key"
+                        :label="t(f.labelKey)" label-width="w-16"
+                        :rejected="cfg.denied.includes(f.key)"
+                        :invalid="invalidKeysByTab[cfgTab]?.includes(f.key)"
+                        :invalid-text="t('device.config.outOfRange', { range: boundText(f.key) })"
+                        :hint="f.key === 'image.sharpness' ? t('device.config.sharpnessHint') : ''"
+                      >
                         <UiSlider
                           class="max-w-52 flex-1" :model-value="cfgNum(f.key)" :min="f.min" :max="f.max"
                           @update:model-value="cfg.data[f.key] = $event"
                         />
                         <UiInput
                           type="number" size="sm" width="w-16" :invalid="invalidKeysByTab[cfgTab]?.includes(f.key)"
-                          :model-value="String(cfgNum(f.key))"
+                          :model-value="cfgDisplay(f.key)"
                           @update:model-value="setCfgNum(f.key, $event)"
                         />
-                        <span v-if="cfg.denied.includes(f.key)" class="text-xs text-danger">{{ t('device.config.rejected') }}</span>
-                        <span v-else-if="invalidKeysByTab[cfgTab]?.includes(f.key)" class="text-xs text-danger">{{ t('device.config.outOfRange', { range: boundText(f.key) }) }}</span>
-                        <!-- 锐度没有对应的原生 CSS 效果，如实告知而不是假装模拟了锐化 -->
-                        <span v-else-if="f.key === 'image.sharpness'" class="text-xs text-placeholder">{{ t('device.config.sharpnessHint') }}</span>
-                      </div>
+                      </ConfigFieldRow>
                     </div>
                   </div>
                 </section>
@@ -1057,37 +1094,17 @@ onMounted(load)
                   </div>
 
                   <div class="grid grid-cols-1 gap-x-8 gap-y-3 p-3 md:grid-cols-2">
-                    <div v-for="f in (g.key === 'video' ? g.fields.filter((fld) => !ADVANCED_VIDEO_KEYS.includes(fld.key)) : g.fields)" :key="f.key" class="flex items-center gap-3">
-                      <label class="w-24 shrink-0 text-right text-sm text-muted">{{ t(f.labelKey) }}</label>
-                      <UiSwitch
-                        v-if="f.type === 'bool'" size="sm"
-                        :model-value="Boolean(cfg.data[f.key])" :aria-label="t(f.labelKey)"
-                        @update:model-value="cfg.data[f.key] = $event"
-                      />
-                      <UiSelect
-                        v-else-if="f.type === 'enum'"
-                        :model-value="String(cfg.data[f.key] ?? '')" :options="f.options" size="sm" width="w-32"
-                        @update:model-value="cfg.data[f.key] = $event"
-                      />
-                      <UiInput
-                        v-else-if="f.type === 'int'" type="number" size="sm" width="w-24"
-                        :invalid="invalidKeysByTab[cfgTab]?.includes(f.key)"
-                        :model-value="String(cfgNum(f.key))"
-                        @update:model-value="setCfgNum(f.key, $event)"
-                      />
-                      <UiInput
-                        v-else size="sm" width="w-48"
-                        :model-value="String(cfg.data[f.key] ?? '')"
-                        @update:model-value="cfg.data[f.key] = $event"
-                      />
-                      <!-- 分辨率（video.0.main.w/h）在固件规则表里 reboot_required=true：改了不会立即生效，
-                           得提前说清楚，否则用户会以为保存下发就已经生效 -->
-                      <UiTag v-if="cfg.rebootRequired.includes(f.key)" color="warning" plain>⚡ {{ t('device.config.rebootRequiredBadge') }}</UiTag>
-                      <span v-if="cfg.denied.includes(f.key)" class="text-xs text-danger">{{ t('device.config.rejected') }}</span>
-                      <span v-else-if="invalidKeysByTab[cfgTab]?.includes(f.key)" class="text-xs text-danger">{{ t('device.config.outOfRange', { range: boundText(f.key) }) }}</span>
-                      <!-- 合法区间就地显示：否则用户只能靠"试一次被拒"来猜范围 -->
-                      <span v-else-if="f.type === 'int'" class="text-xs text-placeholder">{{ boundText(f.key) }}</span>
-                    </div>
+                    <ConfigFieldRow
+                      v-for="f in (g.key === 'video' ? g.fields.filter((fld) => !ADVANCED_VIDEO_KEYS.includes(fld.key)) : g.fields)"
+                      :key="f.key"
+                      :label="t(f.labelKey)" :field="f" :model-value="cfg.data[f.key]"
+                      :disabled="!!cfgFieldDisabledReason(f)" :disabled-hint="cfgFieldDisabledReason(f)"
+                      :rejected="cfg.denied.includes(f.key)"
+                      :invalid="invalidKeysByTab[cfgTab]?.includes(f.key)"
+                      :reboot-required="cfg.rebootRequired.includes(f.key)"
+                      :bound-text="f.type === 'int' ? boundText(f.key) : ''"
+                      @update:model-value="onCfgFieldInput(f, $event)"
+                    />
                   </div>
 
                   <!-- 高级参数：gop/rc 改动频率低，折叠掉以降低「编码策略」页签的单屏字段密度；
@@ -1095,33 +1112,17 @@ onMounted(load)
                   <details v-if="g.key === 'video' && g.fields.some((fld) => ADVANCED_VIDEO_KEYS.includes(fld.key))" class="border-t border-line-soft px-3 py-2">
                     <summary class="cursor-pointer text-xs text-muted">{{ t('device.config.advanced') }}</summary>
                     <div class="grid grid-cols-1 gap-x-8 gap-y-3 pt-3 md:grid-cols-2">
-                      <div v-for="f in g.fields.filter((fld) => ADVANCED_VIDEO_KEYS.includes(fld.key))" :key="f.key" class="flex items-center gap-3">
-                        <label class="w-24 shrink-0 text-right text-sm text-muted">{{ t(f.labelKey) }}</label>
-                        <UiSwitch
-                          v-if="f.type === 'bool'" size="sm"
-                          :model-value="Boolean(cfg.data[f.key])" :aria-label="t(f.labelKey)"
-                          @update:model-value="cfg.data[f.key] = $event"
-                        />
-                        <UiSelect
-                          v-else-if="f.type === 'enum'"
-                          :model-value="String(cfg.data[f.key] ?? '')" :options="f.options" size="sm" width="w-32"
-                          @update:model-value="cfg.data[f.key] = $event"
-                        />
-                        <UiInput
-                          v-else-if="f.type === 'int'" type="number" size="sm" width="w-24"
-                          :invalid="invalidKeysByTab[cfgTab]?.includes(f.key)"
-                          :model-value="String(cfgNum(f.key))"
-                          @update:model-value="setCfgNum(f.key, $event)"
-                        />
-                        <UiInput
-                          v-else size="sm" width="w-48"
-                          :model-value="String(cfg.data[f.key] ?? '')"
-                          @update:model-value="cfg.data[f.key] = $event"
-                        />
-                        <span v-if="cfg.denied.includes(f.key)" class="text-xs text-danger">{{ t('device.config.rejected') }}</span>
-                        <span v-else-if="invalidKeysByTab[cfgTab]?.includes(f.key)" class="text-xs text-danger">{{ t('device.config.outOfRange', { range: boundText(f.key) }) }}</span>
-                        <span v-else-if="f.type === 'int'" class="text-xs text-placeholder">{{ boundText(f.key) }}</span>
-                      </div>
+                      <ConfigFieldRow
+                        v-for="f in g.fields.filter((fld) => ADVANCED_VIDEO_KEYS.includes(fld.key))"
+                        :key="f.key"
+                        :label="t(f.labelKey)" :field="f" :model-value="cfg.data[f.key]"
+                        :disabled="!!cfgFieldDisabledReason(f)" :disabled-hint="cfgFieldDisabledReason(f)"
+                        :rejected="cfg.denied.includes(f.key)"
+                        :invalid="invalidKeysByTab[cfgTab]?.includes(f.key)"
+                        :reboot-required="cfg.rebootRequired.includes(f.key)"
+                        :bound-text="f.type === 'int' ? boundText(f.key) : ''"
+                        @update:model-value="onCfgFieldInput(f, $event)"
+                      />
                     </div>
                   </details>
                 </section>

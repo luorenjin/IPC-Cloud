@@ -286,6 +286,10 @@ export default {
   // ---- Motion detection ----
   'device.config.motionEnable': 'Enable detection',
   'device.config.motionSens': 'Sensitivity',
+  // ---- Reasons for disabled dependent fields (downstream fields grey out when the master switch is off) ----
+  'device.config.dependsMotion': 'Enable detection first',
+  'device.config.dependsRecord': 'Enable recording first',
+  'device.config.dependsNtp': 'Enable NTP first',
   // ---- Time sync ----
   'device.config.ntpEnable': 'Enable NTP',
   'device.config.ntp': 'NTP server',
