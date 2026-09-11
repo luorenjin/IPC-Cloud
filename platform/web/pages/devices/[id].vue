@@ -163,7 +163,9 @@ type CfgField =
   | { key: string; labelKey: string; type: 'str' }
 interface CfgGroup { key: string; tab: CfgTabKey; titleKey: string; fields: CfgField[] }
 
-const cfg = reactive({ loading: false, saving: false, data: {} as any, denied: [] as string[], supported: [] as string[] })
+// rebootRequired：固件规则表 reboot_required=true 键的静态镜像（服务端已按 supported 过滤），
+// 不是「改了就必须重启才生效」的实时判定——纯粹用来在对应字段旁挂一个「需重启生效」提示。
+const cfg = reactive({ loading: false, saving: false, data: {} as any, denied: [] as string[], supported: [] as string[], rebootRequired: [] as string[] })
 
 /** 画面调节四项（固件 0–100 整数），滑杆与数字框联动 */
 const IMAGE_SLIDERS = [
@@ -315,7 +317,8 @@ const cfgGroups: CfgGroup[] = [
         { label: t('device.config.rec_event'), value: 'event' },
         { label: t('device.config.rec_schedule'), value: 'schedule' }
       ] },
-      { key: 'record.retention_days', labelKey: 'device.config.retention', type: 'int', min: 1, max: 365 }
+      { key: 'record.retention_days', labelKey: 'device.config.retention', type: 'int', min: 1, max: 365 },
+      { key: 'record.channel', labelKey: 'device.config.recordChannel', type: 'int', min: 0, max: 2 }
     ]
   },
   {
@@ -329,7 +332,20 @@ const cfgGroups: CfgGroup[] = [
     key: 'time', tab: 'time', titleKey: 'device.config.group.time',
     fields: [
       { key: 'time.ntp.enable', labelKey: 'device.config.ntpEnable', type: 'bool' },
-      { key: 'time.ntp.server', labelKey: 'device.config.ntp', type: 'str' }
+      { key: 'time.ntp.server', labelKey: 'device.config.ntp', type: 'str' },
+      // 时区与 net.dhcp/net.ip 不同：改动不涉及断网风险，走通用可编辑渲染即可，
+      // 不需要 net.* 那种只读 + 强确认处理（见本文件下方 time 页签的只读网络区块）。
+      { key: 'time.timezone', labelKey: 'device.config.timezone', type: 'str' }
+    ]
+  },
+  {
+    // localUser.name / led.enable 说明书要求放"设备维护"页签，但该页签本身是手写模板
+    // （重启入口 + 定时重启计划），不走 cfgGroups 通用渲染——这里新增一个独立分组，
+    // 让这两个字段仍然走 CfgField 通用渲染机制，而不是在模板里手搓一遍 UI。
+    key: 'localSettings', tab: 'maintain', titleKey: 'device.config.group.localSettings',
+    fields: [
+      { key: 'localUser.name', labelKey: 'device.config.localUser', type: 'str' },
+      { key: 'led.enable', labelKey: 'device.config.led', type: 'bool' }
     ]
   }
 ]
@@ -363,6 +379,17 @@ function applyEncodePreset(p: EncodePreset) {
   setCfgNum('video.0.main.gop', String(p.gop))
 }
 
+// net.dhcp/net.ip：已进白名单（cfgKeys 可读可写），但本任务只做只读展示——
+// 现有 CfgField 类型没有只读变体，且这两项固件规则表标记为 reboot_required，改动
+// 有让设备/云端失联的风险，专属的强确认交互（DHCP 开关/IP 输入框）留给后续任务，
+// 这里不经过 CfgField/cfgGroups 通用渲染，单独走 time 页签内的手写只读区块。
+const NETWORK_READONLY_FIELDS = [
+  { key: 'net.dhcp', labelKey: 'device.config.dhcp' },
+  { key: 'net.ip', labelKey: 'device.config.ip' }
+]
+const visibleNetworkFields = computed(() => NETWORK_READONLY_FIELDS
+  .filter((f) => !cfg.supported.length || cfg.supported.includes(f.key)))
+
 // 只渲染设备确实拥有的键（supported 为空时不过滤，兼容旧后端）
 const visibleCfgGroups = computed(() => cfgGroups
   .filter((g) => g.tab === cfgTab.value)
@@ -394,6 +421,7 @@ async function loadCfg() {
     const res: any = await api.get(`/devices/${devId}/config`)
     cfg.data = res?.config || {}
     cfg.supported = res?.supported || []
+    cfg.rebootRequired = res?.rebootRequired || []
   } catch (e: any) {
     toastApiError(e, t('device.msg.configLoadFailed'))
     cfg.data = {}
@@ -843,6 +871,9 @@ onMounted(load)
                         :model-value="String(cfg.data[f.key] ?? '')"
                         @update:model-value="cfg.data[f.key] = $event"
                       />
+                      <!-- 分辨率（video.0.main.w/h）在固件规则表里 reboot_required=true：改了不会立即生效，
+                           得提前说清楚，否则用户会以为保存下发就已经生效 -->
+                      <UiTag v-if="cfg.rebootRequired.includes(f.key)" color="warning" plain>⚡ {{ t('device.config.rebootRequiredBadge') }}</UiTag>
                       <span v-if="cfg.denied.includes(f.key)" class="text-xs text-danger">{{ t('device.config.rejected') }}</span>
                       <span v-else-if="invalidKeysByTab[cfgTab]?.includes(f.key)" class="text-xs text-danger">{{ t('device.config.outOfRange', { range: boundText(f.key) }) }}</span>
                       <!-- 合法区间就地显示：否则用户只能靠"试一次被拒"来猜范围 -->
@@ -884,6 +915,21 @@ onMounted(load)
                       </div>
                     </div>
                   </details>
+                </section>
+
+                <!-- 网络（只读）：net.dhcp/net.ip 已进白名单可读可写，但本任务不开放编辑交互，
+                     见上方 visibleNetworkFields 的注释——改网络参数有让设备/云端失联的风险，
+                     强确认交互留给后续任务，这里只展示当前值 + 需重启徽标 + 说明文案 -->
+                <section v-if="cfgTab === 'time' && visibleNetworkFields.length" class="rounded-signal border border-line">
+                  <header class="border-b border-line-soft px-3 py-2 text-sm font-medium text-ink">{{ t('device.config.group.network') }}</header>
+                  <div class="space-y-3 p-3">
+                    <p class="text-xs text-placeholder">{{ t('device.config.networkHint') }}</p>
+                    <div v-for="f in visibleNetworkFields" :key="f.key" class="flex items-center gap-3">
+                      <label class="w-24 shrink-0 text-right text-sm text-muted">{{ t(f.labelKey) }}</label>
+                      <span class="text-sm text-ink">{{ f.key === 'net.dhcp' ? (cfg.data[f.key] ? t('common.enabled') : t('common.disabled')) : String(cfg.data[f.key] ?? '—') }}</span>
+                      <UiTag v-if="cfg.rebootRequired.includes(f.key)" color="warning" plain>⚡ {{ t('device.config.rebootRequiredBadge') }}</UiTag>
+                    </div>
+                  </div>
                 </section>
 
                 <!-- ③ 设备维护：定时重启计划（MGR-08）。立即重启只保留页头工具栏那一个入口，这里不再重复放一个 -->
@@ -937,7 +983,10 @@ onMounted(load)
                   </div>
                 </section>
 
-                <div v-if="cfgTab !== 'maintain'" class="flex flex-wrap items-center gap-2">
+                <!-- 「设备维护」页签本身没有通用保存按钮（重启相关是独立操作），
+                     但本任务给它加了 localSettings 这个走通用 cfgGroups 渲染的分组，
+                     所以要在有通用字段时放开这道口子，否则这两个新字段填了也存不下去 -->
+                <div v-if="cfgTab !== 'maintain' || visibleCfgGroups.length > 0" class="flex flex-wrap items-center gap-2">
                   <UiButton variant="primary" :disabled="cfg.saving || (invalidKeysByTab[cfgTab]?.length ?? 0) > 0" @click="saveCfg">{{ t('device.config.submit') }}</UiButton>
                   <UiButton @click="loadCfg">{{ t('device.config.reload') }}</UiButton>
                   <span v-if="invalidKeysByTab[cfgTab]?.length" class="text-xs text-danger">{{ t('device.msg.configOutOfRange', { n: invalidKeysByTab[cfgTab].length }) }}</span>

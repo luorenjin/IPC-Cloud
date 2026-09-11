@@ -216,6 +216,12 @@ export default {
   'device.config.group.alarm': '移动侦测',
   'device.config.group.time': '时间同步',
   'device.config.group.maintain': '设备维护',
+  // localSettings 与 maintain 语义不同：maintain 是重启相关手写区块的标题，
+  // localSettings 是走通用 cfgGroups 渲染的「本地账户/指示灯」分组标题，
+  // 两者共处同一 cfgTab（设备维护）时不能复用同一个键，否则标题会重复出现两次
+  'device.config.group.localSettings': '本地设置',
+  // net.dhcp/net.ip 只读区块的标题；与 group.time（NTP/时区）区分，共处 time 页签
+  'device.config.group.network': '网络',
   // ---- 画面信息 ----
   'device.config.preview': '画面预览',
   'device.config.previewEmpty': '暂无预览',
@@ -254,12 +260,21 @@ export default {
   'device.config.rec_event': '事件',
   'device.config.rec_schedule': '计划',
   'device.config.retention': '保留天数',
+  'device.config.recordChannel': '录像通道',
   // ---- 移动侦测 ----
   'device.config.motionEnable': '启用侦测',
   'device.config.motionSens': '侦测灵敏度',
   // ---- 时间同步 ----
   'device.config.ntpEnable': '启用 NTP',
   'device.config.ntp': 'NTP 服务器',
+  'device.config.timezone': '时区',
+  // ---- 网络（只读；net.dhcp/net.ip 改动会影响设备与云端的连接，暂不支持在此编辑）----
+  'device.config.dhcp': 'DHCP',
+  'device.config.ip': 'IP 地址',
+  'device.config.networkHint': '网络字段已在固件规则表与接入规范中定义，改动会影响设备与云端的连接，暂不支持在此编辑，仅供查看。',
+  // ---- 本地设置（设备维护页签） ----
+  'device.config.localUser': '本地账户',
+  'device.config.led': '指示灯',
   // ---- 设备维护（MGR-08）：立即重启按钮已收敛到页头工具栏，这里只保留定时重启计划 ----
   'device.config.scheduledReboot': '定时重启',
   'device.config.planOn': '已启用',
@@ -282,6 +297,9 @@ export default {
   // ---- 保存结果 ----
   'device.config.outOfRange': '超出范围（{range}）',
   'device.config.rejectedCount': '{n} 项被设备拒绝',
+  // rebootRequiredBadge：cfgRebootRequired 静态镜像命中的字段旁的提示徽标，
+  // 告知「保存下发」与「生效」不是同一时刻——不是校验错误，不复用 rejected/outOfRange 的文案
+  'device.config.rebootRequiredBadge': '需重启生效',
 
   // ---- 诊断 Tab ----
   'device.diag.run': '开始诊断',

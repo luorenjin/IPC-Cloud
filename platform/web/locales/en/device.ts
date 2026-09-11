@@ -216,6 +216,12 @@ export default {
   'device.config.group.alarm': 'Motion detection',
   'device.config.group.time': 'Time sync',
   'device.config.group.maintain': 'Maintenance',
+  // localSettings is distinct from maintain: maintain titles the hand-written reboot block,
+  // localSettings titles the cfgGroups-rendered "local account / LED" group — both live in
+  // the same cfgTab (maintain), so they can't share one key without the title repeating twice
+  'device.config.group.localSettings': 'Local Settings',
+  // Title for the net.dhcp/net.ip read-only block; distinct from group.time (NTP/timezone), same tab
+  'device.config.group.network': 'Network',
   // ---- Image ----
   'device.config.preview': 'Preview',
   'device.config.previewEmpty': 'No preview',
@@ -254,12 +260,21 @@ export default {
   'device.config.rec_event': 'Event',
   'device.config.rec_schedule': 'Schedule',
   'device.config.retention': 'Retention (days)',
+  'device.config.recordChannel': 'Recording channel',
   // ---- Motion detection ----
   'device.config.motionEnable': 'Enable detection',
   'device.config.motionSens': 'Sensitivity',
   // ---- Time sync ----
   'device.config.ntpEnable': 'Enable NTP',
   'device.config.ntp': 'NTP server',
+  'device.config.timezone': 'Time zone',
+  // ---- Network (read-only; net.dhcp/net.ip affect device/cloud connectivity, editing not supported here) ----
+  'device.config.dhcp': 'DHCP',
+  'device.config.ip': 'IP address',
+  'device.config.networkHint': 'Network fields are defined in the firmware rule table and the device onboarding spec. Changing them affects device/cloud connectivity, so editing is not supported here — view only.',
+  // ---- Local settings (Maintenance tab) ----
+  'device.config.localUser': 'Local account',
+  'device.config.led': 'Status LED',
   // ---- Maintenance (MGR-08): reboot-now now lives only in the header toolbar; this section keeps just the schedule ----
   'device.config.scheduledReboot': 'Scheduled reboot',
   'device.config.planOn': 'Enabled',
@@ -282,6 +297,10 @@ export default {
   // ---- Save result ----
   'device.config.outOfRange': 'Out of range ({range})',
   'device.config.rejectedCount': '{n} rejected by device',
+  // rebootRequiredBadge: shown next to fields matched by the cfgRebootRequired static mirror —
+  // tells the operator "pushed" and "in effect" are not the same moment; not a validation
+  // error, so it doesn't reuse the rejected/outOfRange copy
+  'device.config.rebootRequiredBadge': 'Reboot required',
 
   // ---- Diagnostics tab ----
   'device.diag.run': 'Run diagnostics',
