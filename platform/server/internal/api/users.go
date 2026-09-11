@@ -21,10 +21,10 @@ func handleListRoles(c *gin.Context) {
 func handleCreateRole(c *gin.Context) {
 	ctx := getCtx(c)
 	var req struct {
-		Name      string         `json:"name" binding:"required"`
-		Perms     models.JSONB   `json:"perms"`
-		Scope     models.JSONB   `json:"scope"`
-		CopyFrom  string         `json:"copyFrom"`
+		Name     string       `json:"name" binding:"required"`
+		Perms    models.JSONB `json:"perms"`
+		Scope    models.JSONB `json:"scope"`
+		CopyFrom string       `json:"copyFrom"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		fail(c, errs.EBadRequest)

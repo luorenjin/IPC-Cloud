@@ -131,7 +131,7 @@ func alarmEventInProject(c *gin.Context, id string) (*models.AlarmEvent, bool) {
 // projectInTenant 项目归属校验。
 //
 // 项目按**租户**判定而非按当前项目：同一租户下的多项目成员本就需要访问多个项目
-//（handleDeleteProject 的「权限按待删除的目标项目校验」也是这个道理），
+// （handleDeleteProject 的「权限按待删除的目标项目校验」也是这个道理），
 // 所以这里只切断跨租户，改动权限仍由调用方按目标项目校验。
 func projectInTenant(c *gin.Context, id string) (*models.Project, bool) {
 	ctx := getCtx(c)
