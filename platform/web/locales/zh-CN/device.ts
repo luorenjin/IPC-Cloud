@@ -232,6 +232,8 @@ export default {
   'device.config.tab.record': '录像策略',
   'device.config.tab.time': '时间与网络',
   'device.config.tab.maintain': '设备维护',
+  // 手写 tablist 的红点只是视觉加速，读屏靠这句文本得知该分组有越界值
+  'device.config.tabHasError': '该分组有超出范围的配置',
   // ---- 分组标题 ----
   'device.config.group.image': '画面信息',
   'device.config.group.video': '编码参数',
@@ -249,6 +251,9 @@ export default {
   // ---- 画面信息 ----
   'device.config.preview': '画面预览',
   'device.config.previewEmpty': '暂无预览',
+  // 预览是设备抓拍的一帧而不是实时流，必须标出时间与离线状态
+  'device.config.previewAt': '预览为设备抓拍的一帧 · {at}',
+  'device.config.previewOffline': '设备离线，显示最后一次抓拍',
   'device.config.refreshPreview': '刷新预览',
   'device.config.mirror': '画面镜像',
   'device.config.mirrorNone': '关闭',
@@ -274,6 +279,9 @@ export default {
   'device.config.presetHd': '高清',
   'device.config.presetUhd': '超清',
   'device.config.presetCustom': '自定义',
+  'device.config.presetCustomHint': '当前帧率 / 码率 / GOP 不匹配任何档位',
+  // 说清楚档位会改动哪些字段：GOP 收在折叠的「高级参数」里，不说明就是“改了但看不到”
+  'device.config.presetHint': '档位会同时设置帧率 / 码率 / GOP（GOP 在下方「高级参数」中）',
   // ---- OSD 叠加 ----
   'device.config.osdName': '通道名叠加',
   'device.config.osdTime': '时间叠加',
@@ -311,6 +319,8 @@ export default {
   'device.config.rebootEveryDay': '不选则每天',
   'device.config.rebootTime': '重启时间',
   'device.config.rebootLastFired': '上次触发：{at}',
+  // 与页面级「保存并下发」区分：这个按钮只保存定时重启计划，与配置项无关
+  'device.config.saveRebootPlan': '保存定时重启',
   'device.msg.rebootPlanLoadFailed': '加载定时重启计划失败',
   'device.msg.rebootPlanSaved': '定时重启计划已保存',
   'device.msg.configOutOfRange': '{n} 项超出合法范围，请先修正后再下发',

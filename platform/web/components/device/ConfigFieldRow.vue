@@ -22,6 +22,7 @@ export type CfgField =
   | { key: string; labelKey: string; type: 'bool'; dependsOn?: CfgDepends }
   | { key: string; labelKey: string; type: 'enum'; options: { label: string; value: string }[]; dependsOn?: CfgDepends }
   | { key: string; labelKey: string; type: 'str'; dependsOn?: CfgDepends }
+  | { key: string; labelKey: string; type: 'tz'; dependsOn?: CfgDepends }
 </script>
 
 <script setup lang="ts">
@@ -76,6 +77,26 @@ const { t } = useI18n()
 function display(v: unknown) {
   return v === undefined || v === null ? '' : String(v)
 }
+
+/**
+ * 常见时区。做成下拉是为了避免自由文本写错：固件侧 time.timezone 是自由字符串，
+ * 写错不会报错，只会静默生效成一个错的时区——属于最难发现的那类问题。
+ */
+const TZ_OPTIONS = [
+  'Asia/Shanghai', 'Asia/Hong_Kong', 'Asia/Taipei', 'Asia/Tokyo', 'Asia/Seoul', 'Asia/Singapore',
+  'Asia/Bangkok', 'Asia/Jakarta', 'Asia/Kolkata', 'Asia/Dubai',
+  'Australia/Sydney', 'Europe/London', 'Europe/Paris', 'Europe/Berlin', 'Europe/Moscow',
+  'America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles', 'America/Sao_Paulo',
+  'UTC'
+]
+const tzOptions = computed(() => {
+  const cur = display(props.modelValue)
+  const list = TZ_OPTIONS.map((v) => ({ label: v, value: v }))
+  // 设备上报了列表外的时区时必须原样保留：把它显示成空白会诱使用户"顺手改一个"，
+  // 而那恰恰会覆盖设备上原本正确的值
+  if (cur && !TZ_OPTIONS.includes(cur)) list.unshift({ label: cur, value: cur })
+  return list
+})
 </script>
 
 <template>
@@ -92,6 +113,11 @@ function display(v: unknown) {
       <UiSelect
         v-else-if="field?.type === 'enum'" :model-value="display(modelValue)" :options="field.options"
         size="sm" width="w-32" :disabled="disabled"
+        @update:model-value="emit('update:modelValue', $event)"
+      />
+      <UiSelect
+        v-else-if="field?.type === 'tz'" :model-value="display(modelValue)" :options="tzOptions"
+        size="sm" width="w-48" :disabled="disabled"
         @update:model-value="emit('update:modelValue', $event)"
       />
       <UiInput

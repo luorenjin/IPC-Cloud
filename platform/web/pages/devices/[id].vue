@@ -504,7 +504,8 @@ const cfgGroups: CfgGroup[] = [
       { key: 'time.ntp.server', labelKey: 'device.config.ntp', type: 'str', dependsOn: NTP_DEPENDS },
       // 时区与 net.dhcp/net.ip 不同：改动不涉及断网风险，走通用可编辑渲染即可，
       // 不需要 net.* 那种只读 + 强确认处理（见本文件下方 time 页签的只读网络区块）。
-      { key: 'time.timezone', labelKey: 'device.config.timezone', type: 'str' }
+      // 类型是 tz 而非 str：自由文本写错时区不会报错，只会静默生效成错的时区。
+      { key: 'time.timezone', labelKey: 'device.config.timezone', type: 'tz' }
     ]
   },
   {
@@ -544,19 +545,34 @@ const encodePresets = computed<EncodePreset[]>(() => [
   { key: 'hd', label: t('device.config.presetHd'), fps: 25, kbps: 2048, gop: 50 },
   { key: 'uhd', label: t('device.config.presetUhd'), fps: 30, kbps: 4096, gop: 60 }
 ])
-/** 三项代管字段（fps/kbps/gop）都命中同一档才高亮该 chip；只要其中一项被手动改动就不再匹配
- * 任何预设——不去猜用户改动后的组合是否“恰好”等于某个预设之外的合理值，避免给出误导性的选中态。 */
+/** 代管键 → 档位字段的映射：高亮判定与实际写入共用一份，避免两处各写一遍而跑偏 */
+const GOVERNED_FIELD: Record<string, keyof EncodePreset> = {
+  'video.0.main.fps': 'fps',
+  'video.0.main.kbps': 'kbps',
+  'video.0.main.gop': 'gop'
+}
+/**
+ * 只拿设备确实支持的键来比对：设备没有 gop 时它的读回值是 0，
+ * 把它算进去会让任何档位都匹配不上，芯片永远显示「自定义」。
+ */
+const governedKeys = computed(() => ENCODE_PRESET_GOVERNED_KEYS
+  .filter((k) => !cfg.supported.length || cfg.supported.includes(k)))
+/** 代管字段全部命中同一档才高亮该 chip；有一项被手动改动就不再匹配任何预设，回到「自定义」 */
 const activeEncodePreset = computed(() => {
-  const fps = cfgNum('video.0.main.fps')
-  const kbps = cfgNum('video.0.main.kbps')
-  const gop = cfgNum('video.0.main.gop')
-  return encodePresets.value.find((p) => p.fps === fps && p.kbps === kbps && p.gop === gop)?.key || 'custom'
+  const keys = governedKeys.value
+  if (!keys.length) return 'custom'
+  return encodePresets.value.find((p) => keys.every((k) => cfgNum(k) === p[GOVERNED_FIELD[k]]))?.key || 'custom'
 })
 function applyEncodePreset(p: EncodePreset) {
-  setCfgNum('video.0.main.fps', String(p.fps))
-  setCfgNum('video.0.main.kbps', String(p.kbps))
-  setCfgNum('video.0.main.gop', String(p.gop))
+  // 不写设备不支持的键：否则点一下档位就会在下发时多出一条「被设备拒绝」，
+  // 把一个纯前端的快捷操作变成误导用户报错
+  for (const k of governedKeys.value) setCfgNum(k, String(p[GOVERNED_FIELD[k]]))
 }
+/** 只有 GOP 也在设备支持范围内时，提示里提 GOP 才是对的 */
+const presetHasGop = computed(() => governedKeys.value.includes('video.0.main.gop'))
+
+/** 「编码格式」是主网格里唯一的单值语义字段：让它独占一行，其余四项刚好两两成行，不留孤格 */
+const VIDEO_FULL_ROW_KEYS = ['video.0.main.codec']
 
 // net.dhcp/net.ip：已进白名单（cfgKeys 可读可写），但本任务只做只读展示——
 // 现有 CfgField 类型没有只读变体，且这两项固件规则表标记为 reboot_required，改动
@@ -577,7 +593,13 @@ const visibleCfgGroups = computed(() => cfgGroups
 
 // 画面预览：走 /channels/:id/snapshot（IDP 由设备上传一帧）。
 // 调亮度/对比度时有个参照图才谈得上“调”，否则只能盲改数字。
-const preview = reactive({ src: '', loading: false })
+const preview = reactive({ src: '', loading: false, at: 0 })
+/**
+ * 预览只是一次抓拍而不是实时流：必须把「什么时候抓的」和「设备是否在线」说出来，
+ * 否则用户会以为自己看到的是当前画面。
+ */
+const previewStale = computed(() => dev.value?.status !== 'online')
+const previewAtText = computed(() => (preview.at ? ago(preview.at, t) : EMPTY))
 async function loadPreview() {
   const ch = channels.value[0]
   if (!ch?.id) return
@@ -586,6 +608,7 @@ async function loadPreview() {
   try {
     const res: any = await api.post(`/channels/${ch.id}/snapshot`)
     preview.src = res?.url || fallback
+    preview.at = Date.now()
   } catch {
     // 设备不在线/不支持抓图时退到已有封面，不弹错抢配置页的注意力
     preview.src = preview.src || fallback
@@ -744,6 +767,26 @@ const router = useRouter()
 function selectCfgTab(v: CfgTabKey) {
   cfgTab.value = v
   router.replace({ query: { ...route.query, tab: v } })
+}
+
+/**
+ * 手写 tablist 就得自己实现键盘行为：roving tabindex + ←/→/Home/End。
+ * 只写 role="tab" 而不给键盘路径，对键盘与读屏用户而言这些页签是点不到的。
+ */
+function onCfgTabKeydown(e: KeyboardEvent, cur: CfgTabKey) {
+  const keys = CFG_TAB_KEYS
+  const i = keys.indexOf(cur)
+  let next = -1
+  if (e.key === 'ArrowRight') next = (i + 1) % keys.length
+  else if (e.key === 'ArrowLeft') next = (i - 1 + keys.length) % keys.length
+  else if (e.key === 'Home') next = 0
+  else if (e.key === 'End') next = keys.length - 1
+  if (next < 0) return
+  e.preventDefault()
+  const target = keys[next]
+  selectCfgTab(target)
+  // 焦点要跟着走：否则按方向键后焦点会掉在按钮外面，下一次按键就失效了
+  nextTick(() => document.getElementById(`cfg-tab-${target}`)?.focus())
 }
 
 async function rebootDevice() {
@@ -1101,15 +1144,28 @@ onMounted(load)
                 <div role="tablist" class="inline-flex max-w-xl flex-wrap items-center gap-0.5 rounded-chrome border border-line bg-zone p-0.5">
                   <button
                     v-for="item in cfgTabItems" :key="item.value" type="button" role="tab"
+                    :id="`cfg-tab-${item.value}`"
                     class="relative rounded-chrome px-3 py-1 text-xs outline-none ipc-focus-ring transition-colors"
                     :class="cfgTab === item.value ? 'bg-primary text-white shadow-sm' : 'text-muted hover:text-ink'"
                     :aria-selected="cfgTab === item.value"
+                    :aria-controls="`cfg-panel-${item.value}`"
+                    :tabindex="cfgTab === item.value ? 0 : -1"
+                    :aria-describedby="invalidKeysByTab[item.value]?.length ? `cfg-tab-err-${item.value}` : undefined"
                     @click="selectCfgTab(item.value)"
+                    @keydown="onCfgTabKeydown($event, item.value)"
                   >
                     {{ item.label }}
                     <span v-if="invalidKeysByTab[item.value]?.length" class="absolute -right-0.5 -top-0.5 h-1.5 w-1.5 rounded-full bg-danger" />
+                    <!-- 红点只是视觉加速：读屏用户靠这段文本得知“该分组有越界值”，不能只靠颜色 -->
+                    <span
+                      v-if="invalidKeysByTab[item.value]?.length"
+                      :id="`cfg-tab-err-${item.value}`" class="sr-only"
+                    >{{ t('device.config.tabHasError') }}</span>
                   </button>
                 </div>
+
+                <!-- 内容区是这块 tablist 的 tabpanel：与 role="tab" 配对后，读屏才能把“选中项”与“内容”关联起来 -->
+                <div :id="`cfg-panel-${cfgTab}`" role="tabpanel" :aria-labelledby="`cfg-tab-${cfgTab}`" class="space-y-4">
 
                 <!-- ① 画面信息：预览 + 镜像 + 四项滑杆 -->
                 <section v-if="cfgTab === 'image'" class="rounded-signal border border-line">
@@ -1120,9 +1176,16 @@ onMounted(load)
                     </UiButton>
                   </header>
                   <div class="grid gap-4 p-3 md:grid-cols-[minmax(0,320px)_1fr]">
-                    <div class="flex h-44 items-center justify-center overflow-hidden rounded-signal border border-line bg-zone">
-                      <img v-if="preview.src" :src="preview.src" :style="previewStyle" class="block h-full w-full object-contain" :alt="t('device.config.preview')">
-                      <span v-else class="text-xs text-placeholder">{{ t('device.config.previewEmpty') }}</span>
+                    <div>
+                      <!-- aspect-video 而不是固定高度：主码流多为 16:9，写死 h-44 会留黑边或裁掉画面 -->
+                      <div class="flex aspect-video items-center justify-center overflow-hidden rounded-signal border border-line bg-zone">
+                        <img v-if="preview.src" :src="preview.src" :style="previewStyle" class="block h-full w-full object-contain" :alt="t('device.config.preview')">
+                        <span v-else class="text-xs text-placeholder">{{ t('device.config.previewEmpty') }}</span>
+                      </div>
+                      <!-- 抓拍不是实时流：把“什么时候抓的”与“设备此刻是否在线”如实说出来 -->
+                      <p v-if="preview.src" class="mt-1.5 text-xs text-placeholder">
+                        {{ previewStale ? t('device.config.previewOffline') : t('device.config.previewAt', { at: previewAtText }) }}
+                      </p>
                     </div>
                     <div class="space-y-3">
                       <div class="flex items-center gap-3">
@@ -1136,7 +1199,6 @@ onMounted(load)
                         :rejected="cfg.denied.includes(f.key)"
                         :invalid="invalidKeysByTab[cfgTab]?.includes(f.key)"
                         :invalid-text="t('device.config.outOfRange', { range: boundText(f.key) })"
-                        :hint="f.key === 'image.sharpness' ? t('device.config.sharpnessHint') : ''"
                       >
                         <UiSlider
                           class="max-w-52 flex-1" :model-value="cfgNum(f.key)" :min="f.min" :max="f.max"
@@ -1148,6 +1210,12 @@ onMounted(load)
                           @update:model-value="setCfgNum(f.key, $event)"
                         />
                       </ConfigFieldRow>
+                      <!-- 锐度没有对应的原生 CSS 效果，如实告知而不是假装模拟了锐化：
+                           单独成行，避免与越界/拒绝提示抢同一位置导致行宽参差 -->
+                      <p
+                        v-if="cfg.supported.length === 0 || cfg.supported.includes('image.sharpness')"
+                        class="text-xs text-placeholder md:pl-[4.75rem]"
+                      >{{ t('device.config.sharpnessHint') }}</p>
                     </div>
                   </div>
                 </section>
@@ -1157,24 +1225,33 @@ onMounted(load)
                   <header class="border-b border-line-soft px-3 py-2 text-sm font-medium text-ink">{{ t(g.titleKey) }}</header>
 
                   <!-- 画质档位 chips：只代管 fps/kbps/gop 三项，w/h/codec/rc 不在预设范围内；
-                       设备若不支持这三项（supported 已把它们过滤出 g.fields），chips 也没有意义，不渲染 -->
-                  <div v-if="g.key === 'video' && g.fields.some((fld) => ENCODE_PRESET_GOVERNED_KEYS.includes(fld.key))" class="flex flex-wrap items-center gap-2 border-b border-line-soft px-3 py-2.5">
-                    <button
-                      v-for="p in encodePresets" :key="p.key" type="button"
-                      class="rounded-chrome border px-2.5 py-1 text-xs transition-colors"
-                      :class="activeEncodePreset === p.key ? 'border-primary bg-primary-soft text-primary' : 'border-line text-muted hover:border-primary'"
-                      @click="applyEncodePreset(p)"
-                    >{{ p.label }}</button>
-                    <span
-                      class="rounded-chrome border px-2.5 py-1 text-xs"
-                      :class="activeEncodePreset === 'custom' ? 'border-primary bg-primary-soft text-primary' : 'border-line text-placeholder'"
-                    >{{ t('device.config.presetCustom') }}</span>
+                       设备不支持任何一项代管字段时，chips 也没有意义，不渲染 -->
+                  <div v-if="g.key === 'video' && governedKeys.length" class="border-b border-line-soft px-3 py-2.5">
+                    <div class="flex flex-wrap items-center gap-2">
+                      <button
+                        v-for="p in encodePresets" :key="p.key" type="button"
+                        class="rounded-chrome border px-2.5 py-1 text-xs transition-colors"
+                        :class="activeEncodePreset === p.key ? 'border-primary bg-primary-soft text-primary' : 'border-line text-muted hover:border-primary'"
+                        @click="applyEncodePreset(p)"
+                      >{{ p.label }}</button>
+                      <!-- 「自定义」是状态而不是可点操作：写成虚线框并且只在真的处于该状态时出现，
+                           避免它和可选档位长得一样却点不动 -->
+                      <span
+                        v-if="activeEncodePreset === 'custom'"
+                        class="rounded-chrome border border-dashed border-line px-2.5 py-1 text-xs text-placeholder"
+                        :title="t('device.config.presetCustomHint')"
+                      >{{ t('device.config.presetCustom') }}</span>
+                    </div>
+                    <!-- 档位会同时改帧率/码率/GOP，而 GOP 收在折叠的「高级参数」里：
+                         不说清楚就变成“改了但看不到”的静默修改 -->
+                    <p v-if="presetHasGop" class="mt-1.5 text-xs text-placeholder">{{ t('device.config.presetHint') }}</p>
                   </div>
 
                   <div class="grid grid-cols-1 gap-x-8 gap-y-3 p-3 md:grid-cols-2">
                     <ConfigFieldRow
                       v-for="f in (g.key === 'video' ? g.fields.filter((fld) => !ADVANCED_VIDEO_KEYS.includes(fld.key)) : g.fields)"
                       :key="f.key"
+                      :class="VIDEO_FULL_ROW_KEYS.includes(f.key) ? 'md:col-span-2' : ''"
                       :label="t(f.labelKey)" :field="f" :model-value="cfg.data[f.key]"
                       :disabled="!!cfgFieldDisabledReason(f)" :disabled-hint="cfgFieldDisabledReason(f)"
                       :rejected="cfg.denied.includes(f.key)"
@@ -1226,8 +1303,18 @@ onMounted(load)
                   <div class="space-y-3 p-3">
                     <div class="flex items-center gap-3">
                       <label class="w-24 shrink-0 text-right text-sm text-muted">{{ t('device.config.scheduledReboot') }}</label>
+                      <!-- 禁用必须给出原因：与页头重启按钮同一个 Tooltip 文案，
+                           否则用户只看到一个点不动的开关，不知道是自己没权限还是设备不支持 -->
+                      <UiTooltip v-if="!canReboot" :label="t('device.detail.rebootUnsupported')">
+                        <span>
+                          <UiSwitch
+                            v-model="rebootPlan.enabled" size="sm" :disabled="true"
+                            :aria-label="t('device.config.scheduledReboot')"
+                          />
+                        </span>
+                      </UiTooltip>
                       <UiSwitch
-                        v-model="rebootPlan.enabled" size="sm" :disabled="!canReboot"
+                        v-else v-model="rebootPlan.enabled" size="sm"
                         :aria-label="t('device.config.scheduledReboot')"
                       />
                       <span class="text-xs text-placeholder">
@@ -1254,20 +1341,11 @@ onMounted(load)
                     </template>
                     <div class="flex flex-wrap items-center gap-3">
                       <span class="hidden w-24 shrink-0 md:block" />
-                      <UiButton variant="primary" size="sm" :loading="rebootPlan.saving" @click="saveRebootPlan">{{ t('common.save') }}</UiButton>
+                      <UiButton variant="primary" size="sm" :loading="rebootPlan.saving" @click="saveRebootPlan">{{ t('device.config.saveRebootPlan') }}</UiButton>
                       <span v-if="rebootPlan.lastFiredKey" class="text-xs text-placeholder">
                         {{ t('device.config.rebootLastFired', { at: rebootPlan.lastFiredKey }) }}
                       </span>
                     </div>
-                  </div>
-                </section>
-
-                <!-- 恢复出厂设置单独成块并用危险配色：与常规维护操作物理隔离，降低误触概率 -->
-                <section v-if="cfgTab === 'maintain'" class="rounded-signal border border-danger/30">
-                  <header class="border-b border-danger/20 px-3 py-2 text-sm font-medium text-danger">{{ t('device.config.factoryReset') }}</header>
-                  <div class="flex flex-wrap items-center gap-3 p-3">
-                    <UiButton variant="danger" size="sm" @click="askFactoryReset"><Icon name="alert-triangle" :size="13" />{{ t('device.config.factoryReset') }}</UiButton>
-                    <span class="text-xs text-placeholder">{{ t('device.config.factoryResetDesc') }}</span>
                   </div>
                 </section>
 
@@ -1286,6 +1364,17 @@ onMounted(load)
                   <span v-else-if="cfg.denied.length" class="text-xs text-danger">{{ t('device.config.rejectedCount', { n: cfg.denied.length }) }}</span>
                   <!-- 没有任何反馈时按钮是灰的，用户会以为是权限/设备问题；明确告知“没改过” -->
                   <span v-else-if="isCfgDirty" class="text-xs text-placeholder">{{ t('device.config.unsaved') }}</span>
+                </div>
+
+                <!-- 恢复出厂设置排在保存栏之后并用危险配色：破坏性操作不该紧贴常规保存按钮，
+                     否则手顺点两下就可能从“保存亮度”滑到“清空设备” -->
+                <section v-if="cfgTab === 'maintain'" class="rounded-signal border border-danger/30">
+                  <header class="border-b border-danger/20 px-3 py-2 text-sm font-medium text-danger">{{ t('device.config.factoryReset') }}</header>
+                  <div class="flex flex-wrap items-center gap-3 p-3">
+                    <UiButton variant="danger" size="sm" @click="askFactoryReset"><Icon name="alert-triangle" :size="13" />{{ t('device.config.factoryReset') }}</UiButton>
+                    <span class="text-xs text-placeholder">{{ t('device.config.factoryResetDesc') }}</span>
+                  </div>
+                </section>
                 </div>
               </template>
             </div>

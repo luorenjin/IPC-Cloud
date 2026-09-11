@@ -233,6 +233,8 @@ export default {
   'device.config.tab.record': 'Recording',
   'device.config.tab.time': 'Time & Network',
   'device.config.tab.maintain': 'Maintenance',
+  // The red dot on the hand-rolled tablist is only a visual shortcut; screen readers rely on this text
+  'device.config.tabHasError': 'This group has out-of-range settings',
   // ---- Group titles ----
   'device.config.group.image': 'Image',
   'device.config.group.video': 'Encoding',
@@ -250,6 +252,9 @@ export default {
   // ---- Image ----
   'device.config.preview': 'Preview',
   'device.config.previewEmpty': 'No preview',
+  // The preview is a single frame captured from the device, not a live stream
+  'device.config.previewAt': 'Preview is a frame captured from the device · {at}',
+  'device.config.previewOffline': 'Device offline — showing the last captured frame',
   'device.config.refreshPreview': 'Refresh',
   'device.config.mirror': 'Mirror',
   'device.config.mirrorNone': 'Off',
@@ -275,6 +280,9 @@ export default {
   'device.config.presetHd': 'HD',
   'device.config.presetUhd': 'UHD',
   'device.config.presetCustom': 'Custom',
+  'device.config.presetCustomHint': 'The current frame rate / bitrate / GOP do not match any preset',
+  // State which fields a preset touches: GOP lives in the collapsed advanced section
+  'device.config.presetHint': 'A preset sets frame rate, bitrate and GOP together (GOP is under Advanced below)',
   // ---- OSD overlay ----
   'device.config.osdName': 'Channel name',
   'device.config.osdTime': 'Timestamp',
@@ -312,6 +320,8 @@ export default {
   'device.config.rebootEveryDay': 'Empty means every day',
   'device.config.rebootTime': 'Time',
   'device.config.rebootLastFired': 'Last fired: {at}',
+  // Distinct from the page-level "Save and push": this button only saves the reboot schedule
+  'device.config.saveRebootPlan': 'Save reboot schedule',
   'device.msg.rebootPlanLoadFailed': 'Could not load the reboot schedule',
   'device.msg.rebootPlanSaved': 'Reboot schedule saved',
   'device.msg.configOutOfRange': '{n} value(s) out of range — fix them before pushing',
