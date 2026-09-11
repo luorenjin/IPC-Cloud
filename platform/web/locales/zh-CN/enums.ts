@@ -44,6 +44,8 @@ export default {
   // ---- 通道推流状态 ----
   'enum.streamStatus.live': '推流中',
   'enum.streamStatus.idle': '未推流',
+  'enum.streamStatus.starting': '启动中',
+  'enum.streamStatus.error': '流错误',
 
   // ---- 操作结果（审计日志） ----
   'enum.result.success': '成功',

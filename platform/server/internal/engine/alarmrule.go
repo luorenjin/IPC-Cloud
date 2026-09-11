@@ -131,21 +131,9 @@ func scheduleActiveAt(schedule models.JSONB, at time.Time) bool {
 // projectLocation 取项目时区，用于布防时段判定。
 //
 // 必须按项目时区而非服务器本地时区求值，否则跨时区部署的布防时段会整体偏移。
-// 解析失败回退 Asia/Shanghai 并记录，绝不因时区问题丢事件。
+// 解析与回退规则统一收敛在 store.ProjectLocation，避免多处各写一套。
 func projectLocation(projectID string) *time.Location {
-	if projectID != "" {
-		var p models.Project
-		if store.DB.First(&p, "id = ?", projectID).Error == nil && p.TZ != "" {
-			if loc, err := time.LoadLocation(p.TZ); err == nil {
-				return loc
-			}
-			log.Printf("[alarm] 项目 %s 时区 %q 解析失败，回退 Asia/Shanghai", projectID, p.TZ)
-		}
-	}
-	if loc, err := time.LoadLocation("Asia/Shanghai"); err == nil {
-		return loc
-	}
-	return time.UTC
+	return store.ProjectLocation(projectID)
 }
 
 // channelRuleAllows 设备侧事件的通道级规则判定（ALM-02）。

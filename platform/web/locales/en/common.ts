@@ -34,6 +34,7 @@ export default {
   'nav.searchPlaceholder': 'Search devices or channels',
   'nav.nodeHealthy': 'All media nodes online',
   'nav.nodeUnhealthy': 'Some media nodes are offline',
+  'nav.nodeEntry': 'View media nodes',
   'nav.unreadCount': '{n} unread',
   'nav.pendingCount': '{n} pending',
 

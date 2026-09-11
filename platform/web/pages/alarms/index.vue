@@ -1,12 +1,11 @@
 <script setup lang="ts">
 // 消息中心（ALM-06/07）：告警列表 / 筛选 / 导出 / 详情抽屉（快照+回放此刻）/ 实时提醒 / 全部已读
 const api = useApi()
+const route = useRoute()
 const toast = useToast()
 const { t } = useI18n()
 
 // 类型中文映射见 utils/enums.ts（全站唯一来源）
-const DEVICE_KINDS = DEVICE_ALARM_KINDS
-const PLATFORM_KINDS = ['device_offline', 'node_offline', 'stream_lost', 'disk_full']
 
 const fmt = (ts: any) => new Date(Number(ts)).toLocaleString('zh-CN', { hour12: false })
 // 类型名与级别汉化（A16：不显示英文 warn/info）统一取自 utils/enums.ts
@@ -56,20 +55,50 @@ async function load() {
     const params: any = { page: page.value, pageSize: pageSize.value }
     if (levelFilter.value) params.level = levelFilter.value
     if (onlyUnread.value) params.read = 'false' // 服务端: read=false → 未读
+    // tab 过滤必须交给服务端（scope）。前端只裁当前页会让 total/分页仍按全量算，
+    // 结果是页码数虚高，翻到后面全是空页。
+    if (tab.value === 'device' || tab.value === 'platform') params.scope = tab.value
+    if (pendingFocus.value) params.focus = pendingFocus.value
     const res: any = await api.get('/alarms', params)
-    let list: any[] = res.items || []
-    // 前端按 tab 分类过滤
-    if (tab.value === 'device') list = list.filter((i) => DEVICE_KINDS.includes(i.kind))
-    else if (tab.value === 'platform') list = list.filter((i) => PLATFORM_KINDS.includes(i.kind))
-    items.value = list
+    items.value = res.items || []
     total.value = res.total || 0
     unread.value = res.unread || 0
+    // 深链定位：跳到目标所在页后再拉一次；pendingFocus 只用于定位，highlightId 负责高亮
+    if (pendingFocus.value && res.focusPage && res.focusPage !== page.value) {
+      page.value = res.focusPage
+      pendingFocus.value = ''
+      await load()
+      return
+    }
+    pendingFocus.value = ''
   } catch (e: any) {
     toastApiError(e, t('alarm.msg.loadListFailed'))
   } finally {
     loading.value = false
   }
 }
+
+// 深链定位：/alarms?focus=<id>（总览页「最近告警」点击）——跳到该条所在页并高亮
+const highlightId = ref('')
+const pendingFocus = ref('')
+
+async function scrollToFocus() {
+  if (!highlightId.value) return
+  await nextTick()
+  const el = document.querySelector(`[data-row-key="${CSS.escape(highlightId.value)}"]`)
+  el?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+}
+
+// 顶栏铃铛在"已处于消息中心"时点击会递增该信号：同路由导航不会重新挂载页面，
+// 若不响应，用户点铃铛只会看到"毫无反应"。这里回到最新（第 1 页 + 滚到顶）。
+const messageCenterTick = useState('messageCenterTick', () => 0)
+watch(messageCenterTick, async () => {
+  page.value = 1
+  highlightId.value = ''
+  await load()
+  await nextTick()
+  document.getElementById('ipc-main')?.scrollTo({ top: 0, behavior: 'smooth' })
+})
 
 // 搜索关键字 + 时间范围：对当前页数据做前端过滤
 const shownItems = computed(() => {
@@ -187,9 +216,16 @@ useWs((ev: any) => {
   load() // 未读计数由 layout 的共享 state 统一递增，这里仅刷新列表
 })
 
-onMounted(() => {
+onMounted(async () => {
+  // 深链定位：先把目标 id 落下来，再由 load() 解析出所在页码并跳转 + 高亮
+  const f = route.query.focus
+  if (typeof f === 'string' && f) {
+    highlightId.value = f
+    pendingFocus.value = f
+  }
   loadBase()
-  load()
+  await load()
+  await scrollToFocus()
 })
 </script>
 
@@ -244,11 +280,12 @@ onMounted(() => {
           <!-- 告警列表 -->
           <UiTable
             :columns="[
-              { key: 'bar', label: '', width: '28px', align: 'center', ellipsis: false },
               { key: 'snapshot', label: t('alarm.list.colSnapshot'), width: '70px', align: 'center' },
               { key: 'ts', label: t('alarm.list.colTime'), width: '160px' },
-              { key: 'kind', label: t('alarm.list.colKind'), width: '110px' },
-              { key: 'level', label: t('alarm.list.colLevel'), width: '80px' },
+              // kind/level 的显示值是汉化后的文案，与原始字段（motion/warn）不同，
+              // 故关闭 ellipsis：否则 UiTable 会把原始英文值当成 title 悬浮提示（违反 A16）。
+              { key: 'kind', label: t('alarm.list.colKind'), width: '110px', ellipsis: false },
+              { key: 'level', label: t('alarm.list.colLevel'), width: '92px', ellipsis: false },
               { key: 'device', label: t('alarm.list.colDevice'), width: '140px' },
               { key: 'channel', label: t('alarm.list.colChannel'), width: '130px' },
               { key: 'content', label: t('alarm.list.colContent'), width: '200px' },
@@ -256,10 +293,8 @@ onMounted(() => {
               { key: 'ops', label: t('common.action'), width: '80px', align: 'center', ellipsis: false }
             ]"
             :rows="shownItems" :loading="loading" :row-key="'id'" :empty="t('alarm.list.empty')"
+            :highlight="highlightId"
           >
-            <template #bar="{ row }">
-              <span class="mx-auto block h-5 w-1 rounded-full" :class="levelBarClass(row.level)" />
-            </template>
             <template #snapshot="{ row }">
               <button
                 v-if="row.snapshotUrl" type="button" class="mx-auto block rounded-signal"
@@ -271,8 +306,14 @@ onMounted(() => {
             </template>
             <template #ts="{ row }">{{ fmt(row.ts) }}</template>
             <template #kind="{ row }">{{ kindName(row.kind) }}</template>
+            <!-- 级别 = 色条 + 文字标签，两者编码同一件事（红=高危 / 黄=中危 / 蓝=低危）。
+                 色条是给长列表快速扫视用的，故 aria-hidden；语义由文字标签承载，不单独依赖颜色。
+                 此前色条独占一列且表头为空、无 title，既看不出含义又与级别重复。 -->
             <template #level="{ row }">
-              <UiTag :color="levelInfo(row.level).color as any">{{ t(levelInfo(row.level).labelKey) }}</UiTag>
+              <span class="flex items-center gap-1.5">
+                <span class="h-5 w-1 shrink-0 rounded-full" :class="levelBarClass(row.level)" aria-hidden="true" />
+                <UiTag :color="levelInfo(row.level).color as any">{{ t(levelInfo(row.level).labelKey) }}</UiTag>
+              </span>
             </template>
             <template #device="{ row }">{{ deviceMap[row.deviceId] || row.deviceId || '—' }}</template>
             <template #channel="{ row }">{{ channelMap[row.channelId] || row.channelId || '—' }}</template>

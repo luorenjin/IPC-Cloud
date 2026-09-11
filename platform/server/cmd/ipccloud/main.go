@@ -53,6 +53,7 @@ func main() {
 	api.SetEngine(eng)
 	eng.SubscribeEvents()
 	eng.StartRecordRunner()
+	eng.StartRebootRunner()
 	eng.StartNodeStatsRunner()
 
 	// 适配器

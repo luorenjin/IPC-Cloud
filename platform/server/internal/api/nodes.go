@@ -140,18 +140,45 @@ func handleNodeStreams(c *gin.Context) {
 		ok(c, gin.H{"items": items})
 		return
 	}
+	// ZLM 对同一路流会按输出协议（ts/rtmp/fmp4/rtsp）各返回一条记录，必须按 app/stream
+	// 合并：否则详情列表出现 N 行同名流、节点"流数"被放大数倍。观看数按协议累加
+	// （不同协议的观众互不重叠），码率取源流一路即可（各协议上报的是同一个源速率）。
+	type streamRow struct {
+		app, stream, channel string
+		originType           any
+		startedAt            int64
+		viewers              int
+		bitrate              int64
+		aliveSecond          any
+	}
+	order := make([]string, 0, len(list))
+	byKey := make(map[string]*streamRow, len(list))
 	for _, m := range list {
 		app, _ := m["app"].(string)
 		stream, _ := m["stream"].(string)
-		viewers := int(zf(m["readerCount"]))
-		bitrate := int64(zf(m["bytesSpeed"])) * 8 // B/s → bit/s
-		ch := ""
-		if s, okk := byStream[app+"/"+stream]; okk {
-			ch = s.ChannelID
+		key := app + "/" + stream
+		row, exists := byKey[key]
+		if !exists {
+			row = &streamRow{app: app, stream: stream,
+				originType: m["originTypeStr"], aliveSecond: m["aliveSecond"]}
+			if s, okk := byStream[key]; okk {
+				row.channel = s.ChannelID
+				row.startedAt = s.StartedAt
+			}
+			byKey[key] = row
+			order = append(order, key)
 		}
-		items = append(items, gin.H{"id": stream, "app": app, "stream": stream,
-			"channel": ch, "viewers": viewers, "bitrate": bitrate,
-			"originType": m["originTypeStr"], "aliveSecond": m["aliveSecond"]})
+		row.viewers += int(zf(m["readerCount"]))
+		if row.bitrate == 0 {
+			row.bitrate = int64(zf(m["bytesSpeed"])) * 8 // B/s → bit/s
+		}
+	}
+	for _, key := range order {
+		row := byKey[key]
+		items = append(items, gin.H{"id": row.stream, "app": row.app, "stream": row.stream,
+			"channel": row.channel, "viewers": row.viewers, "bitrate": row.bitrate,
+			"originType": row.originType, "aliveSecond": row.aliveSecond,
+			"startedAt": row.startedAt})
 	}
 	ok(c, gin.H{"items": items})
 }

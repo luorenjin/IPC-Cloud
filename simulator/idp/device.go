@@ -350,14 +350,14 @@ func (d *Device) handleSnapshot(env cmdMsg, data map[string]any) {
 		return
 	}
 	defer resp.Body.Close()
+	// 平台 REST 的成功响应是「把 data 平铺在顶层」（api/common.go 的 ok()），
+	// 不是 {code,data:{...}}——只有失败才回 {code,msg,suggest}。
+	// 按嵌套结构解会静默拿到空 url，表现为「抓图成功但图片是空的」。
 	var r struct {
-		Code int `json:"code"`
-		Data struct {
-			URL string `json:"url"`
-		} `json:"data"`
+		URL string `json:"url"`
 	}
 	_ = json.NewDecoder(resp.Body).Decode(&r)
-	d.ack(env, 0, "", map[string]any{"url": r.Data.URL})
+	d.ack(env, 0, "", map[string]any{"url": r.URL})
 }
 
 // startPush 启动 RTMP 推流。

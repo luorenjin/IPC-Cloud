@@ -29,6 +29,7 @@ func Open(cfg *config.Config) *gorm.DB {
 		&models.Device{}, &models.Channel{},
 		&models.MediaNode{}, &models.StreamSession{},
 		&models.RecordTemplate{}, &models.RecordPlan{}, &models.RecordIndex{},
+		&models.RebootPlan{},
 		&models.AlarmTemplate{}, &models.AlarmRule{}, &models.AlarmEvent{},
 		&models.AuditLog{}, &models.Task{},
 		&models.IdpPreadd{}, &models.GbWhitelist{}, &models.GbPending{},

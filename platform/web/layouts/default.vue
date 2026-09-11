@@ -154,6 +154,60 @@ const collapsed = computed(() => sidebarMini.value && !isNarrow.value)
 
 const expanded = reactive<Record<string, boolean>>({})
 function toggleGroup(label: string) { expanded[label] = !expanded[label] }
+
+/* ---------------- mini 档的二级菜单浮层 ----------------
+ * 收起态（56px）里二级菜单无法内联展开：nav 是 overflow-y-auto，内联展开会被直接裁掉，
+ * 更关键的是原来"点击分组头 = 进入首个子项"的写法让人根本选不到其它子项。
+ * 这里改为 fixed 定位的浮层：nav 的 overflow 会裁剪 absolute 子元素，而 fixed 相对视口
+ * 定位不受影响（宽屏态 aside 上没有 transform，不会形成包含块）。
+ * 落点在打开时按分组头的 rect 计算；滚动/缩放/切路由时直接关闭，避免浮层与按钮错位。
+ */
+const flyoutLabel = ref('')
+const flyoutPos = reactive({ top: 0, left: 0 })
+let flyoutCloseTimer: ReturnType<typeof setTimeout> | null = null
+
+function cancelFlyoutClose() {
+  if (flyoutCloseTimer) { clearTimeout(flyoutCloseTimer); flyoutCloseTimer = null }
+}
+function closeFlyout() {
+  cancelFlyoutClose()
+  flyoutLabel.value = ''
+}
+/** 鼠标从分组头移到浮层之间有一小段空隙，延迟关闭以免浮层被"闪断" */
+function scheduleFlyoutClose() {
+  cancelFlyoutClose()
+  flyoutCloseTimer = setTimeout(() => { flyoutCloseTimer = null; flyoutLabel.value = '' }, 120)
+}
+function openFlyout(label: string, el?: HTMLElement | null) {
+  if (!collapsed.value) return
+  cancelFlyoutClose()
+  if (el) {
+    const r = el.getBoundingClientRect()
+    flyoutPos.top = r.top
+    flyoutPos.left = r.right + 6
+  }
+  flyoutLabel.value = label
+}
+function onGroupClick(m: any, e: MouseEvent) {
+  if (!collapsed.value) { toggleGroup(m.label); return }
+  // 鼠标用户已由 hover 打开时，点击不再切换，否则会"悬停打开 → 点击立刻关掉"
+  if (flyoutLabel.value === m.label) return
+  openFlyout(m.label, e.currentTarget as HTMLElement)
+}
+/** 焦点离开整个分组（含浮层）才关闭；在按钮与浮层子项之间移动焦点不应关 */
+function onGroupFocusOut(e: FocusEvent) {
+  if (!collapsed.value) return
+  const next = e.relatedTarget as Node | null
+  if (next && (e.currentTarget as HTMLElement).contains(next)) return
+  closeFlyout()
+}
+
+// 路由变化、侧栏形态切换、视口尺寸变化都直接关掉浮层，避免它停在已经错位的位置
+watch(() => route.path, () => closeFlyout())
+watch(collapsed, () => closeFlyout())
+function onFlyoutViewportChange() { if (flyoutLabel.value) closeFlyout() }
+onMounted(() => window.addEventListener('resize', onFlyoutViewportChange))
+onBeforeUnmount(() => window.removeEventListener('resize', onFlyoutViewportChange))
 function groupActive(m: any) {
   return (m.children || []).some((s: any) => isActive(s.path))
 }
@@ -176,6 +230,17 @@ function openTasks() {
   loadTasks()
 }
 
+/** 节点健康的一句话描述，供顶栏图标的 tooltip 与可访问名称共用 */
+const nodeLabel = computed(() => (nodeHealthy.value ? t('nav.nodeHealthy') : t('nav.nodeUnhealthy')))
+
+/* 消息中心入口：已在消息中心时点击属于"同路由导航"，页面不会重新挂载，
+   表现为点了毫无反应；这里发一个信号，让列表回到最新（第 1 页 + 滚到顶）。
+   不在消息中心时什么都不做，交给 NuxtLink 正常跳转。 */
+const messageCenterTick = useState('messageCenterTick', () => 0)
+function openMessageCenter() {
+  if (route.path === '/alarms') messageCenterTick.value++
+}
+
 function onUserMenu(v: string) {
   if (v === 'profile') navigateTo('/account')
   else if (v === 'lang') setLocale(locale.value === 'zh-CN' ? 'en' : 'zh-CN')
@@ -184,7 +249,7 @@ function onUserMenu(v: string) {
 </script>
 
 <template>
-  <div class="flex h-screen overflow-hidden bg-canvas" @keydown.esc="drawerOpen = false">
+  <div class="flex h-screen overflow-hidden bg-canvas" @keydown.esc="drawerOpen = false; closeFlyout()">
     <!-- 键盘用户跳过导航直达正文 -->
     <a href="#ipc-main" class="ipc-skip-link">{{ t('nav.skipToMain') }}</a>
 
@@ -210,7 +275,7 @@ function onUserMenu(v: string) {
         <span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-signal bg-primary text-sidebar"><Icon name="video" :size="14" /></span>
         <span v-if="!collapsed" class="text-[17px] font-bold tracking-wide text-ink">IpcCloud</span>
       </div>
-      <nav class="flex-1 overflow-y-auto py-2" :aria-label="t('nav.main')">
+      <nav class="flex-1 overflow-y-auto py-2" :aria-label="t('nav.main')" @scroll="closeFlyout()">
         <template v-for="m in menu" :key="m.label">
           <!-- 单条目：语义上是"去某处"，用链接而非按钮 -->
           <NuxtLink
@@ -240,38 +305,61 @@ function onUserMenu(v: string) {
           </NuxtLink>
 
           <template v-else>
-            <!-- 分组头：展开/收起是状态切换，用按钮并声明 aria-expanded -->
-            <button
-              type="button"
-              class="mx-2 flex w-[calc(100%-1rem)] items-center gap-2.5 rounded-signal py-2 text-sm transition-colors"
-              :class="[
-                collapsed ? 'justify-center px-0' : 'px-3',
-                groupActive(m) ? 'text-ink' : 'text-sidebar-text hover:bg-sidebar-hover hover:text-ink'
-              ]"
-              :title="collapsed ? m.label : undefined"
-              :aria-label="collapsed ? m.label : undefined"
-              :aria-expanded="collapsed ? undefined : !!expanded[m.label]"
-              @click="collapsed ? navigateTo(m.children[0].path) : toggleGroup(m.label)"
+            <!-- 分组头 + 二级菜单：展开态是内联折叠列表，收起态改为浮层（悬停/点击/聚焦触发）。
+                 两种形态复用同一份子项标记，避免子项文案与徽标在两处各写一遍而漂移。 -->
+            <div
+              class="relative"
+              @mouseleave="collapsed && scheduleFlyoutClose()"
+              @focusout="onGroupFocusOut"
             >
-              <Icon :name="m.icon" :size="16" :class="groupActive(m) ? 'text-primary' : ''" />
-              <template v-if="!collapsed">
-                {{ m.label }}
-                <Icon name="chevron-down" :size="13" class="ml-auto transition-transform" :class="expanded[m.label] ? '' : '-rotate-90'" />
-              </template>
-            </button>
-            <div v-show="expanded[m.label] && !collapsed" class="mb-1 ml-4 border-l border-line pl-2">
-              <NuxtLink
-                v-for="s in m.children" :key="s.path"
-                :to="s.path"
-                :aria-current="isActive(s.path) ? 'page' : undefined"
-                class="relative flex items-center justify-between rounded-signal px-3 py-1.5 text-[13px] transition-colors"
-                :class="isActive(s.path) ? 'bg-sidebar-hover font-medium text-ink' : 'text-sidebar-text hover:bg-sidebar-hover hover:text-ink'"
-                @click="afterNavigate"
+              <!-- 分组头：展开/收起是状态切换，用按钮并声明 aria-expanded -->
+              <button
+                type="button"
+                class="mx-2 flex w-[calc(100%-1rem)] items-center gap-2.5 rounded-signal py-2 text-sm transition-colors"
+                :class="[
+                  collapsed ? 'justify-center px-0' : 'px-3',
+                  collapsed && flyoutLabel === m.label
+                    ? 'bg-sidebar-hover text-ink'
+                    : (groupActive(m) ? 'text-ink' : 'text-sidebar-text hover:bg-sidebar-hover hover:text-ink')
+                ]"
+                :title="collapsed ? m.label : undefined"
+                :aria-label="collapsed ? m.label : undefined"
+                :aria-haspopup="collapsed ? 'menu' : undefined"
+                :aria-expanded="collapsed ? flyoutLabel === m.label : !!expanded[m.label]"
+                @mouseenter="collapsed && openFlyout(m.label, $event.currentTarget as HTMLElement)"
+                @focus="collapsed && openFlyout(m.label, $event.currentTarget as HTMLElement)"
+                @click="onGroupClick(m, $event)"
               >
-                <span class="absolute -left-2 top-1/2 h-3.5 w-0.5 -translate-y-1/2 rounded-full bg-primary transition-opacity" :class="isActive(s.path) ? 'opacity-100' : 'opacity-0'" />
-                <span>{{ s.label }}</span>
-                <span v-if="s.badge" class="rounded-full bg-danger px-1.5 text-[10px] leading-4 text-white">{{ s.badge > 99 ? '99+' : s.badge }}</span>
-              </NuxtLink>
+                <Icon :name="m.icon" :size="16" :class="groupActive(m) ? 'text-primary' : ''" />
+                <template v-if="!collapsed">
+                  {{ m.label }}
+                  <Icon name="chevron-down" :size="13" class="ml-auto transition-transform" :class="expanded[m.label] ? '' : '-rotate-90'" />
+                </template>
+              </button>
+              <div
+                v-show="collapsed ? flyoutLabel === m.label : expanded[m.label]"
+                :class="collapsed
+                  ? 'fixed z-50 w-44 rounded-signal border border-line bg-surface py-1 shadow-pop'
+                  : 'mb-1 ml-4 border-l border-line pl-2'"
+                :style="collapsed ? { top: flyoutPos.top + 'px', left: flyoutPos.left + 'px' } : undefined"
+                :role="collapsed ? 'menu' : undefined"
+                :aria-label="collapsed ? m.label : undefined"
+              >
+                <NuxtLink
+                  v-for="s in m.children" :key="s.path"
+                  :to="s.path"
+                  :role="collapsed ? 'menuitem' : undefined"
+                  :aria-current="isActive(s.path) ? 'page' : undefined"
+                  class="relative flex items-center justify-between rounded-signal px-3 py-1.5 text-[13px] transition-colors"
+                  :class="isActive(s.path) ? 'bg-sidebar-hover font-medium text-ink' : 'text-sidebar-text hover:bg-sidebar-hover hover:text-ink'"
+                  @click="afterNavigate(); closeFlyout()"
+                >
+                  <!-- 激活竖线挂在内联态的左边框上；浮层里没有这条边，画出来会飘在面板外 -->
+                  <span v-if="!collapsed" class="absolute -left-2 top-1/2 h-3.5 w-0.5 -translate-y-1/2 rounded-full bg-primary transition-opacity" :class="isActive(s.path) ? 'opacity-100' : 'opacity-0'" />
+                  <span>{{ s.label }}</span>
+                  <span v-if="s.badge" class="rounded-full bg-danger px-1.5 text-[10px] leading-4 text-white">{{ s.badge > 99 ? '99+' : s.badge }}</span>
+                </NuxtLink>
+              </div>
             </div>
           </template>
         </template>
@@ -332,12 +420,18 @@ function onUserMenu(v: string) {
         </div>
 
         <div class="ml-auto flex items-center gap-4">
-          <!-- 节点健康小图标 -->
-          <UiTooltip :label="nodeHealthy ? t('nav.nodeHealthy') : t('nav.nodeUnhealthy')">
-            <span class="flex items-center gap-1 text-xs" :class="nodeHealthy ? 'text-success' : 'text-danger'">
+          <!-- 节点健康：点击进入媒体节点页（与总览页「媒体节点 N 个正常」同一入口）。
+               原先是个纯 span——无链接、无手型、不可聚焦，看着像入口却点不动。 -->
+          <UiTooltip :label="nodeLabel + t('common.comma') + t('nav.nodeEntry')">
+            <NuxtLink
+              to="/system/nodes"
+              class="flex items-center gap-1 rounded-chrome text-xs transition-colors hover:text-primary"
+              :class="nodeHealthy ? 'text-success' : 'text-danger'"
+              :aria-label="nodeLabel + t('common.comma') + t('nav.nodeEntry')"
+            >
               <Icon name="server" :size="15" />
               <span class="h-1.5 w-1.5 rounded-full" :class="nodeHealthy ? 'bg-success' : 'bg-danger'" />
-            </span>
+            </NuxtLink>
           </UiTooltip>
           <!-- 任务中心 -->
           <UiTooltip :label="t('nav.tasks')">
@@ -346,11 +440,19 @@ function onUserMenu(v: string) {
               <span v-if="runningTasks()" class="absolute -right-1 -top-1 h-2 w-2 rounded-full bg-primary" />
             </button>
           </UiTooltip>
-          <!-- 消息 -->
+          <!-- 消息中心：用链接而非按钮（可聚焦、可中键新开、有手型）；
+               已在本页时由 openMessageCenter 补"回到最新"的反馈，而不是点了毫无反应。 -->
           <UiBadge :value="unread" class="mt-1">
-            <button type="button" class="rounded-chrome text-muted transition-colors hover:text-primary" :aria-label="unread ? t('nav.messageCenter') + t('common.comma') + t('nav.unreadCount', { n: unread }) : t('nav.messageCenter')" @click="navigateTo('/alarms')">
-              <Icon name="bell" :size="18" />
-            </button>
+            <UiTooltip :label="t('nav.messageCenter')">
+              <NuxtLink
+                to="/alarms"
+                class="block rounded-chrome text-muted transition-colors hover:text-primary"
+                :aria-label="unread ? t('nav.messageCenter') + t('common.comma') + t('nav.unreadCount', { n: unread }) : t('nav.messageCenter')"
+                @click="openMessageCenter"
+              >
+                <Icon name="bell" :size="18" />
+              </NuxtLink>
+            </UiTooltip>
           </UiBadge>
           <!-- 用户 -->
           <UiDropdown :items="userMenu" @select="onUserMenu">

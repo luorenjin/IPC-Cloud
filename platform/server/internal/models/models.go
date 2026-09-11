@@ -135,15 +135,15 @@ type Tenant struct {
 }
 
 type Project struct {
-	ID        string         `gorm:"primaryKey;size:40" json:"id"`
-	TenantID  string         `gorm:"size:40" json:"tenantId"`
-	Name      string         `gorm:"size:128" json:"name"`
-	TZ        string         `gorm:"size:64;default:Asia/Shanghai" json:"tz"`
-	Settings  JSONB          `gorm:"type:jsonb" json:"settings"`
-	Enabled   bool           `gorm:"default:true" json:"enabled"`
-	CreatedAt int64          `json:"createdAt"`
-	UpdatedAt int64          `json:"updatedAt"`
-	SetupDone bool           `gorm:"default:false" json:"setupDone"` // ACC-02 首次向导是否完成
+	ID        string `gorm:"primaryKey;size:40" json:"id"`
+	TenantID  string `gorm:"size:40" json:"tenantId"`
+	Name      string `gorm:"size:128" json:"name"`
+	TZ        string `gorm:"size:64;default:Asia/Shanghai" json:"tz"`
+	Settings  JSONB  `gorm:"type:jsonb" json:"settings"`
+	Enabled   bool   `gorm:"default:true" json:"enabled"`
+	CreatedAt int64  `json:"createdAt"`
+	UpdatedAt int64  `json:"updatedAt"`
+	SetupDone bool   `gorm:"default:false" json:"setupDone"` // ACC-02 首次向导是否完成
 }
 
 type DeviceGroup struct {
@@ -157,14 +157,14 @@ type DeviceGroup struct {
 
 // Role 权限矩阵 + 资源范围（PRD ACC-05）。
 type Role struct {
-	ID        string  `gorm:"primaryKey;size:40" json:"id"`
-	ProjectID string  `gorm:"index;size:40" json:"projectId"`
-	Name      string  `gorm:"size:64" json:"name"`
-	Builtin   bool    `gorm:"default:false" json:"builtin"` // 超级管理员不可删改
-	Perms     JSONB   `gorm:"type:jsonb" json:"perms"`      // {"menus":[],"actions":[]}
-	Scope     JSONB   `gorm:"type:jsonb" json:"scope"`      // {"groups":[],"channels":[]} 空=全部
-	CreatedAt int64   `json:"createdAt"`
-	UpdatedAt int64   `json:"updatedAt"`
+	ID        string `gorm:"primaryKey;size:40" json:"id"`
+	ProjectID string `gorm:"index;size:40" json:"projectId"`
+	Name      string `gorm:"size:64" json:"name"`
+	Builtin   bool   `gorm:"default:false" json:"builtin"` // 超级管理员不可删改
+	Perms     JSONB  `gorm:"type:jsonb" json:"perms"`      // {"menus":[],"actions":[]}
+	Scope     JSONB  `gorm:"type:jsonb" json:"scope"`      // {"groups":[],"channels":[]} 空=全部
+	CreatedAt int64  `json:"createdAt"`
+	UpdatedAt int64  `json:"updatedAt"`
 }
 
 type User struct {
@@ -245,24 +245,24 @@ type Channel struct {
 // ---------- 媒体节点与流 ----------
 
 type MediaNode struct {
-	ID            string `gorm:"primaryKey;size:40" json:"id"`
-	Name          string `gorm:"size:64" json:"name"`
-	APIURL        string `gorm:"size:256" json:"apiUrl"`
-	SecretEnc     string `gorm:"text" json:"-"`
-	PublicHost    string `gorm:"size:128" json:"publicHost"`
-	RTMPPort      int    `gorm:"default:1936" json:"rtmpPort"`
-	HTTPPort      int    `gorm:"default:80" json:"httpPort"`
-	HTTPSPort     int    `gorm:"default:443" json:"httpsPort"`
-	RTPRange      string `gorm:"size:64;default:30000-30100" json:"rtpRange"`
-	MaxStreams    int    `gorm:"default:200" json:"maxStreams"`
-	Streams       int    `gorm:"default:0" json:"streams"`
-	Playing       int    `gorm:"default:0" json:"playing"`   // SYS-01 当前播放路数
-	BwIn          int64  `gorm:"default:0" json:"bwIn"`      // SYS-01 入带宽 B/s
-	BwOut         int64  `gorm:"default:0" json:"bwOut"`     // SYS-01 出带宽 B/s
-	Version       string `gorm:"size:128" json:"version"`    // SYS-01 ZLM 版本（Server 头）
-	Disabled      bool   `gorm:"default:false" json:"disabled"` // 禁用（不参与调度）
-	Weight        int    `gorm:"default:100" json:"weight"`
-	Status        string `gorm:"size:16;default:offline" json:"status"`
+	ID         string `gorm:"primaryKey;size:40" json:"id"`
+	Name       string `gorm:"size:64" json:"name"`
+	APIURL     string `gorm:"size:256" json:"apiUrl"`
+	SecretEnc  string `gorm:"text" json:"-"`
+	PublicHost string `gorm:"size:128" json:"publicHost"`
+	RTMPPort   int    `gorm:"default:1936" json:"rtmpPort"`
+	HTTPPort   int    `gorm:"default:80" json:"httpPort"`
+	HTTPSPort  int    `gorm:"default:443" json:"httpsPort"`
+	RTPRange   string `gorm:"size:64;default:30000-30100" json:"rtpRange"`
+	MaxStreams int    `gorm:"default:200" json:"maxStreams"`
+	Streams    int    `gorm:"default:0" json:"streams"`
+	Playing    int    `gorm:"default:0" json:"playing"`      // SYS-01 当前播放路数
+	BwIn       int64  `gorm:"default:0" json:"bwIn"`         // SYS-01 入带宽 B/s
+	BwOut      int64  `gorm:"default:0" json:"bwOut"`        // SYS-01 出带宽 B/s
+	Version    string `gorm:"size:128" json:"version"`       // SYS-01 ZLM 版本（Server 头）
+	Disabled   bool   `gorm:"default:false" json:"disabled"` // 禁用（不参与调度）
+	Weight     int    `gorm:"default:100" json:"weight"`
+	Status     string `gorm:"size:16;default:offline" json:"status"`
 	// StatusReason ACC-02：自检/保活判定为 offline 时的具体原因（连接被拒、超时、secret 错误等），
 	// online 时清空。前端节点页据此呈现失败原因而非只显示"不可达"。
 	StatusReason  string `gorm:"size:256" json:"statusReason"`
@@ -304,6 +304,23 @@ type RecordPlan struct {
 	Enabled    bool   `gorm:"default:true" json:"enabled"`
 	CreatedAt  int64  `json:"createdAt"`
 	UpdatedAt  int64  `json:"updatedAt"`
+}
+
+// RebootPlan 设备定时重启计划（MGR-08）。
+// 设备与计划一对一：同一台设备只需一条周期规则（多时段由 days 列表表达）。
+// Schedule 复用录像计划的 JSONB 约定：{"days":[1..7],"time":"HH:MM"}，
+// days 为 ISO 星期（1=周一…7=周日），**空列表表示每天**（与 scheduleMatches 一致）。
+type RebootPlan struct {
+	ID       string `gorm:"primaryKey;size:40" json:"id"`
+	DeviceID string `gorm:"uniqueIndex;size:40" json:"deviceId"`
+	Enabled  bool   `gorm:"default:false" json:"enabled"`
+	Schedule JSONB  `gorm:"type:jsonb" json:"schedule"`
+	// LastFiredKey 记录已触发的「项目时区自然日 + 时刻」（YYYY-MM-DD HH:MM）。
+	// 必须落库而不只放内存：轮询间隔 30s，同一次到点会命中 1~2 轮，
+	// 服务重启后还会再扫一遍——没有水位就会出现重复重启。
+	LastFiredKey string `gorm:"size:20" json:"lastFiredKey"`
+	CreatedAt    int64  `json:"createdAt"`
+	UpdatedAt    int64  `json:"updatedAt"`
 }
 
 type RecordIndex struct {
@@ -429,7 +446,7 @@ type Setting struct {
 }
 
 // TableName 统一小写复数（GORM 默认，显式声明避免复数歧义）。
-func (Tenant) TableName() string { return "tenants" }
-func (IdpPreadd) TableName() string { return "idp_preadd" }
+func (Tenant) TableName() string      { return "tenants" }
+func (IdpPreadd) TableName() string   { return "idp_preadd" }
 func (GbWhitelist) TableName() string { return "gb_whitelist" }
-func (GbPending) TableName() string { return "gb_pending" }
+func (GbPending) TableName() string   { return "gb_pending" }

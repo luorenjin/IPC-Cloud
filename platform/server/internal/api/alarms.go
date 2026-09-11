@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 
 	"github.com/jetscam/ipccloud/server/internal/engine"
 	"github.com/jetscam/ipccloud/server/internal/errs"
@@ -99,9 +100,9 @@ func handleListAlarmRules(c *gin.Context) {
 func handleCreateAlarmRule(c *gin.Context) {
 	ctx := getCtx(c)
 	var req struct {
-		ChannelIDs []string    `json:"channelIds" binding:"required"`
-		Kinds      []string    `json:"kinds" binding:"required"`
-		TemplateID string      `json:"templateId"`
+		ChannelIDs []string `json:"channelIds" binding:"required"`
+		Kinds      []string `json:"kinds" binding:"required"`
+		TemplateID string   `json:"templateId"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		fail(c, errs.EBadRequest)
@@ -187,23 +188,51 @@ func handleSetAlarmPolicies(c *gin.Context) {
 func handleListAlarms(c *gin.Context) {
 	ctx := getCtx(c)
 	page, size := pageParams(c)
-	q := store.DB.Model(&models.AlarmEvent{}).Where("project_id = ?", ctx.ProjectID)
-	if k := c.Query("kind"); k != "" {
-		q = q.Where("kind = ?", k)
+	// 同一套筛选同时作用于「总数 / 列表 / focus 定位页码」，避免三处各写一遍导致口径漂移。
+	applyFilters := func(q *gorm.DB) *gorm.DB {
+		q = q.Where("project_id = ?", ctx.ProjectID)
+		if k := c.Query("kind"); k != "" {
+			q = q.Where("kind = ?", k)
+		}
+		// scope=device|platform：设备侧 = ALM-03 智能事件全集，其余一律归平台侧。
+		// 用 kind NOT IN 而不是平台侧白名单——平台侧类型会随功能增加，白名单必漏。
+		// 前端按 tab 过滤时必须走这里，否则 total/分页与实际列表不一致（翻页出现空页）。
+		switch c.Query("scope") {
+		case "device":
+			q = q.Where("kind IN ?", models.DeviceSideAlarmKinds)
+		case "platform":
+			q = q.Where("kind NOT IN ?", models.DeviceSideAlarmKinds)
+		}
+		if lvl := c.Query("level"); lvl != "" {
+			q = q.Where("level = ?", lvl)
+		}
+		if s := c.Query("read"); s != "" {
+			q = q.Where("read = ?", s == "true")
+		}
+		return q
 	}
-	if lvl := c.Query("level"); lvl != "" {
-		q = q.Where("level = ?", lvl)
-	}
-	if s := c.Query("read"); s != "" {
-		q = q.Where("read = ?", s == "true")
-	}
+
 	var total int64
-	q.Count(&total)
+	applyFilters(store.DB.Model(&models.AlarmEvent{})).Count(&total)
 	var items []models.AlarmEvent
-	q.Order("ts DESC").Offset((page - 1) * size).Limit(size).Find(&items)
+	applyFilters(store.DB.Model(&models.AlarmEvent{})).
+		Order("ts DESC").Offset((page - 1) * size).Limit(size).Find(&items)
 	var unread int64
 	store.DB.Model(&models.AlarmEvent{}).Where("project_id = ? AND read = ?", ctx.ProjectID, false).Count(&unread)
-	ok(c, gin.H{"total": total, "unread": unread, "items": items})
+
+	// focus=<id>：深链定位（总览页「最近告警」点击）。返回该条在同一筛选条件、同一排序
+	// 下的页码，前端据此跳到对应页并高亮，避免为定位一条记录把全量列表拉回来。
+	focusPage := 0
+	if fid := c.Query("focus"); fid != "" {
+		var ev models.AlarmEvent
+		if store.DB.First(&ev, "id = ? AND project_id = ?", fid, ctx.ProjectID).Error == nil {
+			var newer int64
+			applyFilters(store.DB.Model(&models.AlarmEvent{})).
+				Where("(ts > ? OR (ts = ? AND id > ?))", ev.Ts, ev.Ts, ev.ID).Count(&newer)
+			focusPage = int(newer)/size + 1
+		}
+	}
+	ok(c, gin.H{"total": total, "unread": unread, "items": items, "focusPage": focusPage})
 }
 
 func handleReadAlarm(c *gin.Context) {

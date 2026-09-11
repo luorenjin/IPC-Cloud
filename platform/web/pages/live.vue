@@ -34,8 +34,52 @@ const treeData = computed(() =>
     .filter((n) => n.children.length)
 )
 
-function isOnline(c: Channel) {
-  return ['online', 'active', 'on', 'streaming', 'playing'].includes(String(c.streamState || '').toLowerCase())
+// ---------- 树上的在线/离线圆点（PRD LIVE-03） ----------
+// 圆点只画在**设备节点**：Channel 模型里只有 enabled 与 streamState（流状态），
+// 没有独立的在线字段——通道的在线状态是设备在线状态的纯函数，两级各画一次相同的点
+// 属于重复信息，还会让人误以为两级状态可以不同。通道侧改用"离线灰显 + 悬停提示"表达。
+// 判据也不能用 channel.streamState：那只表示"此刻是否在出流"，在线但空闲的通道
+// 会被误标成灰点并连带禁用拖拽（PRD 只要求离线不可拖）。
+const deviceMap = computed(() => {
+  const m: Record<string, any> = {}
+  for (const d of devices.value) m[d.id] = d
+  return m
+})
+
+/** 节点归属设备 id；设备节点取自身，通道节点取所属设备 */
+function nodeDeviceId(node: any): string {
+  return node?.channel?.deviceId || node?.raw?.id || ''
+}
+
+/** 设备是否在线（找不到设备时按在线处理，避免因数据缺失把节点误锁死） */
+function isDeviceOnline(deviceId: string): boolean {
+  const d = deviceMap.value[deviceId]
+  return d ? d.status === 'online' : true
+}
+
+/** 节点是否在线：设备节点看自身，通道节点继承所属设备 */
+function nodeOnline(node: any): boolean {
+  const id = nodeDeviceId(node)
+  return id ? isDeviceOnline(id) : true
+}
+
+/** 通道是否正在出流（仅用于提示，不参与"在线"判定） */
+function isStreaming(c: Channel | null | undefined): boolean {
+  return ['streaming', 'playing'].includes(String(c?.streamState || '').toLowerCase())
+}
+
+/** 通道是否取流失败（流状态异常，同样不等于"离线"） */
+function isStreamError(c: Channel | null | undefined): boolean {
+  return String(c?.streamState || '').toLowerCase() === 'error'
+}
+
+/** 状态的可访问名称/悬浮提示：在线/离线，通道再补充流状态 */
+function stateLabel(node: any): string {
+  const base = nodeOnline(node) ? t('live.tree.deviceOnline') : t('live.tree.deviceOffline')
+  if (!node.channel) return base
+  if (isStreaming(node.channel)) return base + t('live.tree.streamingSuffix')
+  if (isStreamError(node.channel)) return base + t('live.tree.streamErrorSuffix')
+  return base
 }
 
 async function loadTree() {
@@ -54,13 +98,18 @@ async function loadTree() {
 
 // ---------- 分屏与格子状态 ----------
 interface Cell {
+  /** 格子稳定标识：起播去重键的一部分（同格换通道/换码流才允许重新起播） */
+  uid: number
   channel: Channel | null
   url: string
   profile: 'main' | 'sub'
   bitrate: number
   latency: number
 }
-const blank = (): Cell => ({ channel: null, url: '', profile: 'main', bitrate: 0, latency: 0 })
+let cellSeq = 0
+const blank = (): Cell => ({ uid: ++cellSeq, channel: null, url: '', profile: 'main', bitrate: 0, latency: 0 })
+// 起播去重键（用法见 playInto）：cell.uid -> `${channelId}|${profile}`
+const playedKey = new Map<number, string>()
 const grid = ref<1 | 4 | 9>(1)
 const cells = ref<Cell[]>([blank()])
 const selected = ref(0)
@@ -81,12 +130,12 @@ function applyGrid(g: 1 | 4 | 9) {
   if (g === 1) {
     const keep = old.slice(0, 1)
     // 缩减为单屏时，被移出的格子对应通道需停流
-    old.slice(1).forEach((c) => stopChannel(c.channel))
+    old.slice(1).forEach((c) => { stopChannel(c.channel); playedKey.delete(c.uid) })
     cells.value = [keep[0] || blank()]
   } else {
     cells.value = Array.from({ length: g }, (_, i) => old[i] || blank())
     // 格数减少时，被移除的格子对应通道需停流
-    old.slice(g).forEach((c) => stopChannel(c.channel))
+    old.slice(g).forEach((c) => { stopChannel(c.channel); playedKey.delete(c.uid) })
     // 多分屏时新接入默认选择子码流以保护性能
     cells.value.forEach((c) => { if (!c.channel) c.profile = 'sub' })
   }
@@ -105,11 +154,20 @@ function saveLayout() {
 watch(grid, (g) => { applyGrid(g); saveLayout() })
 
 
-/* 实时状态（E8）：通道树按设备分组，设备上下线要即时反映在树上 */
+/* 实时状态（E8）：设备上下线与通道出流状态都要即时反映在树上。
+   channel.stream 由后端 devsvc.SetChannelStream 发布（起播/停播/ZLM Hook 均会发），
+   不消费它的话通道流状态会一直停留在进页面那一刻的快照，圆点提示与实际自相矛盾。 */
 useWs((ev: any) => {
-  if (ev.type !== 'device.online' && ev.type !== 'device.offline') return
-  const d = devices.value.find((x: any) => x.id === ev.deviceId)
-  if (d) d.status = ev.type === 'device.online' ? 'online' : 'offline'
+  if (ev.type === 'device.online' || ev.type === 'device.offline') {
+    const d = devices.value.find((x: any) => x.id === ev.deviceId)
+    if (d) d.status = ev.type === 'device.online' ? 'online' : 'offline'
+    return
+  }
+  if (ev.type === 'channel.stream') {
+    const c = channels.value.find((x: any) => x.id === ev.channelId)
+    const state = ev.data?.state
+    if (c && state) c.streamState = state
+  }
 })
 
 onMounted(async () => {
@@ -143,16 +201,31 @@ onMounted(async () => {
 
 // ---------- 播放：点/拖拽/双击通道起流 ----------
 // pickFlv：按页面协议选择流地址，定义于 utils/stream.ts（Nuxt 自动导入），与预览弹窗共用
+//
+// 起播去重（LIVE-03）：通道树的 select 在单击与双击时都会触发（双击 = 两次 select），
+// 没有这层保护就会并发发出两次 /play：一次成功、另一次因流/端口已存在而 503，
+// 用户于是看到"起播失败"提示，画面却是正常的——自相矛盾。故按「同格同通道同码流」与
+// 「同一请求在途」双重去重。换通道或换码流时键不同，仍可正常重新起播。
+const inflight = new Set<string>()            // `${cell.uid}|${channelId}|${profile}`
+
 async function playInto(cell: Cell, ch: Channel) {
+  const doneKey = `${ch.id}|${cell.profile}`
+  const reqKey = `${cell.uid}|${doneKey}`
+  if (playedKey.get(cell.uid) === doneKey || inflight.has(reqKey)) return
+  inflight.add(reqKey)
   try {
     const res: any = await api.post(`/channels/${ch.id}/play`, { profile: cell.profile })
     cell.channel = ch
     cell.url = pickFlv(res)
+    playedKey.set(cell.uid, doneKey)
     saveLayout()
   } catch (e: any) {
     cell.channel = null
     cell.url = ''
+    playedKey.delete(cell.uid)
     toastApiError(e, t('live.msg.playFailed'))
+  } finally {
+    inflight.delete(reqKey)
   }
 }
 
@@ -161,10 +234,10 @@ function onNodeClick(node: any) {
   if (node.channel && curCell.value) playInto(curCell.value, node.channel)
 }
 
-// 拖拽到指定格（LIVE-03：离线灰显不可拖）
+// 拖拽到指定格（PRD LIVE-03：离线灰显不可拖——判据是设备离线，不是"当前未出流"）
 function onTreeDragStart(e: DragEvent, node: any) {
   if (!node.channel) { e.preventDefault?.(); return }
-  if (!isOnline(node.channel)) { e.preventDefault?.(); return }
+  if (!nodeOnline(node)) { e.preventDefault?.(); return }
   e.dataTransfer?.setData('text/channel', node.channel.id)
 }
 function onCellDrop(e: DragEvent, i: number) {
@@ -188,6 +261,7 @@ function closeCell(cell: Cell) {
   stopChannel(cell.channel)
   cell.channel = null
   cell.url = ''
+  playedKey.delete(cell.uid) // 释放去重键：关掉后同一通道要能重新起播
   saveLayout()
 }
 
@@ -201,7 +275,12 @@ function doSnapshot() {
   else toast.warning(t('live.msg.snapshotUnavailable'))
 }
 function closeAll() {
-  cells.value.forEach((c) => { stopChannel(c.channel); c.channel = null; c.url = '' })
+  cells.value.forEach((c) => {
+    stopChannel(c.channel)
+    c.channel = null
+    c.url = ''
+    playedKey.delete(c.uid)
+  })
   saveLayout()
 }
 
@@ -320,15 +399,26 @@ async function delPreset(p: any) {
           <template #node="{ node }">
             <span
               class="relative flex min-w-0 items-center gap-1.5"
-              :draggable="!!node.channel && isOnline(node.channel)"
+              :draggable="!!node.channel && nodeOnline(node)"
               @dragstart="onTreeDragStart($event, node)"
             >
               <!-- 信号灯：该通道当前已上屏——复用侧栏激活态手法（细竖线 + 变色），而非整块高亮胶囊 -->
               <span v-if="node.channel && onScreenIds.has(node.channel.id)" class="absolute -left-2 top-1/2 h-3.5 w-0.5 -translate-y-1/2 rounded-full bg-primary" />
-              <span v-if="node.channel" class="h-2 w-2 shrink-0 rounded-full" :class="isOnline(node.channel) ? 'bg-success' : 'bg-placeholder'" />
+              <!-- 在线/离线圆点只画在设备节点（唯一真源，见 stateLabel 上方注释）；
+                   通道节点用等宽占位保持与设备行文本的对齐，避免去掉圆点后层级被视觉拉平。 -->
+              <span
+                v-if="!node.channel"
+                class="h-2 w-2 shrink-0 rounded-full"
+                :class="nodeOnline(node) ? 'bg-success' : 'bg-placeholder'"
+                role="img"
+                :title="stateLabel(node)"
+                :aria-label="stateLabel(node)"
+              />
+              <span v-else class="h-2 w-2 shrink-0" aria-hidden="true" />
               <span
                 class="truncate"
-                :class="node.channel && !isOnline(node.channel) ? 'text-placeholder' : node.channel && onScreenIds.has(node.channel.id) ? 'font-medium text-primary' : ''"
+                :class="!nodeOnline(node) ? 'text-placeholder' : node.channel && onScreenIds.has(node.channel.id) ? 'font-medium text-primary' : ''"
+                :title="node.channel ? stateLabel(node) : undefined"
               >{{ node.label }}</span>
             </span>
           </template>

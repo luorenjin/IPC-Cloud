@@ -147,11 +147,25 @@ export function nodeStatusInfo(s?: string): StatusMeta {
   return NODE_STATUS_MAP[s || ''] || { label: s || '未知', labelKey: s || 'common.unknown', color: 'warning' }
 }
 
-/** 通道推流状态 */
+/**
+ * 通道推流状态。
+ * 取值来自 `models.Channel.StreamState`（engine 落库 + WS 推送）：idle/starting/streaming/error。
+ * 旧实现只认 'online'/'live'，而后端从不发这两个值，导致 'idle'/'streaming' 都落到
+ * “原样输出 + warning”分支，详情页「码流状态」因此恒为未推流。
+ */
 export function streamStatusInfo(s?: string): StatusMeta {
-  if (s === 'online' || s === 'live') return { label: '推流中', labelKey: 'enum.streamStatus.live', color: 'success' }
-  if (!s || s === 'offline') return { label: '未推流', labelKey: 'enum.streamStatus.idle', color: 'info' }
-  return { label: String(s), labelKey: String(s), color: 'warning' }
+  switch (String(s || '').toLowerCase()) {
+    case 'streaming':
+    case 'live':
+    case 'online':
+      return { label: '推流中', labelKey: 'enum.streamStatus.live', color: 'success' }
+    case 'starting':
+      return { label: '启动中', labelKey: 'enum.streamStatus.starting', color: 'warning' }
+    case 'error':
+      return { label: '流错误', labelKey: 'enum.streamStatus.error', color: 'danger' }
+    default:
+      return { label: '未推流', labelKey: 'enum.streamStatus.idle', color: 'info' }
+  }
 }
 
 /** 操作结果（审计日志） */

@@ -9,6 +9,11 @@ export default {
   'live.tree.collapsedLabel': 'Channels',
   'live.tree.expand': 'Expand channel list',
   'live.tree.collapse': 'Collapse channel list',
+  // Status semantics = device online/offline (PRD LIVE-03); channels append stream state
+  'live.tree.deviceOnline': 'Online',
+  'live.tree.deviceOffline': 'Offline',
+  'live.tree.streamingSuffix': ' (streaming)',
+  'live.tree.streamErrorSuffix': ' (stream failed)',
 
   // ---- Video cells and player ----
   'live.player.dropHint': 'Double-click a channel on the left, or drag one here to play',
@@ -116,14 +121,12 @@ export default {
   'live.preview.tabPlayback': 'Playback',
   'live.preview.loading': 'Starting stream…',
   'live.preview.noStream': 'No video',
-  'live.preview.playbackHint': 'Playback needs a channel, a date and a timeline. Open the playback page to review recordings for “{name}”.',
-  'live.preview.playbackFallbackName': 'this channel',
-  'live.preview.openPlayback': 'Open playback',
   'live.preview.unmute': 'Turn sound on',
   'live.preview.mute': 'Mute',
   'live.preview.snapshot': 'Take snapshot',
   'live.preview.viewSnapshot': 'View snapshot',
   'live.preview.fullscreen': 'Fullscreen',
+  'live.preview.zoomLevel': 'Digital zoom {level}x (click to cycle)',
 
   // ---- Messages and errors ----
   'live.msg.treeLoadFailed': 'Could not load channels',

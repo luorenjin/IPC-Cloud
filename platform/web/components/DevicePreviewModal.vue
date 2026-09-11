@@ -1,5 +1,6 @@
 <script setup lang="ts">
-// 设备预览与回放入口弹窗（LIVE-01/02）：预览 Tab 真实拉流 + 抓拍；回放 Tab 跳转到回放页（完整回放见 Task 18）
+// 设备预览与回放入口弹窗（LIVE-01/02 + REC-01~03）：预览 Tab 真实拉流 + 抓拍；
+// 回放 Tab 内联单通道回放，核心逻辑与 pages/playback.vue 共用 usePlaybackSession
 const props = withDefaults(
   defineProps<{
     modelValue: boolean
@@ -119,12 +120,40 @@ function stopLiveStream() {
   api.post(`/channels/${curChannel.value.id}/stop`).catch((e: any) => console.warn('停流失败', curChannel.value.id, e))
 }
 
-// ==================== 回放入口（跳转到回放页，完整回放见 Task 18） ====================
-function openPlaybackPage() {
-  const id = curChannel.value?.id
-  if (!id) return
-  close()
-  navigateTo('/playback?channelId=' + id)
+// ==================== 回放态（Tab 内联播放，REC-01~03） ====================
+// channelId/deviceId 用独立 ref 而非直接绑定 curChannel：只在真正进入回放 Tab 时才赋值，
+// 离开时清空，借助 usePlaybackSession 内部 watch(channelId,...) 的变化触发实现懒加载，
+// 避免每次打开预览弹窗都顺带请求录像能力/记录（该弹窗不会真正卸载，见 close 分支说明）
+const pbChannelId = ref('')
+const pbDeviceId = ref('')
+const {
+  dayStart, shiftDay, pickDate,
+  calOpen, calMonth, recDays, dayKey, calDays,
+  source, canDevice,
+  TYPE_COLOR, TYPE_NAME, typeFilter, shownSegs,
+  tlEl, onWheel, segStyle, ticks,
+  session, paused, muted: pbMuted, speed, speeds, sessionSource, deviceUrl, platformUrl,
+  videoEl, curTs, curLeft,
+  onTimelineClick, togglePause, onSpeedChange, forward30, closeSession,
+  toggleMute: togglePbMute, doSnapshot: doPbSnapshot, onVideoMeta, onVideoTime, onVideoErr
+} = usePlaybackSession(pbChannelId, pbDeviceId)
+
+const fmtSeg = (ts: any) => new Date(Number(ts)).toLocaleString('zh-CN', { hour12: false })
+
+// 电子放大（P1，简单点击循环 1x/2x/4x，CSS transform 缩放画面）
+const zoomLevel = ref(1)
+function cycleZoom() {
+  zoomLevel.value = zoomLevel.value >= 4 ? 1 : zoomLevel.value * 2
+}
+
+function enterPlayback() {
+  pbChannelId.value = curChannel.value?.id || ''
+  pbDeviceId.value = props.device?.id || ''
+}
+function leavePlayback() {
+  pbChannelId.value = ''
+  pbDeviceId.value = ''
+  zoomLevel.value = 1
 }
 
 // 生命周期与监听
@@ -136,9 +165,11 @@ watch(
       snapshotUrl.value = ''
       window.addEventListener('keydown', onKeydown)
       if (activeTab.value === 'preview') fetchLiveStream()
+      else enterPlayback()
     } else {
       stopLiveStream()
       liveStreamUrl.value = ''
+      leavePlayback()
       window.removeEventListener('keydown', onKeydown)
     }
   },
@@ -200,7 +231,7 @@ onBeforeUnmount(() => {
           <button
             class="flex items-center gap-1.5 px-5 py-1.5 font-medium border-l border-line transition-colors"
             :class="activeTab === 'playback' ? 'bg-primary text-white' : 'text-muted hover:text-primary'"
-            @click="activeTab = 'playback'; stopLiveStream(); liveStreamUrl = ''"
+            @click="activeTab = 'playback'; stopLiveStream(); liveStreamUrl = ''; enterPlayback()"
           >
             <Icon name="video" :size="13" />
             <span>{{ t('live.preview.tabPlayback') }}</span>
@@ -228,14 +259,138 @@ onBeforeUnmount(() => {
         </div>
       </div>
 
-      <!-- ==================== 回放 Tab：说明 + 跳转按钮（完整回放见 Task 18） ==================== -->
-      <div v-else class="relative aspect-video w-full flex flex-col items-center justify-center gap-3 bg-zone text-center">
-        <Icon name="video" :size="30" class="text-placeholder" :stroke="1.4" />
-        <p class="max-w-xs text-xs text-muted">{{ t('live.preview.playbackHint', { name: curChannel?.name || t('live.preview.playbackFallbackName') }) }}</p>
-        <UiButton variant="primary" size="sm" :disabled="!curChannel?.id" @click="openPlaybackPage">
-          {{ t('live.preview.openPlayback') }}
-        </UiButton>
-      </div>
+      <!-- ==================== 回放 Tab：单通道内联回放（REC-01~03） ==================== -->
+      <template v-else>
+        <div class="relative aspect-video w-full overflow-hidden bg-black select-none flex items-center justify-center">
+          <div class="h-full w-full overflow-hidden">
+            <div class="h-full w-full transition-transform duration-200" :style="{ transform: `scale(${zoomLevel})` }">
+              <H265Player v-if="deviceUrl" :url="deviceUrl" :muted="pbMuted" class="h-full w-full object-contain" />
+              <video
+                v-else-if="platformUrl"
+                ref="videoEl"
+                :src="platformUrl"
+                autoplay
+                preload="metadata"
+                class="h-full w-full bg-black object-contain"
+                :muted="pbMuted"
+                @loadedmetadata="onVideoMeta"
+                @timeupdate="onVideoTime"
+                @error="onVideoErr"
+              />
+              <div v-else class="flex h-full flex-col items-center justify-center gap-2 text-placeholder">
+                <Icon name="film" :size="30" :stroke="1.4" />
+                <span class="text-xs">{{ pbChannelId ? t('live.playback.emptyPickSeg') : t('live.playback.emptyPickChannel') }}</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- OSD：当前回放时间戳 -->
+          <div
+            v-if="curTs"
+            class="pointer-events-none absolute left-2 top-2 rounded-chrome bg-black/50 px-2 py-0.5 font-mono text-[11px] text-white"
+          >
+            {{ new Date(curTs).toLocaleString('zh-CN', { hour12: false }) }}
+          </div>
+        </div>
+
+        <!-- 日期 / 存储位置 -->
+        <div class="flex flex-wrap items-center gap-2 border-t border-line bg-surface-2 px-5 py-2">
+          <button
+            type="button"
+            class="flex h-7 w-7 items-center justify-center rounded-chrome border border-line text-muted hover:border-primary hover:text-primary"
+            :aria-label="t('live.playback.prevDay')"
+            @click="shiftDay(-1)"
+          >
+            <Icon name="chevron-left" :size="14" />
+          </button>
+          <UiPopover v-model:open="calOpen" width="w-64">
+            <template #trigger>
+              <button class="flex h-7 items-center gap-1.5 rounded-chrome border border-line bg-surface px-2.5 text-sm text-body hover:border-primary">
+                <Icon name="calendar" :size="13" class="text-placeholder" />{{ new Date(dayStart).toLocaleDateString('zh-CN') }}
+              </button>
+            </template>
+            <div>
+              <div class="mb-1 flex items-center justify-between">
+                <button type="button" class="rounded-chrome p-1 text-muted hover:bg-zone" :aria-label="t('live.playback.prevMonth')" @click="calMonth = new Date(calMonth.getFullYear(), calMonth.getMonth() - 1, 1)"><Icon name="chevron-left" :size="14" /></button>
+                <span class="text-sm font-medium text-ink">{{ t('live.playback.calMonthLabel', { y: calMonth.getFullYear(), m: calMonth.getMonth() + 1 }) }}</span>
+                <button type="button" class="rounded-chrome p-1 text-muted hover:bg-zone" :aria-label="t('live.playback.nextMonth')" @click="calMonth = new Date(calMonth.getFullYear(), calMonth.getMonth() + 1, 1)"><Icon name="chevron-right" :size="14" /></button>
+              </div>
+              <div class="grid grid-cols-7 gap-0.5 text-center text-[11px] text-placeholder">
+                <span v-for="w in ['live.playback.weekMon', 'live.playback.weekTue', 'live.playback.weekWed', 'live.playback.weekThu', 'live.playback.weekFri', 'live.playback.weekSat', 'live.playback.weekSun']" :key="w" class="py-1">{{ t(w) }}</span>
+              </div>
+              <div class="grid grid-cols-7 gap-0.5">
+                <template v-for="(d, i) in calDays" :key="i">
+                  <button
+                    v-if="d"
+                    class="relative flex h-7 items-center justify-center rounded-chrome text-[13px] transition-colors hover:bg-primary-soft"
+                    :class="dayStart === d.getTime() ? 'bg-primary font-medium text-white hover:bg-primary' : recDays.has(dayKey(d)) ? 'font-medium text-primary' : 'text-body'"
+                    @click="pickDate(d)"
+                  >
+                    {{ d.getDate() }}
+                    <span v-if="recDays.has(dayKey(d)) && dayStart !== d.getTime()" class="absolute bottom-0.5 h-1 w-1 rounded-full bg-primary" />
+                  </button>
+                  <span v-else />
+                </template>
+              </div>
+              <p class="mt-1.5 border-t border-line-soft pt-1.5 text-[11px] text-placeholder">
+                <span class="mr-1 inline-block h-1.5 w-1.5 rounded-full bg-primary align-middle" />{{ t('live.playback.calDotHint') }}
+              </p>
+            </div>
+          </UiPopover>
+          <button
+            type="button"
+            class="flex h-7 w-7 items-center justify-center rounded-chrome border border-line text-muted hover:border-primary hover:text-primary"
+            :aria-label="t('live.playback.nextDay')"
+            @click="shiftDay(1)"
+          >
+            <Icon name="chevron-right" :size="14" />
+          </button>
+          <UiSegmented
+            :model-value="source"
+            @update:model-value="source = $event as any"
+            :items="[...(canDevice ? [{ label: t('live.playback.srcDevice'), value: 'device' }] : []), { label: t('live.playback.srcPlatform'), value: 'platform' }]"
+          />
+          <span v-if="session" class="ml-auto">
+            <UiTag :color="sessionSource === 'platform' ? 'primary' : 'success'" plain>
+              {{ sessionSource === 'platform' ? t('live.playback.tagPlatform') : t('live.playback.tagDevice') }}
+            </UiTag>
+          </span>
+        </div>
+
+        <!-- 24h 时间轴 -->
+        <div class="border-t border-line bg-surface-2 px-5 py-2">
+          <div class="relative mb-1 h-3.5">
+            <span v-for="tk in ticks" :key="tk.left" class="absolute -translate-x-1/2 font-mono text-[10px] text-placeholder" :style="{ left: tk.left + '%' }">{{ tk.label }}</span>
+          </div>
+          <div
+            ref="tlEl"
+            class="relative h-7 cursor-pointer rounded-signal border border-line-soft bg-canvas shadow-[inset_0_1px_4px_rgba(0,0,0,0.6)]"
+            @click="onTimelineClick"
+            @wheel="onWheel"
+          >
+            <div
+              v-for="(seg, i) in shownSegs"
+              :key="i"
+              class="absolute bottom-1 top-1 rounded-signal transition-opacity hover:opacity-85"
+              :style="{ ...segStyle(seg), background: TYPE_COLOR[seg.type] || 'var(--color-rec-timer)' }"
+              :title="t('live.playback.segTitle', { start: fmtSeg(seg.s), end: fmtSeg(seg.e), type: TYPE_NAME[seg.type] ? t(TYPE_NAME[seg.type]) : seg.type })"
+            />
+            <div v-if="curTs" class="pointer-events-none absolute -bottom-1 -top-1 w-[2px] bg-primary shadow-[0_0_6px_var(--color-primary)]" :style="{ left: curLeft }" />
+          </div>
+          <div class="mt-1.5 flex flex-wrap items-center gap-3">
+            <UiCheckbox v-model="typeFilter.timer">
+              <span class="inline-flex items-center gap-1.5 text-xs"><span class="h-1.5 w-1.5 rounded-full" :style="{ background: TYPE_COLOR.timer }" />{{ t('live.playback.typeTimer') }}</span>
+            </UiCheckbox>
+            <UiCheckbox v-model="typeFilter.event">
+              <span class="inline-flex items-center gap-1.5 text-xs"><span class="h-1.5 w-1.5 rounded-full" :style="{ background: TYPE_COLOR.event }" />{{ t('live.playback.typeEvent') }}</span>
+            </UiCheckbox>
+            <UiCheckbox v-model="typeFilter.manual">
+              <span class="inline-flex items-center gap-1.5 text-xs"><span class="h-1.5 w-1.5 rounded-full" :style="{ background: TYPE_COLOR.manual }" />{{ t('live.playback.typeManual') }}</span>
+            </UiCheckbox>
+            <span class="ml-auto text-[11px] text-placeholder">{{ t('live.playback.segCount', { n: shownSegs.length }) }}</span>
+          </div>
+        </div>
+      </template>
 
       <!-- ==================== 底部控制栏（仅预览 Tab） ==================== -->
       <div v-if="activeTab === 'preview'" class="flex items-center justify-between px-5 py-2.5 bg-surface-2 border-t border-line">
@@ -297,6 +452,68 @@ onBeforeUnmount(() => {
             <Icon name="maximize" :size="15" />
           </button>
         </div>
+      </div>
+
+      <!-- ==================== 底部控制栏（仅回放 Tab） ==================== -->
+      <div v-else-if="activeTab === 'playback'" class="flex flex-wrap items-center gap-2 bg-surface-2 border-t border-line px-5 py-2.5">
+        <button
+          class="flex h-7 w-7 items-center justify-center rounded-chrome text-muted transition-colors hover:bg-zone hover:text-primary disabled:cursor-not-allowed disabled:opacity-40"
+          :title="paused ? t('live.playback.resume') : t('live.playback.pause')"
+          :aria-label="paused ? t('live.playback.resume') : t('live.playback.pause')"
+          :disabled="!session"
+          @click="togglePause"
+        >
+          <Icon :name="paused ? 'play' : 'pause'" :size="15" />
+        </button>
+        <button
+          class="flex h-7 w-7 items-center justify-center rounded-chrome text-muted transition-colors hover:bg-zone hover:text-primary disabled:cursor-not-allowed disabled:opacity-40"
+          :title="'30s'"
+          :aria-label="'30s'"
+          :disabled="!session"
+          @click="forward30"
+        >
+          <Icon name="fast-forward" :size="15" />
+        </button>
+        <button
+          class="flex h-7 w-7 items-center justify-center rounded-chrome text-muted transition-colors hover:bg-zone hover:text-primary"
+          :title="pbMuted ? t('live.playback.unmute') : t('live.playback.mute')"
+          :aria-label="pbMuted ? t('live.playback.unmute') : t('live.playback.mute')"
+          @click="togglePbMute"
+        >
+          <Icon :name="pbMuted ? 'volume-x' : 'volume-2'" :size="15" />
+        </button>
+        <UiSelect
+          :model-value="String(speed)" width="w-20" size="sm" :disabled="!session"
+          :options="speeds.map((s: number) => ({ label: s + 'x', value: String(s) }))" @update:model-value="onSpeedChange"
+        />
+        <button
+          class="flex h-7 w-7 items-center justify-center rounded-chrome text-muted transition-colors hover:bg-zone hover:text-primary"
+          :title="t('live.playback.snapshot')"
+          :aria-label="t('live.playback.snapshot')"
+          @click="doPbSnapshot"
+        >
+          <Icon name="camera" :size="15" />
+        </button>
+        <!-- 电子放大：简单点击循环 1x → 2x → 4x → 1x -->
+        <button
+          class="flex h-7 items-center gap-1 rounded-chrome px-1.5 text-xs text-muted transition-colors hover:bg-zone hover:text-primary"
+          :title="t('live.preview.zoomLevel', { level: zoomLevel })"
+          :aria-label="t('live.preview.zoomLevel', { level: zoomLevel })"
+          @click="cycleZoom"
+        >
+          <Icon name="zoom-in" :size="15" /><span class="font-mono">{{ zoomLevel }}x</span>
+        </button>
+
+        <span class="ml-auto" />
+        <button
+          class="flex h-7 w-7 items-center justify-center rounded-chrome text-muted transition-colors hover:bg-zone hover:text-danger disabled:cursor-not-allowed disabled:opacity-40"
+          :title="t('live.playback.closeSession')"
+          :aria-label="t('live.playback.closeSession')"
+          :disabled="!session"
+          @click="closeSession"
+        >
+          <Icon name="x" :size="15" />
+        </button>
       </div>
     </div>
   </div>

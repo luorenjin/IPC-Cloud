@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -110,6 +111,23 @@ func (z *ZLM) OpenRtpServer(ctx context.Context, port int, tcpMode int, streamID
 func (z *ZLM) CloseRtpServer(streamID string) error {
 	_, err := z.Call(context.Background(), "closeRtpServer", url.Values{"stream_id": {streamID}})
 	return err
+}
+
+// OpenRtpServerWithRecycle 打开 GB28181 收流端口；失败时先回收同名残留端口再重试一次。
+//
+// openRtpServer 失败最常见的原因不是节点不可达，而是上一次会话异常结束（INVITE 超时、
+// 设备掉线、节点重启）导致同名流的收流端口没被回收——此时直接返回失败会让用户看到
+// "起播失败：openRtpServer 失败"，而回收后重试通常立刻成功。
+func (z *ZLM) OpenRtpServerWithRecycle(ctx context.Context, tcpMode int, streamID string) (int, error) {
+	port, err := z.OpenRtpServer(ctx, 0, tcpMode, streamID)
+	if err == nil {
+		return port, nil
+	}
+	log.Printf("[zlm] openRtpServer(%s) 失败：%v；回收残留收流端口后重试", streamID, err)
+	if cerr := z.CloseRtpServer(streamID); cerr != nil {
+		log.Printf("[zlm] closeRtpServer(%s) 回收失败：%v", streamID, cerr)
+	}
+	return z.OpenRtpServer(ctx, 0, tcpMode, streamID)
 }
 
 func (z *ZLM) GetMediaList(ctx context.Context) ([]map[string]any, error) {

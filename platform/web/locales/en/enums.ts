@@ -44,6 +44,8 @@ export default {
   // ---- Channel streaming status ----
   'enum.streamStatus.live': 'Streaming',
   'enum.streamStatus.idle': 'Not streaming',
+  'enum.streamStatus.starting': 'Starting',
+  'enum.streamStatus.error': 'Stream error',
 
   // ---- Operation result (audit log) ----
   'enum.result.success': 'Success',

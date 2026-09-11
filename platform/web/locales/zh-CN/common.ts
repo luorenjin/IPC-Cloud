@@ -34,6 +34,7 @@ export default {
   'nav.searchPlaceholder': '搜索（设备 / 通道）',
   'nav.nodeHealthy': '流媒体节点正常',
   'nav.nodeUnhealthy': '存在离线节点',
+  'nav.nodeEntry': '查看媒体节点',
   'nav.unreadCount': '{n} 条未读',
   'nav.pendingCount': '{n} 项待办',
 

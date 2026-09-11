@@ -72,21 +72,37 @@ const query = reactive({
   pageSize: 20,
   status: '',
   source: '',
-  tab: 'all' // all | ipc
+  bulk: ''
 })
 
 const total = ref(0)
 const devices = ref<any[]>([])
 const loading = ref(false)
 const selection = ref<string[]>([])
-const expandedRow = ref<string>('')
 const cardCollapsed = ref(false)
 
-// 统计数量（顶部卡片）
+// 左侧分组面板折叠：分组列表只承担筛选，列多时（11 列 + 操作）不该常驻 240px。
+// 折叠后留一条窄轨道，选择记忆写入 localStorage，刷新后保持。
+const groupPanelCollapsed = ref(false)
+try { groupPanelCollapsed.value = localStorage.getItem('ipc_dev_group_collapsed') === '1' } catch {}
+function toggleGroupPanel() {
+  groupPanelCollapsed.value = !groupPanelCollapsed.value
+  try { localStorage.setItem('ipc_dev_group_collapsed', groupPanelCollapsed.value ? '1' : '0') } catch {}
+}
+
+/** 折叠轨道上的提示语：明确当前是否正在按某个分组筛选，避免"看不见分组名却还在被过滤" */
+const groupPanelTip = computed(() =>
+  selectedGroup.value
+    ? t('device.list.filteredByGroup', { name: groupMap[selectedGroup.value] || selectedGroup.value })
+    : t('device.list.expandGroupPanel')
+)
+
+// 项目全量统计（顶部卡片与「全部分组」计数）。来自后端 res.stats，
+// 不随筛选、不随分页变化——按当前页 devices 自行统计会在翻页/筛选后漂移。
 const stats = ref({
-  total: 2,
+  total: 0,
   online: 0,
-  offline: 2
+  offline: 0
 })
 
 async function load() {
@@ -97,19 +113,22 @@ async function load() {
     if (query.keyword) params.keyword = query.keyword.trim()
     if (query.status) params.status = query.status
     if (query.source) params.source = query.source
+    // 批量搜索：换行/逗号分隔的多行粘贴，后端按 deviceId / gbId / IP 精确匹配
+    if (query.bulk) params.bulk = query.bulk
 
     const res: any = await api.get('/devices', params)
     devices.value = res?.items || []
     total.value = res?.total || devices.value.length
 
-    // 统计更新
-    const off = devices.value.filter((d) => d.status === 'offline').length
-    const on = devices.value.filter((d) => d.status === 'online').length
-    stats.value = {
-      total: total.value,
-      online: on,
-      offline: off
-    }
+    // 统计取后端项目全量口径；后端未返回时退回当前页结果，保证卡片不至于空着
+    const s = res?.stats
+    stats.value = s
+      ? { total: s.all ?? 0, online: s.online ?? 0, offline: s.offline ?? 0 }
+      : {
+          total: total.value,
+          online: devices.value.filter((d: any) => d.status === 'online').length,
+          offline: devices.value.filter((d: any) => d.status === 'offline').length
+        }
   } catch (e: any) {
     toastApiError(e, t('device.msg.listLoadFailed'))
   } finally {
@@ -117,26 +136,70 @@ async function load() {
   }
 }
 
+// ================= 批量搜索（MGR-02） =================
+// 后端 deviceFilters 早已支持 ?bulk=（换行/逗号切分后精确匹配 deviceId / gbId / IP），
+// 但前端一直没有入口，能力一直空转。
+const bulkDlg = reactive({ show: false, text: '' })
+
 function search() {
+  // 关键词与批量搜索互斥：两者一起发给后端会被 AND 成 0 条，
+  // 而用户从列表上看不出是哪个条件把结果滤空的。后输入者胜。
+  if (query.keyword.trim()) {
+    query.bulk = ''
+    bulkDlg.text = ''
+  }
   query.page = 1
   load()
 }
 
+function openBulkSearch() {
+  bulkDlg.text = query.bulk
+  bulkDlg.show = true
+}
+function applyBulkSearch() {
+  query.bulk = bulkDlg.text.trim()
+  query.keyword = ''
+  bulkDlg.show = false
+  search()
+}
+function clearBulkSearch() {
+  query.bulk = ''
+  bulkDlg.text = ''
+  search()
+}
+
 // ================= 列配置（内容按钮：控制表格显示的列） =================
-const allCols = [
-  { key: 'index', labelKey: 'device.col.index' },
+// 列清单对齐 PRD MGR-01，`default:false` 的列默认收起。取舍按「每列信息量」而非重要性排序：
+//   序号/设备类型/通道数 —— 当前设备集里恒为常量（类型恒 IPC、通道数恒 1）；
+//   地理位置/厂商/固件 —— 多数设备为空；最后在线 —— 只有离线时才看得出价值；
+//   流状态 —— 会变（推流中/总），保留。
+// 实测默认 9 列 ≈ 968px，展开左侧分组面板时容器 1024px，不再横向滚动。
+interface ColDef {
+  key: string
+  labelKey: string
+  default?: boolean
+}
+const allCols: ColDef[] = [
+  { key: 'index', labelKey: 'device.col.index', default: false },
   { key: 'name', labelKey: 'device.col.name' },
-  { key: 'type', labelKey: 'device.col.type' },
+  { key: 'type', labelKey: 'device.col.type', default: false },
   { key: 'source', labelKey: 'device.col.source' },
   { key: 'status', labelKey: 'device.col.status' },
+  { key: 'stream', labelKey: 'device.col.stream' },
   { key: 'model', labelKey: 'device.col.model' },
+  { key: 'vendor', labelKey: 'device.col.vendor', default: false },
   { key: 'ip', labelKey: 'device.col.ip' },
   { key: 'mac', labelKey: 'device.col.mac' },
   { key: 'group', labelKey: 'device.col.group' },
-  { key: 'location', labelKey: 'device.col.location' },
+  { key: 'channels', labelKey: 'device.col.channels', default: false },
+  { key: 'location', labelKey: 'device.col.location', default: false },
+  { key: 'fw', labelKey: 'device.col.fw', default: false },
+  { key: 'lastSeen', labelKey: 'device.col.lastSeen', default: false },
   { key: 'ops', labelKey: 'device.col.ops' }
 ]
-const hiddenCols = ref<string[]>([])
+
+const defaultHiddenCols = allCols.filter((c) => c.default === false).map((c) => c.key)
+const hiddenCols = ref<string[]>([...defaultHiddenCols])
 
 function toggleCol(k: string) {
   if (hiddenCols.value.includes(k)) {
@@ -152,6 +215,30 @@ function toggleCol(k: string) {
 }
 
 const showCol = (k: string) => !hiddenCols.value.includes(k)
+
+/**
+ * 设备级「流状态」：按通道聚合，口径与详情页「码流状态 x/y 路」一致。
+ * 0 通道设备没有可推进的流，显示 —；否则显示 推流中/总路数，配色按覆盖度：
+ * 全部推流 = primary、部分推流 = warning、全部未推流 = muted。
+ */
+function streamCell(row: any) {
+  const total = Number(row.channelCount || 0)
+  const live = Number(row.streamingCount || 0)
+  if (!total) return { text: '—', dot: 'bg-muted', cls: 'text-muted' }
+  if (live === total) return { text: `${live}/${total}`, dot: 'bg-primary', cls: 'text-primary' }
+  if (live > 0) return { text: `${live}/${total}`, dot: 'bg-warning', cls: 'text-warning' }
+  return { text: `${live}/${total}`, dot: 'bg-muted', cls: 'text-muted' }
+}
+
+/** 恢复默认列：回到 defaultHiddenCols 定义的默认视图，而不是「全开」 */
+function resetCols() {
+  hiddenCols.value = [...defaultHiddenCols]
+  try {
+    localStorage.removeItem('ipc_dev_hidden_cols')
+  } catch {
+    // 隐私模式下 localStorage 不可用：仅本次生效
+  }
+}
 
 // ================= 批量操作（批量工具条） =================
 const batchMoveDlg = reactive({ show: false, groupId: '', saving: false })
@@ -321,35 +408,34 @@ async function askDeleteSingle(row: any) {
   }
 }
 
-// 行展开：多通道子列表
+// 通道缓存：只服务「设备级预览」——openPreview(row) 必须拿到真实 channelId 才能调
+// /channels/:id/play。原「行展开→通道列表」已移除：它为一行多打一次
+// GET /devices/:id/channels，而单通道设备（当前 4 台全部）只回显一个与设备名相同的通道，
+// 零新增信息；多通道也只是个预览挑路器，详情页（MGR-03）已覆盖且更完整。
+// 详情页拿通道不花额外请求：GET /devices/:id 的响应里 channels 与设备信息同包返回。
 const chCache = reactive<Record<string, any[]>>({})
-async function toggleExpand(row: any) {
-  if (expandedRow.value === row.id) {
-    expandedRow.value = ''
-    return
-  }
-  expandedRow.value = row.id
-  if (!chCache[row.id]) {
-    try {
-      const res: any = await api.get(`/devices/${row.id}/channels`)
-      chCache[row.id] = res?.items || res?.channels || []
-    } catch {
-      chCache[row.id] = []
-    }
-  }
-}
 
-// 编辑设备弹窗
-const editDevDlg = reactive({ show: false, row: null as any, name: '', location: '' })
+// 编辑设备弹窗。字段对齐 MGR-04「名称、分组、安装位置、备注」——后端 PUT /devices/:id
+// 四个字段都支持，之前只发 name/location，改分组得绕去详情页或批量工具条。
+const editDevDlg = reactive({ show: false, row: null as any, name: '', location: '', remark: '', groupId: '' })
 function openEditDev(row: any) {
   editDevDlg.row = row
   editDevDlg.name = row.name || ''
   editDevDlg.location = row.location || ''
+  editDevDlg.remark = row.remark || ''
+  editDevDlg.groupId = row.groupId || ''
   editDevDlg.show = true
 }
 async function saveEditDev() {
+  const name = editDevDlg.name.trim()
+  if (!name) return toast.warning(t('device.msg.nameRequired'))
   try {
-    await api.put(`/devices/${editDevDlg.row.id}`, { name: editDevDlg.name.trim(), location: editDevDlg.location.trim() })
+    await api.put(`/devices/${editDevDlg.row.id}`, {
+      name,
+      location: editDevDlg.location.trim(),
+      remark: editDevDlg.remark.trim(),
+      groupId: editDevDlg.groupId
+    })
     toast.success(t('device.msg.editSaved'))
     editDevDlg.show = false
     load()
@@ -400,6 +486,12 @@ function openAddModal() {
   addSubTab.value = 'single'
   addTab.value = 'idp'
   addDlg.show = true
+}
+
+/** 工具栏「批量添加」：直接落在 idp 的批量子页，而不是和「添加设备」开同一个单台表单 */
+function openAddBatch() {
+  openAddModal()
+  addSubTab.value = 'batch'
 }
 
 /** 切到国标 Tab 时拉取现有白名单，让用户看到已登记了哪些 */
@@ -630,6 +722,13 @@ onMounted(async () => {
   } catch {
     // 读不到或内容损坏：用默认列配置
   }
+  // 深链参数：/devices?status=online|offline&source=..&keyword=..&groupId=..
+  // 总览页「在线/离线」指标条等入口全靠这些参数落位；不消费的话点进来仍是全量列表。
+  const q = route.query
+  if (typeof q.status === 'string') query.status = q.status
+  if (typeof q.source === 'string') query.source = q.source
+  if (typeof q.keyword === 'string') query.keyword = q.keyword
+  if (typeof q.groupId === 'string') selectedGroup.value = q.groupId
   await loadGroups()
   load()
   if (route.query.add === '1') openAddModal()
@@ -638,8 +737,24 @@ onMounted(async () => {
 
 <template>
   <div class="flex gap-4 items-start">
-    <!-- 左侧：设备分组（信号灯式激活态，与全局侧栏呼应：左侧细竖线 + 图标变色，而非整块高亮胶囊） -->
-    <div class="w-60 shrink-0 rounded-signal border border-line bg-surface p-3 shadow-card">
+    <!-- 左侧：设备分组（信号灯式激活态，与全局侧栏呼应：左侧细竖线 + 图标变色，而非整块高亮胶囊）。
+         分组列表只承担筛选，表格已有 11 列；折叠后只留一条窄轨道，把宽度让给表格。 -->
+    <div v-if="groupPanelCollapsed" class="shrink-0 rounded-signal border border-line bg-surface p-1 shadow-card">
+      <button
+        type="button"
+        class="relative flex h-7 w-6 items-center justify-center rounded-chrome transition-colors hover:bg-zone hover:text-primary"
+        :class="selectedGroup ? 'text-primary' : 'text-muted'"
+        :aria-label="groupPanelTip"
+        :title="groupPanelTip"
+        :aria-expanded="false"
+        @click="toggleGroupPanel"
+      >
+        <Icon name="chevron-right" :size="15" />
+        <!-- 仍有分组筛选生效时给一个点，避免"看不见分组名却还在被过滤" -->
+        <span v-if="selectedGroup" class="absolute right-0 top-0.5 h-1.5 w-1.5 rounded-full bg-primary" aria-hidden="true" />
+      </button>
+    </div>
+    <div v-else class="w-60 shrink-0 rounded-signal border border-line bg-surface p-3 shadow-card">
       <div class="mb-3 flex items-center justify-between">
         <span class="text-sm font-bold text-ink">{{ t('device.list.groupPanel') }}</span>
         <div class="flex items-center gap-1">
@@ -653,6 +768,16 @@ onMounted(async () => {
             @click="openEditGroup(groups.find(g => g.id === selectedGroup))"
           >
             <Icon name="edit" :size="14" />
+          </button>
+          <button
+            type="button"
+            class="rounded-chrome p-1 text-muted transition-colors hover:bg-zone hover:text-primary"
+            :aria-label="t('device.list.collapseGroupPanel')"
+            :title="t('device.list.collapseGroupPanel')"
+            :aria-expanded="true"
+            @click="toggleGroupPanel"
+          >
+            <Icon name="chevron-left" :size="15" />
           </button>
         </div>
       </div>
@@ -684,10 +809,11 @@ onMounted(async () => {
           @click="selectedGroup = g.id; search()"
         >
           <span class="absolute left-0.5 top-1/2 h-3.5 w-0.5 -translate-y-1/2 rounded-full bg-primary transition-opacity" :class="selectedGroup === g.id ? 'opacity-100' : 'opacity-0'" />
-          <span class="flex items-center gap-1.5 truncate">
+          <span class="flex min-w-0 items-center gap-1.5 truncate">
             <Icon name="chevron-down" :size="11" class="text-placeholder" />
             <Icon name="video" :size="13" :class="selectedGroup === g.id ? 'text-primary' : ''" />{{ g.name }}
           </span>
+          <span class="shrink-0 pl-1 text-[11px] text-placeholder">({{ g.deviceCount ?? 0 }})</span>
         </div>
       </div>
     </div>
@@ -723,25 +849,21 @@ onMounted(async () => {
 
       <!-- 表格主体卡片 -->
       <div class="rounded-signal border border-line bg-surface p-4 shadow-card">
-        <!-- 主工具栏行：全部 | IPC Tab 与添加设备按钮 -->
-        <div class="mb-3">
-          <UiTabs
-            v-model="query.tab"
-            :items="[{ label: t('device.list.tabAll'), value: 'all' }, { label: 'IPC', value: 'ipc' }]"
-          >
-            <template #extra>
-              <!-- 国标待确认入口：与侧栏徽标同源（useState('gbPending')），仅有待确认时出现 -->
-              <UiButton v-if="pendingCount > 0" class="ml-auto" @click="navigateTo('/devices/pending')">
-                {{ t('device.list.pendingEntry') }}
-                <span class="ml-1 rounded-full bg-danger px-1.5 text-[10px] leading-4 text-white">
-                  {{ pendingCount > 99 ? '99+' : pendingCount }}
-                </span>
-              </UiButton>
-              <UiButton variant="primary" :class="pendingCount > 0 ? '' : 'ml-auto'" @click="openAddModal">
-                <Icon name="plus" :size="15" />{{ t('device.toolbar.addDevice') }}
-              </UiButton>
-            </template>
-          </UiTabs>
+        <!-- 主工具栏行。
+             原「全部 | IPC」标签页已移除：设备模型没有 type 维度，全站设备类型恒为 IPC，
+             该标签不产生任何请求、切换前后结果完全一致（点击零请求的死交互）。待真正引入
+             第二类设备（模型加 type 字段 + 后端 type 过滤）时，再随该功能一并加回。 -->
+        <div class="mb-3 flex flex-wrap items-center gap-2">
+          <!-- 国标待确认入口：与侧栏徽标同源（useState('gbPending')），仅有待确认时出现 -->
+          <UiButton v-if="pendingCount > 0" @click="navigateTo('/devices/pending')">
+            {{ t('device.list.pendingEntry') }}
+            <span class="ml-1 rounded-full bg-danger px-1.5 text-[10px] leading-4 text-white">
+              {{ pendingCount > 99 ? '99+' : pendingCount }}
+            </span>
+          </UiButton>
+          <UiButton variant="primary" class="ml-auto" @click="openAddModal">
+            <Icon name="plus" :size="15" />{{ t('device.toolbar.addDevice') }}
+          </UiButton>
         </div>
 
         <!-- 批量操作与列配置条 -->
@@ -753,10 +875,16 @@ onMounted(async () => {
               <template #trigger>
                 <UiButton size="sm"><Icon name="list" :size="13" />{{ t('device.toolbar.columns') }}</UiButton>
               </template>
-              <div class="w-40 space-y-0.5 p-1">
-                <div v-for="c in allCols" :key="c.key" class="rounded px-1.5 py-1 hover:bg-zone">
-                  <UiCheckbox :model-value="showCol(c.key)" :label="t(c.labelKey)" @update:model-value="toggleCol(c.key)" />
+              <div class="w-44">
+                <p class="mb-1.5 px-1.5 text-xs text-placeholder">{{ t('device.toolbar.columnsHint') }}</p>
+                <!-- 列会越加越多，给列表一个固定上限并内部滚动：
+                     标题与底部「重置」始终可见，弹窗不会长到顶出视口。 -->
+                <div class="max-h-60 space-y-0.5 overflow-y-auto pr-0.5">
+                  <div v-for="c in allCols" :key="c.key" class="rounded px-1.5 py-1 hover:bg-zone">
+                    <UiCheckbox :model-value="showCol(c.key)" :label="t(c.labelKey)" @update:model-value="toggleCol(c.key)" />
+                  </div>
                 </div>
+                <UiButton size="sm" block class="mt-1.5" @click="resetCols">{{ t('common.reset') }}</UiButton>
               </div>
             </UiPopover>
 
@@ -771,7 +899,14 @@ onMounted(async () => {
 
           <!-- 右侧搜索与过滤 -->
           <div class="flex items-center gap-2">
-            <UiButton size="sm" @click="openAddModal">{{ t('device.toolbar.batchAdd') }}</UiButton>
+            <UiButton size="sm" @click="openAddBatch">{{ t('device.toolbar.batchAdd') }}</UiButton>
+            <!-- 批量搜索：多行粘贴 deviceId / 国标 ID / IP -->
+            <UiButton
+              size="sm"
+              :variant="query.bulk ? 'primary' : 'default'"
+              :title="query.bulk ? t('device.bulkSearch.activeTip') : t('device.bulkSearch.title')"
+              @click="openBulkSearch"
+            >{{ t('device.toolbar.bulkSearch') }}</UiButton>
             <!-- 搜索框 -->
             <UiInput v-model="query.keyword" :placeholder="t('device.toolbar.searchPlaceholder')" size="sm" width="w-48" @enter="search">
               <template #prefix><Icon name="search" :size="12" class="mr-1 text-placeholder" /></template>
@@ -794,26 +929,35 @@ onMounted(async () => {
         <!-- 设备表格 -->
         <div class="overflow-x-auto rounded-signal border border-line">
           <table class="w-full text-left text-xs text-body">
+            <!-- 表头一律 whitespace-nowrap：中文标签最短 2 字、最长 4 字（设备名称/设备类型/设备状态/
+                 所属分组/地理位置），列宽不够时若允许折行，「序号」会被拆成「序/号」、「设备状态」
+                 会被拆成两行，表头高度参差且与内容对不齐。禁用折行后列宽自然撑到标签宽度，
+                 整表不足时由外层 overflow-x-auto 横向滚动；收起左侧分组面板可再多出 240px。 -->
             <thead class="border-b border-line bg-zone text-muted">
               <tr>
-                <th class="py-2.5 px-3 w-8">
+                <th class="w-8 whitespace-nowrap px-3 py-2.5">
                   <UiCheckbox
                     :model-value="selection.length > 0 && selection.length === devices.length"
                     :aria-label="selection.length === devices.length ? t('device.list.clearSelection') : t('device.list.selectAllPage')"
                     @update:model-value="selection = selection.length === devices.length ? [] : devices.map(d => d.id)"
                   />
                 </th>
-                <th v-if="showCol('index')" class="py-2.5 px-3 w-10 text-center">{{ t('device.col.index') }}</th>
-                <th v-if="showCol('name')" class="py-2.5 px-3">{{ t('device.col.name') }}</th>
-                <th v-if="showCol('type')" class="py-2.5 px-3">{{ t('device.col.type') }}</th>
-                <th v-if="showCol('source')" class="py-2.5 px-3">{{ t('device.col.source') }}</th>
-                <th v-if="showCol('status')" class="py-2.5 px-3">{{ t('device.col.status') }}</th>
-                <th v-if="showCol('model')" class="py-2.5 px-3">{{ t('device.col.model') }}</th>
-                <th v-if="showCol('ip')" class="py-2.5 px-3 text-right">{{ t('device.col.ip') }}</th>
-                <th v-if="showCol('mac')" class="py-2.5 px-3 text-right">{{ t('device.col.mac') }}</th>
-                <th v-if="showCol('group')" class="py-2.5 px-3">{{ t('device.col.group') }}</th>
-                <th v-if="showCol('location')" class="py-2.5 px-3">{{ t('device.col.location') }}</th>
-                <th v-if="showCol('ops')" class="py-2.5 px-3 text-right">{{ t('device.col.ops') }}</th>
+                <th v-if="showCol('index')" class="w-12 whitespace-nowrap px-3 py-2.5 text-center">{{ t('device.col.index') }}</th>
+                <th v-if="showCol('name')" class="whitespace-nowrap px-3 py-2.5">{{ t('device.col.name') }}</th>
+                <th v-if="showCol('type')" class="whitespace-nowrap px-3 py-2.5">{{ t('device.col.type') }}</th>
+                <th v-if="showCol('source')" class="whitespace-nowrap px-3 py-2.5">{{ t('device.col.source') }}</th>
+                <th v-if="showCol('status')" class="whitespace-nowrap px-3 py-2.5">{{ t('device.col.status') }}</th>
+                <th v-if="showCol('stream')" class="whitespace-nowrap px-3 py-2.5">{{ t('device.col.stream') }}</th>
+                <th v-if="showCol('model')" class="whitespace-nowrap px-3 py-2.5">{{ t('device.col.model') }}</th>
+                <th v-if="showCol('vendor')" class="whitespace-nowrap px-3 py-2.5">{{ t('device.col.vendor') }}</th>
+                <th v-if="showCol('ip')" class="whitespace-nowrap px-3 py-2.5 text-right">{{ t('device.col.ip') }}</th>
+                <th v-if="showCol('mac')" class="whitespace-nowrap px-3 py-2.5 text-right">{{ t('device.col.mac') }}</th>
+                <th v-if="showCol('group')" class="whitespace-nowrap px-3 py-2.5">{{ t('device.col.group') }}</th>
+                <th v-if="showCol('channels')" class="whitespace-nowrap px-3 py-2.5">{{ t('device.col.channels') }}</th>
+                <th v-if="showCol('location')" class="whitespace-nowrap px-3 py-2.5">{{ t('device.col.location') }}</th>
+                <th v-if="showCol('fw')" class="whitespace-nowrap px-3 py-2.5">{{ t('device.col.fw') }}</th>
+                <th v-if="showCol('lastSeen')" class="whitespace-nowrap px-3 py-2.5">{{ t('device.col.lastSeen') }}</th>
+                <th v-if="showCol('ops')" class="whitespace-nowrap px-3 py-2.5 text-right">{{ t('device.col.ops') }}</th>
               </tr>
             </thead>
             <tbody class="divide-y divide-line-soft">
@@ -828,22 +972,12 @@ onMounted(async () => {
                   </td>
                   <td v-if="showCol('index')" class="py-2.5 px-3 text-center text-placeholder">{{ idx + 1 }}</td>
                   <td v-if="showCol('name')" class="py-2.5 px-3">
-                    <div class="flex items-center gap-1.5 text-left">
-                      <button
-                        type="button"
-                        class="rounded-chrome p-0.5 text-placeholder transition-transform hover:bg-zone"
-                        :class="expandedRow === row.id ? 'rotate-90 text-primary' : ''"
-                        :aria-label="expandedRow === row.id ? t('device.list.collapseChannels', { name: row.name }) : t('device.list.expandChannels', { name: row.name })"
-                        :aria-expanded="expandedRow === row.id"
-                        :title="t('device.list.expandChannelsTip')"
-                        @click.stop="toggleExpand(row)"
-                      >
-                        <Icon name="chevron-right" :size="12" />
-                      </button>
-                      <UiButton variant="text" size="sm" class="max-w-[160px] truncate" @click="router.push(`/devices/${row.id}`)">
-                        {{ row.name }}
-                      </UiButton>
-                    </div>
+                    <!-- 真链接而非 button：能悬停看 URL、能 Ctrl/中键新开标签页，读屏也念成“链接”。
+                         设备名称是列表进详情（MGR-03，含通道列表）的唯一入口。 -->
+                    <NuxtLink
+                      :to="`/devices/${row.id}`"
+                      class="inline-block h-7 max-w-[120px] truncate rounded-chrome px-1 text-xs font-medium leading-7 text-primary transition-colors hover:bg-primary-soft"
+                    >{{ row.name }}</NuxtLink>
                   </td>
                   <td v-if="showCol('type')" class="py-2.5 px-3">{{ row.type || 'IPC' }}</td>
                   <td v-if="showCol('source')" class="py-2.5 px-3"><UiTag :color="sourceInfo(row.source).color">{{ t(sourceInfo(row.source).labelKey) }}</UiTag></td>
@@ -853,39 +987,30 @@ onMounted(async () => {
                       {{ row.status === 'online' ? t('common.online') : t('common.offline') }}
                     </span>
                   </td>
-                  <td v-if="showCol('model')" class="py-2.5 px-3 text-muted">{{ row.model || '—' }}</td>
+                  <!-- 设备级流状态：按通道聚合，非单通道实时值（看单通道请进详情页） -->
+                  <td v-if="showCol('stream')" class="whitespace-nowrap px-3 py-2.5">
+                    <span class="flex items-center gap-1.5" :class="streamCell(row).cls">
+                      <span class="h-2 w-2 rounded-full" :class="streamCell(row).dot" />
+                      {{ streamCell(row).text }}
+                    </span>
+                  </td>
+                  <!-- 型号是唯一可能较长的自由文本（SIM-GB28181 / SIM-IPC-100）：不折行，宁可让本列变宽 -->
+                  <td v-if="showCol('model')" class="whitespace-nowrap px-3 py-2.5 text-muted">{{ row.model || '—' }}</td>
+                  <td v-if="showCol('vendor')" class="whitespace-nowrap px-3 py-2.5 text-muted">{{ row.vendor || '—' }}</td>
                   <td v-if="showCol('ip')" class="py-2.5 px-3 text-right font-mono text-muted">{{ row.ip || '—' }}</td>
                   <td v-if="showCol('mac')" class="py-2.5 px-3 text-right font-mono text-muted">{{ row.mac || '—' }}</td>
                   <td v-if="showCol('group')" class="py-2.5 px-3">{{ groupMap[row.groupId] || '—' }}</td>
+                  <td v-if="showCol('channels')" class="py-2.5 px-3 text-muted">{{ row.channelCount ?? '—' }}</td>
                   <td v-if="showCol('location')" class="py-2.5 px-3 text-placeholder">{{ row.location || '—' }}</td>
+                  <td v-if="showCol('fw')" class="whitespace-nowrap px-3 py-2.5 font-mono text-muted">{{ row.fw || '—' }}</td>
+                  <td v-if="showCol('lastSeen')" class="whitespace-nowrap px-3 py-2.5 text-placeholder">{{ row.lastSeenAt ? ago(row.lastSeenAt, t) : '—' }}</td>
                   <!-- 操作列：远程配置、编辑、预览、删除 -->
                   <td v-if="showCol('ops')" class="py-2.5 px-3 text-right">
                     <div class="flex items-center justify-end gap-1">
                       <UiButton variant="text" size="sm" @click="router.push(`/devices/${row.id}`)">{{ t('device.toolbar.remoteConfig') }}</UiButton>
                       <UiButton variant="text" size="sm" @click="openEditDev(row)">{{ t('common.edit') }}</UiButton>
-                      <UiButton variant="text" size="sm" @click="openPreview(row)">{{ t('device.toolbar.preview') }}</UiButton>
+                      <UiButton variant="text" size="sm" :title="t('device.list.previewTip')" @click="openPreview(row)">{{ t('device.toolbar.preview') }}</UiButton>
                       <UiButton variant="dangerText" size="sm" :title="t('device.toolbar.delete')" @click="askDeleteSingle(row)">{{ t('common.delete') }}</UiButton>
-                    </div>
-                  </td>
-                </tr>
-
-                <!-- 行展开通道子列表（MGR-01） -->
-                <tr v-if="expandedRow === row.id">
-                  <td colspan="12" class="border-b border-line-soft bg-zone p-3 pl-12">
-                    <div class="mb-1.5 text-xs font-semibold text-muted">{{ t('device.list.channelList') }}</div>
-                    <div v-if="!chCache[row.id]?.length" class="text-xs text-placeholder">
-                      {{ t('device.list.noChannel') }}
-                    </div>
-                    <div v-else class="flex flex-wrap gap-2">
-                      <div
-                        v-for="ch in chCache[row.id]"
-                        :key="ch.id"
-                        class="flex items-center gap-2 rounded-signal border border-line bg-surface px-2.5 py-1 text-xs"
-                      >
-                        <span class="h-1.5 w-1.5 rounded-full" :class="ch.enabled !== false ? 'bg-primary' : 'bg-line'" />
-                        <span class="font-medium text-ink">{{ ch.name || t('device.list.channelNo', { n: ch.idx }) }}</span>
-                        <UiButton variant="text" size="sm" class="ml-1" @click="openPreview(row, ch)">{{ t('device.toolbar.preview') }}</UiButton>
-                      </div>
                     </div>
                   </td>
                 </tr>
@@ -1160,7 +1285,7 @@ onMounted(async () => {
       </template>
     </UiDialog>
 
-    <!-- 编辑设备基本信息弹窗 -->
+    <!-- 编辑设备基本信息弹窗（MGR-04：名称/分组/安装位置/备注） -->
     <UiDialog v-model:open="editDevDlg.show" :title="t('device.edit.title')" width="max-w-md">
       <div class="space-y-3">
         <div>
@@ -1168,13 +1293,37 @@ onMounted(async () => {
           <UiInput v-model="editDevDlg.name" />
         </div>
         <div>
+          <label class="mb-1 block text-xs text-muted">{{ t('device.col.group') }}</label>
+          <UiSelect v-model="editDevDlg.groupId" :options="groupOptions" class="w-full" />
+        </div>
+        <div>
           <label class="mb-1 block text-xs text-muted">{{ t('device.edit.location') }}</label>
           <UiInput v-model="editDevDlg.location" :placeholder="t('device.edit.locationPlaceholder')" />
+        </div>
+        <div>
+          <label class="mb-1 block text-xs text-muted">{{ t('common.remark') }}</label>
+          <UiInput v-model="editDevDlg.remark" />
         </div>
       </div>
       <template #footer>
         <UiButton @click="editDevDlg.show = false">{{ t('common.cancel') }}</UiButton>
         <UiButton variant="primary" @click="saveEditDev">{{ t('common.save') }}</UiButton>
+      </template>
+    </UiDialog>
+
+    <!-- 批量搜索（MGR-02）：多行粘贴设备ID / 国标 ID / IP -->
+    <UiDialog v-model:open="bulkDlg.show" :title="t('device.bulkSearch.title')" width="max-w-md">
+      <p class="mb-2 text-xs text-placeholder">{{ t('device.bulkSearch.hint') }}</p>
+      <textarea
+        v-model="bulkDlg.text"
+        rows="6"
+        class="w-full rounded-chrome border border-line bg-surface p-2.5 font-mono text-xs text-body outline-none focus:border-primary"
+        :placeholder="t('device.bulkSearch.placeholder')"
+      />
+      <template #footer>
+        <UiButton v-if="query.bulk" @click="clearBulkSearch">{{ t('common.clear') }}</UiButton>
+        <UiButton @click="bulkDlg.show = false">{{ t('common.cancel') }}</UiButton>
+        <UiButton variant="primary" @click="applyBulkSearch">{{ t('common.search') }}</UiButton>
       </template>
     </UiDialog>
 

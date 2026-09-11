@@ -72,6 +72,8 @@ func Router(hub *wshub.Hub) *gin.Engine {
 		v1.POST("/devices/:id/sync", AuthMiddleware(), requireProjectID(), requirePerm("config"), handleSyncDevice)
 		v1.POST("/devices/:id/diag", AuthMiddleware(), requireProjectID(), requirePerm("config"), handleDiagDevice)
 		v1.POST("/devices/:id/reboot", AuthMiddleware(), requireProjectID(), requirePerm("config"), handleRebootDevice)
+		v1.GET("/devices/:id/reboot-plan", AuthMiddleware(), requireProjectID(), requirePerm("view"), handleGetRebootPlan)
+		v1.PUT("/devices/:id/reboot-plan", AuthMiddleware(), requireProjectID(), requirePerm("config"), handleSetRebootPlan)
 		v1.GET("/devices/:id/config", AuthMiddleware(), requireProjectID(), requirePerm("config"), handleDeviceConfigGet)
 		v1.PUT("/devices/:id/config", AuthMiddleware(), requireProjectID(), requirePerm("config"), handleDeviceConfigSet)
 		v1.POST("/devices/:id/config/reset", AuthMiddleware(), requireProjectID(), requirePerm("config"), handleDeviceConfigReset)

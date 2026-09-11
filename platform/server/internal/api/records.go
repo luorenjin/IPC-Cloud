@@ -2,6 +2,7 @@ package api
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/jetscam/ipccloud/server/internal/errs"
 	"github.com/jetscam/ipccloud/server/internal/models"
 	"github.com/jetscam/ipccloud/server/internal/store"
+	"github.com/jetscam/ipccloud/server/internal/timeutil"
 )
 
 // ---------- 录像计划模板 REC-05 ----------
@@ -180,6 +182,7 @@ func handleRecordDays(c *gin.Context) {
 		return
 	}
 	chID := c.Param("id")
+	ctx := getCtx(c)
 	type row struct {
 		StartTs int64
 		EndTs   int64
@@ -191,18 +194,20 @@ func handleRecordDays(c *gin.Context) {
 		dq = dq.Where("source = ?", q.Source)
 	}
 	dq.Find(&rows)
-	// 按天展开（段可能跨天）
+	// 按天展开（段可能跨天）。日期键与推进都按项目时区求值：服务端 time.Local 通常是 UTC，
+	// 用它会把北京时间凌晨的录像记到前一天，回放页日期列表随之整体错一天。
+	loc := store.ProjectLocation(ctx.ProjectID)
 	seen := map[string]bool{}
 	days := []string{}
 	for _, r := range rows {
-		d := r.StartTs
-		for d < r.EndTs {
-			key := time.UnixMilli(d).Format("2006-01-02")
+		cur := timeutil.DayStartMillis(time.UnixMilli(r.StartTs), loc)
+		for cur < r.EndTs {
+			key := timeutil.DayKey(time.UnixMilli(cur), loc)
 			if !seen[key] {
 				seen[key] = true
 				days = append(days, key)
 			}
-			d += 86400_000
+			cur = timeutil.NextDayStart(time.UnixMilli(cur), loc).UnixMilli()
 		}
 	}
 	ok(c, gin.H{"days": days})
@@ -274,20 +279,27 @@ func handleStorageOverview(c *gin.Context) {
 	store.DB.Model(&models.RecordIndex{}).
 		Joins("JOIN channels c ON c.id = "+tbl+".channel_id").
 		Where("c.project_id = ?", ctx.ProjectID).Count(&count)
-	// 总容量从设置读取，默认 500GB
+	// 总容量与保留天数从设置读取，缺省 500GB / 30 天
 	var st models.Setting
 	total := int64(500 * 1024 * 1024 * 1024)
+	keepDays := 30
 	if err := store.DB.First(&st, "scope = ? AND key = 'storage.totalBytes'", ctx.ProjectID).Error; err == nil {
 		if v, ok := st.Value["value"].(float64); ok {
 			total = int64(v)
 		}
 	}
+	if err := store.DB.First(&st, "scope = ? AND key = 'storage.keepDays'", ctx.ProjectID).Error; err == nil {
+		if v, ok := st.Value["value"].(float64); ok && v > 0 {
+			keepDays = int(v)
+		}
+	}
+	// 百分比四舍五入：原先的整数除法会把 7.66% 截断成 7%，与用户按容量反算的结果对不上。
 	pct := 0
 	if total > 0 {
-		pct = int(used * 100 / total)
+		pct = int(math.Round(float64(used) * 100 / float64(total)))
 	}
 	ok(c, gin.H{"usedBytes": used, "totalBytes": total, "percent": pct, "segments": count,
-		"keepDays": 30})
+		"keepDays": keepDays})
 	if pct >= 90 {
 		engine_CreateAlarmEvent(ctx.ProjectID, "", "", "disk_full", "warn",
 			map[string]any{"percent": pct}, "")

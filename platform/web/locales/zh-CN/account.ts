@@ -26,7 +26,7 @@ export default {
   'account.profile.statusActive': '正常',
   'account.profile.statusDisabled': '已停用',
   'account.profile.currentProject': '当前项目',
-  'account.profile.saveName': '保存姓名',
+  'account.profile.saveName': '保存信息',
   'account.profile.pwdTitle': '修改密码',
   'account.profile.oldPassword': '当前密码',
   'account.profile.oldPasswordPlaceholder': '请输入当前登录密码',

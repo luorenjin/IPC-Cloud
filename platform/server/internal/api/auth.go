@@ -117,12 +117,23 @@ func itoa(n int) string {
 	if n == 0 {
 		return "0"
 	}
-	var b [12]byte
+	neg := n < 0
+	if neg {
+		n = -n
+	}
+	// 20 字节装得下 int64 的全部十进制位（最多 19 位）+ 符号。
+	// 原来是 12 字节，而毫秒时间戳是 13 位，写快照文件名时会越界 panic（b[-1]）——
+	// 表现是「上传快照 500 / 抓图永远是空图」。
+	var b [20]byte
 	i := len(b)
 	for n > 0 {
 		i--
 		b[i] = byte('0' + n%10)
 		n /= 10
+	}
+	if neg {
+		i--
+		b[i] = '-'
 	}
 	return string(b[i:])
 }

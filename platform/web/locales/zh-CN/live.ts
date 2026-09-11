@@ -9,6 +9,11 @@ export default {
   'live.tree.collapsedLabel': '通道',
   'live.tree.expand': '展开通道列表',
   'live.tree.collapse': '收起通道列表',
+  // 状态语义 = 设备在线/离线（PRD LIVE-03），通道再补流状态；读屏与悬浮提示都靠这几条，不能只靠颜色
+  'live.tree.deviceOnline': '在线',
+  'live.tree.deviceOffline': '离线',
+  'live.tree.streamingSuffix': '（正在出流）',
+  'live.tree.streamErrorSuffix': '（取流失败）',
 
   // ---- 画面格与播放器 ----
   'live.player.dropHint': '双击左侧通道或拖拽到此处播放',
@@ -116,14 +121,12 @@ export default {
   'live.preview.tabPlayback': '回放',
   'live.preview.loading': '正在拉流…',
   'live.preview.noStream': '暂无画面',
-  'live.preview.playbackHint': '录像回放需要按通道选择日期与时间轴，请前往回放页查看「{name}」的录像。',
-  'live.preview.playbackFallbackName': '该通道',
-  'live.preview.openPlayback': '打开录像回放',
   'live.preview.unmute': '开启声音',
   'live.preview.mute': '静音',
   'live.preview.snapshot': '抓拍图片',
   'live.preview.viewSnapshot': '查看抓拍图片',
   'live.preview.fullscreen': '全屏',
+  'live.preview.zoomLevel': '电子放大 {level}x（点击切换）',
 
   // ---- 提示与错误 ----
   'live.msg.treeLoadFailed': '通道加载失败',

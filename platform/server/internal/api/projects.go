@@ -59,10 +59,10 @@ func handleCreateProject(c *gin.Context) {
 func handleUpdateProject(c *gin.Context) {
 	id := c.Param("id")
 	var req struct {
-		Name    *string `json:"name"`
-		TZ      *string `json:"tz"`
-		Enabled *bool   `json:"enabled"`
-		SetupDone *bool `json:"setupDone"`
+		Name      *string `json:"name"`
+		TZ        *string `json:"tz"`
+		Enabled   *bool   `json:"enabled"`
+		SetupDone *bool   `json:"setupDone"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		fail(c, errs.EBadRequest)
@@ -187,7 +187,29 @@ func handleListGroups(c *gin.Context) {
 	}
 	var groups []models.DeviceGroup
 	store.DB.Where("project_id = ?", pid).Order("sort ASC").Find(&groups)
-	ok(c, gin.H{"items": groups})
+	// 每个分组附带直属设备数：设备页分组树要显示计数，前端不应为此再拉一遍全量设备自己统计。
+	type groupCount struct {
+		GroupID string
+		Cnt     int64
+	}
+	var cnts []groupCount
+	store.DB.Model(&models.Device{}).
+		Select("group_id, COUNT(*) AS cnt").
+		Where("project_id = ? AND deleted_at = 0 AND group_id <> ''", pid).
+		Group("group_id").Scan(&cnts)
+	byGroup := make(map[string]int64, len(cnts))
+	for _, c := range cnts {
+		byGroup[c.GroupID] = c.Cnt
+	}
+	items := make([]gin.H, 0, len(groups))
+	for _, g := range groups {
+		items = append(items, gin.H{
+			"id": g.ID, "projectId": g.ProjectID, "parentId": g.ParentID,
+			"name": g.Name, "sort": g.Sort, "createdAt": g.CreatedAt,
+			"deviceCount": byGroup[g.ID],
+		})
+	}
+	ok(c, gin.H{"items": items})
 }
 
 type groupReq struct {

@@ -12,6 +12,7 @@ import (
 	"github.com/jetscam/ipccloud/server/internal/errs"
 	"github.com/jetscam/ipccloud/server/internal/models"
 	"github.com/jetscam/ipccloud/server/internal/store"
+	"github.com/jetscam/ipccloud/server/internal/timeutil"
 )
 
 // ---------- 全局设置 SET-01 ----------
@@ -58,11 +59,11 @@ func handleIdpConfig(c *gin.Context) {
 	var idpCount int64
 	store.DB.Model(&models.Device{}).Where("source = 'idp'").Count(&idpCount)
 	ok(c, gin.H{
-		"broker":    appCfg.MQTTBroker,
-		"tls":       appCfg.MQTTTLS,
-		"caStatus":  "active",
-		"idpCount":  idpCount,
-		"crl":       []any{},
+		"broker":   appCfg.MQTTBroker,
+		"tls":      appCfg.MQTTTLS,
+		"caStatus": "active",
+		"idpCount": idpCount,
+		"crl":      []any{},
 	})
 }
 
@@ -207,7 +208,9 @@ func handleDashboard(c *gin.Context) {
 	}
 
 	var alarmToday int64
-	dayStart := time.Now().In(time.Local).Truncate(24 * time.Hour).UnixMilli()
+	// 「今日」必须按项目时区取零点：服务端容器 time.Local 通常是 UTC，
+	// 直接用它会让"今日告警"整体偏移（UTC+8 下把前一日 08:00 之后都算作今天）。
+	dayStart := timeutil.DayStartMillis(time.Now(), store.ProjectLocation(pid))
 	store.DB.Model(&models.AlarmEvent{}).Where("project_id = ? AND ts >= ?", pid, dayStart).Count(&alarmToday)
 
 	var nodes []models.MediaNode
