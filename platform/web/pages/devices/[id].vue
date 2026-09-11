@@ -436,6 +436,14 @@ watch(tab, (v) => {
   if (!Object.keys(cfg.data).length) loadCfg()
   if (!preview.src) loadPreview()
 })
+// 定时重启计划的响应式状态必须先于下面的 watch 声明：watch 带 immediate:true，
+// 若 cfgTab 初始值直接来自 ?tab=maintain 深链，回调会在 <script setup> 顶层同步执行流里
+// 立即跑一次并读 rebootPlan.loaded——此时若 rebootPlan 还没 const 初始化就是 TDZ 报错，
+// 会打断整个 setup()（曾经在此处踩过一次：把 watch 放在 rebootPlan 声明之前导致过这个问题）。
+const rebootPlan = reactive({
+  loading: false, loaded: false, saving: false, enabled: false,
+  days: [] as number[], time: '03:00', lastFiredKey: ''
+})
 // 定时重启只在切到「设备维护」子页签时才拉：它跟 cfg.get 是两次设备往返，没必要都预热；
 // immediate:true 是必须的——cfgTab 初始值可能直接来自 URL（?tab=maintain 深链），
 // 不加 immediate 的话「切换」这个触发条件从未发生，深链落地就会看到空白的定时重启区块。
@@ -461,10 +469,7 @@ async function saveCfg() {
 
 // ================= 定时重启（MGR-08） =================
 // 复用「配置」页的位置：与手动重启同属对设备的写操作，且都需要 config 权限。
-const rebootPlan = reactive({
-  loading: false, loaded: false, saving: false, enabled: false,
-  days: [] as number[], time: '03:00', lastFiredKey: ''
-})
+// （rebootPlan 的声明已提前到上面 watch(cfgTab, ...) 之前，此处不重复声明）
 async function loadRebootPlan() {
   rebootPlan.loading = true
   try {
