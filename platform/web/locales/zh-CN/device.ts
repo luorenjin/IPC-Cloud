@@ -60,6 +60,7 @@ export default {
   'device.toolbar.delete': '删除设备',
   'device.toolbar.export': '导出设备信息',
   'device.toolbar.sync': '设备同步',
+  'device.toolbar.password': '修改密码',
   'device.toolbar.batchAdd': '批量添加',
   'device.toolbar.searchPlaceholder': '搜索设备名/MAC/IP',
   'device.toolbar.allStatus': '全部状态',
@@ -127,6 +128,11 @@ export default {
   'device.transfer.selectProject': '选择目标项目',
   'device.transfer.noProject': '没有其他可选项目。',
   'device.transfer.submit': '确定转移',
+  // ---- 统一修改密码（设备本地账户口令，接入规范 §5.7 的 localUser.password）----
+  'device.pwd.title': '修改设备密码',
+  'device.pwd.hint': '同一个口令将下发给选中的 {n} 台设备。口令不会在平台上保存，请自行留存。',
+  'device.pwd.policy': '口令 8–63 位且同时包含字母与数字；仅 IDP 接入的设备支持远程改密。',
+  'device.pwd.submit': '下发口令',
   'device.move.title': '移动到分组',
   'device.move.targetGroup': '选择目标分组',
   'device.edit.title': '编辑设备',
@@ -148,6 +154,11 @@ export default {
   'device.confirm.gbRemoveTitle': '移除白名单',
   'device.confirm.gbRemoveMsg': '确定移除国标编号 {id}？移除后该设备再注册将被拒绝。',
   'device.confirm.gbRemoveOk': '移除',
+  // 改错口令会把人锁在设备外面，因此走危险确认
+  'device.confirm.devPwdTitle': '修改设备本地账户口令',
+  'device.confirm.devPwdMsg': '将为设备「{name}」设置新的本地账户口令。',
+  'device.confirm.devPwdDetail': '改完请立即用新口令登录设备本地控制台验证；口令一旦遗失，只能恢复出厂设置重设。',
+  'device.confirm.devPwdOk': '确认修改',
 
   // ---- 详情页 ----
   'device.detail.back': '返回',
@@ -341,9 +352,16 @@ export default {
   // ---- 本地账户（设备维护页签） ----
   'device.config.localUser': '账户名',
   'device.config.led': '启用指示灯',
-  // 接入规范 §590：默认密码未改的设备要在 UI 上标黄提示。平台暂无远程改密能力，
-  // 文案必须把“去哪里改”说清，否则用户会在这里反复找保存按钮
-  'device.config.defaultPwdHint': '设备仍在使用出厂默认密码。请登录设备自身的 Web 控制台修改（平台暂不支持远程改密），改完再接入可避免被弱口令扫描。',
+  // 接入规范 §590：默认密码未改的设备要在 UI 上标黄提示
+  'device.config.defaultPwdHint': '设备仍在使用出厂默认密码。请在下方「口令」处设置新口令，或到设备自身的 Web 控制台修改。',
+  // 口令是只写键：设备只回空串、不回显当前值，所以文案要说明“留空不代表没设
+  // 置密码”，否则用户会把空框当成“当前没密码”。
+  'device.config.newPassword': '新口令',
+  'device.config.pwdConfirm': '确认新口令',
+  'device.config.pwdPlaceholder': '8–63 位，含字母与数字',
+  'device.config.pwdConfirmPlaceholder': '再次输入新口令',
+  'device.config.changePwd': '修改密码',
+  'device.config.pwdHint': '口令单独下发，不随「保存并下发」提交，也不回显（设备只存哈希）；平台不保存设备口令，请自行留存。',
   // ---- 设备维护（MGR-08）：立即重启按钮已收敛到页头工具栏，这里只保留定时重启计划 ----
   'device.config.scheduledReboot': '定时重启',
   'device.config.planOn': '已启用',
@@ -440,6 +458,13 @@ export default {
   'device.msg.selectRebootFirst': '请先勾选需要重启的设备',
   'device.msg.selectDeleteFirst': '请先勾选需要删除的设备',
   'device.msg.selectSyncFirst': '请先勾选需要同步的设备',
+  'device.msg.devPwdRuleFailed': '口令需为 8–63 位且同时包含字母与数字',
+  'device.msg.devPwdMismatch': '两次输入的口令不一致',
+  'device.msg.devPwdOk': '口令已下发到设备',
+  'device.msg.devPwdOkN': '已为 {n} 台设备修改口令',
+  'device.msg.devPwdFailed': '修改口令失败',
+  'device.msg.devPwdFailedAll': '{n} 台设备全部修改失败',
+  'device.msg.devPwdPartial': '{ok} 台成功，{failed} 台失败',
   'device.msg.selectProject': '请选择目标项目',
   'device.msg.selectGroup': '请选择目标分组',
   'device.msg.transferOk': '已将 {n} 台设备转移到目标项目',

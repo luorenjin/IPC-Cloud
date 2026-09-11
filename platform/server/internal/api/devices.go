@@ -4,6 +4,7 @@ import (
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -540,6 +541,19 @@ var cfgKeys = []string{
 	"net.dhcp", "net.ip", "net.mask", "net.gw", "net.dns",
 	// 本地设置（设备维护页签）
 	"localUser.name", "led.enable",
+	// 本地账户口令（接入规范 §5.7 的 cfg 最小集里就有 localUser.password）。
+	// 它是**只写键**：可以下发，但永不回显——读写都走 cfg.get/cfg.set，而“读”只会
+	// 把口令搬回浏览器与响应体，既无必要又多一份泄露面。见 cfgWriteOnly。
+	"localUser.password",
+}
+
+// cfgWriteOnly 只写键：cfg.get 不回显、通用配置下发不收，只能走专用端点。
+//
+// 只写不是“暂未实现读”而是刻意的约定：口令没有“当前值”这个概念可展示，
+// 平台也不保存它（§11 只要求第三方设备凭据加密落库，自研设备口令不沾库）。
+// 同时这也让 cfg.data 里根本没有这个键，不会再被并进「保存并下发」的一次提交。
+var cfgWriteOnly = map[string]bool{
+	"localUser.password": true,
 }
 
 // cfgRebootRequired 是固件配置规则表里 reboot_required=true 项的静态镜像，
@@ -601,7 +615,18 @@ func handleDeviceConfigGet(c *gin.Context) {
 			rebootRequired = append(rebootRequired, k)
 		}
 	}
-	ok(c, gin.H{"config": values, "supported": supported, "rebootRequired": rebootRequired})
+	// 只写键：supported 里留着（设备确实接受这个键），但值一律抹掉不回浏览器。
+	// writeOnly 单独下发，让前端知道“这台设备支持远程改密”而不需要它去猜空值含义。
+	writeOnly := make([]string, 0, len(cfgWriteOnly))
+	for _, k := range supported {
+		if cfgWriteOnly[k] {
+			writeOnly = append(writeOnly, k)
+		}
+	}
+	for k := range cfgWriteOnly {
+		delete(values, k)
+	}
+	ok(c, gin.H{"config": values, "supported": supported, "rebootRequired": rebootRequired, "writeOnly": writeOnly})
 }
 
 func handleDeviceConfigSet(c *gin.Context) {
@@ -620,6 +645,14 @@ func handleDeviceConfigSet(c *gin.Context) {
 	if err := c.ShouldBindJSON(&req); err != nil {
 		fail(c, errs.EBadRequest)
 		return
+	}
+	// 只写键（口令）不允许走通用下发：那里没有口令策略校验，放行等于绕开规则。
+	// 单独报错而不是静默丢弃，否则前端会收到一个“保存成功但口令没变”的假成功。
+	for k := range req.Values {
+		if cfgWriteOnly[k] {
+			fail(c, errs.EBadRequest.WithMsg("口令不能随配置下发，请用「修改密码」"))
+			return
+		}
 	}
 	a, okk := adapter.Get("idp").(interface {
 		ConfigSet(deviceID string, values map[string]any) ([]string, error)
@@ -735,6 +768,97 @@ func handleDeviceBatch(c *gin.Context) {
 		}
 	}
 	ok(c, gin.H{"results": results})
+}
+
+// ---------- 统一改密（设备本地账户口令，接入规范 §5.7 的 localUser.password） ----------
+
+// pwdPolicyViolation 口令策略：8–63 位且同时含字母与数字，合规返回空串。
+//
+// 上下限与固件本地控制台一致（modules/console/console_internal.h 的 8..63），
+// 「字母 + 数字」沿用 PRD §159 对账号口令的同一取向——设备侧策略不该比平台侧更松。
+// 按字节计长（口令为 ASCII，与固件 strlen 口径一致）。
+func pwdPolicyViolation(pw string) string {
+	if len(pw) < 8 || len(pw) > 63 {
+		return "口令长度需在 8–63 位之间"
+	}
+	var hasLetter, hasDigit bool
+	for i := 0; i < len(pw); i++ {
+		switch c := pw[i]; {
+		case (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'):
+			hasLetter = true
+		case c >= '0' && c <= '9':
+			hasDigit = true
+		}
+	}
+	if !hasLetter || !hasDigit {
+		return "口令需同时包含字母与数字"
+	}
+	return ""
+}
+
+// handleDevicePassword 统一修改设备本地账户口令，单台与批量共用同一个端点。
+//
+// 合成一个端点的理由：两条路径的校验、权限、审计口径必须完全一致，分开写迟早会出现
+// 一边校验一边不校验。前端的单台改密就是 ids 只有一个元素的同一请求。
+//
+// 口令的生命周期只在本函数内存活：不落库（平台不保存自研设备口令；§11 的加密落库针对第三方凭据）、
+// 不进审计（审计中间件只记 method/path/status）、不写日志、不回显给任何读取接口。
+func handleDevicePassword(c *gin.Context) {
+	ctx := getCtx(c)
+	var req struct {
+		IDs      []string `json:"ids" binding:"required"`
+		Password string   `json:"password" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		fail(c, errs.EBadRequest)
+		return
+	}
+	if len(req.IDs) == 0 {
+		fail(c, errs.EBadRequest.WithMsg("至少选择一台设备"))
+		return
+	}
+	if len(req.IDs) > 200 {
+		fail(c, errs.EBadRequest.WithMsg("单次批量上限 200 台"))
+		return
+	}
+	if why := pwdPolicyViolation(req.Password); why != "" {
+		fail(c, errs.EBadRequest.WithMsg(why))
+		return
+	}
+	a, okk := adapter.Get("idp").(interface {
+		ConfigSet(deviceID string, values map[string]any) ([]string, error)
+	})
+	if !okk {
+		fail(c, errs.EForbid.WithMsg("IDP 适配器未就绪"))
+		return
+	}
+	// 逐台处理并逐台回报：批量下发一定会出现“部分成功”（离线、固件不支持、协议不支持），
+	// 一次失败就整批回滚反而会让已改成功的设备与用户认知不一致。
+	results := make([]gin.H, 0, len(req.IDs))
+	succeeded := 0
+	for _, id := range req.IDs {
+		var d models.Device
+		if store.DB.First(&d, "id = ? AND project_id = ? AND deleted_at = 0", id, ctx.ProjectID).Error != nil {
+			results = append(results, gin.H{"id": id, "ok": false, "msg": "设备不存在或无权限"})
+			continue
+		}
+		if d.Source != "idp" {
+			results = append(results, gin.H{"id": id, "ok": false, "msg": "该接入协议不支持远程改密"})
+			continue
+		}
+		rejected, err := a.ConfigSet(id, map[string]any{"localUser.password": req.Password})
+		if err != nil {
+			results = append(results, gin.H{"id": id, "ok": false, "msg": err.Error()})
+			continue
+		}
+		if slices.Contains(rejected, "localUser.password") {
+			results = append(results, gin.H{"id": id, "ok": false, "msg": "设备未接受该键（固件不支持远程改密或口令不合规）"})
+			continue
+		}
+		succeeded++
+		results = append(results, gin.H{"id": id, "ok": true})
+	}
+	ok(c, gin.H{"total": len(req.IDs), "succeeded": succeeded, "results": results})
 }
 
 // handleIdpLookup ADD-01 两段式第一步：查找设备（型号/在线状态）。

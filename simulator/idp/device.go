@@ -38,8 +38,9 @@ type Device struct {
 	PlatformAddr string
 	// SnapshotJPEG 快照图片内容（assets/frame.jpg）
 	SnapshotJPEG []byte
-	// PwdChanged 对应 hello.localUserChanged（接入规范 §5.5.2）：设备本地默认密码是否已修改。
-	// 平台只在它为 false 时提示「仍在用出厂默认密码」；模拟器没有真实改密入口，只能由开关给定
+	// PwdChanged 对应 hello.localUserChanged（接入规范 §5.5.2）的**初始值**：
+	// 设备本地默认口令是否已修改。平台只在它为 false 时提示「仍在用出厂默认口令」。
+	// 运行期会被改密（置 true）与恢复出厂（置 false）改写。
 	PwdChanged bool
 	// OnLog 可选日志钩子
 	OnLog func(format string, args ...any)
@@ -50,6 +51,9 @@ type Device struct {
 	nextMsg int64
 	bound   bool
 	cfg     map[string]any // 本地配置（见 config.go，键名/范围与固件规则表对齐）
+	// pwdHash 改密后的口令哈希（只存哈希，不存明文）；pwdChanged 是当前是否已改过默认口令
+	pwdHash    string
+	pwdChanged bool
 }
 
 // pushSession 一次推流会话。
@@ -60,6 +64,10 @@ type pushSession struct {
 // Start 连接 broker 并开始生命周期。
 func (d *Device) Start() error {
 	d.pushes = map[string]*pushSession{}
+	// 运行期改密状态从启动参数接过来（默认 true=已改密），之后由 cfg.set / cfg.reset 改写
+	d.mu.Lock()
+	d.pwdChanged = d.PwdChanged
+	d.mu.Unlock()
 	opts := mqtt.NewClientOptions().
 		AddBroker(d.Broker).
 		SetClientID("sim-" + d.ID).
@@ -165,9 +173,10 @@ func (d *Device) hello() {
 			"record.device.query", "record.device.play", "record.platform",
 			"reboot", "ptz",
 		},
-		// 默认密码是否已修改：false 时平台在「本地账户」区块标黄提示。
-		// 自研固件首次绑定/首次登录必须强制修改（接入规范 §590），所以这个字段要跟着 hello 一起来
-		"localUserChanged": d.PwdChanged,
+		// 默认口令是否已修改：false 时平台在「本地账户」区块标黄提示。
+		// 自研固件首次绑定/首次登录必须强制修改（接入规范 §590），所以这个字段要跟着 hello 一起来。
+		// 这里是**当前**状态而不是启动参数原值：平台改密后应不再标黄，恢复出厂后应重新标黄
+		"localUserChanged": d.pwdChangedNow(),
 	}
 	d.publishUp("status", envOf("status.hello", d.newMsgID(), data))
 	// 平台对 hello 幂等处理（已绑定则直接刷新通道/在线态），视为已注册，
@@ -212,7 +221,8 @@ func (d *Device) onMessage(_ mqtt.Client, msg mqtt.Message) {
 	if data == nil {
 		data = map[string]any{}
 	}
-	d.logf("cmd %s %v", typ, data)
+	// 日志脱敏：cfg.set 的 values 可能带明文口令，不能直接 %v 打出去
+	d.logf("cmd %s %v", typ, redactCmdData(data))
 	switch typ {
 	case "cmd.bind":
 		d.bound = true
@@ -266,7 +276,17 @@ func (d *Device) onMessage(_ mqtt.Client, msg mqtt.Message) {
 		d.ack(env, 0, "", map[string]any{"values": d.cfgGet(keys)})
 	case "cfg.set":
 		values, _ := data["values"].(map[string]any)
-		d.ack(env, 0, "", map[string]any{"rejected": d.cfgSet(values)})
+		rejected := d.cfgSet(values)
+		d.ack(env, 0, "", map[string]any{"rejected": rejected})
+		// 改过口令就重新宣告一次 hello：localUserChanged 是 hello 字段，
+		// 不重发的话平台会一直显示“仍在用出厂默认口令”，直到下一次重连才自洽。
+		// 失败（进了 rejected）不算数——没改成功就不该改变对外声称的状态。
+		if cfgTouchedSecret(values, rejected) {
+			go func() {
+				time.Sleep(time.Second)
+				d.hello()
+			}()
+		}
 	case "cfg.reset":
 		d.cfgReset()
 		d.ack(env, 0, "", map[string]any{})

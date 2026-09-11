@@ -1,6 +1,10 @@
 package idp
 
-import "math"
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"math"
+)
 
 // 模拟设备的本地配置。
 //
@@ -20,6 +24,11 @@ const (
 	cfgStr
 	// cfgJSON 对应固件的 CFG_T_JSON（子树以 JSON 文本存取），当前只有移动侦测区域在用
 	cfgJSON
+	// cfgSecret 只写键（localUser.password）：可下发、可校验，但**永不回显**。
+	// cfg.get 对这类键只回空串，设备侧也只存哈希不存明文——
+	// 密码不该在网络里来回传，更不该留在页面内存与日志里（接入规范 §11 日志与导出必须脱敏）。
+	// 与固件同名规则的 write_only 标记一一对应。
+	cfgSecret
 )
 
 type cfgRule struct {
@@ -77,7 +86,10 @@ var cfgRules = map[string]cfgRule{
 
 	// 本地设置
 	"localUser.name": {t: cfgStr},
-	"led.enable":     {t: cfgBool},
+	// 只写键：min/max 在此是**字符串长度**上下限，与固件 console 的口令策略（8..63）
+	// 及 PRD §159「≤8 位含字母数字」一致的下限取 8
+	"localUser.password": {t: cfgSecret, min: 8, max: 63},
+	"led.enable":         {t: cfgBool},
 }
 
 // cfgDefaults 出厂默认值。
@@ -127,7 +139,10 @@ func cfgDefaults() map[string]any {
 		"net.dns":  "223.5.5.5",
 
 		"localUser.name": "admin",
-		"led.enable":     true,
+		// 只写键的占位值：它只用于“本键受支持”这一个用途（平台 supported = 白名单 ∩ 设备回包），
+		// 真正的口令不会落在 d.cfg 里（改密后只存哈希），所以这里永远是空串
+		"localUser.password": "",
+		"led.enable":         true,
 	}
 }
 
@@ -170,6 +185,14 @@ func (d *Device) cfgSet(values map[string]any) []string {
 			rejected = append(rejected, k)
 			continue
 		}
+		// 只写键：不落进 d.cfg（那里会被 cfgGet 读出、也会被 %v 打进日志），
+		// 只存哈希并把 hello.localUserChanged 置 true——改完默认密码就不该再标黄了
+		if rule.t == cfgSecret {
+			sum := sha256.Sum256([]byte(val.(string)))
+			d.pwdHash = hex.EncodeToString(sum[:])
+			d.pwdChanged = true
+			continue
+		}
 		d.cfg[k] = val
 	}
 	return rejected
@@ -177,10 +200,69 @@ func (d *Device) cfgSet(values map[string]any) []string {
 
 // cfgReset 恢复出厂设置：清空当前配置并重置为出厂默认值，
 // 对齐固件 cfg_reset(keep_keys, n) 的语义（firmware/core/src/config.c:594-614）。
+// 同时清掉改密痕迹：恢复出厂就是回到出厂默认口令，`localUserChanged` 应重新变回 false，
+// 否则平台上的「仍在用默认密码」标黄提示会在恢复出厂后错误地消失。
 func (d *Device) cfgReset() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.cfg = cfgDefaults()
+	d.pwdHash = ""
+	d.pwdChanged = false
+}
+
+// pwdChangedNow 当前是否已修改过默认口令（hello.localUserChanged，接入规范 §5.5.2）。
+func (d *Device) pwdChangedNow() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.pwdChanged
+}
+
+// redactCmdData 日志脱敏：cfg.set 的 values 里可能带明文口令，不可直接 %v 进日志。
+// 不改动原 map（它还要交给 cfgSet 处理），只返回一个供打印的浅拷贝。
+func redactCmdData(data map[string]any) map[string]any {
+	out := make(map[string]any, len(data))
+	for k, v := range data {
+		out[k] = v
+	}
+	values, ok := out["values"].(map[string]any)
+	if !ok {
+		return out
+	}
+	masked := make(map[string]any, len(values))
+	for k, v := range values {
+		if r, ok := cfgRules[k]; ok && r.t == cfgSecret {
+			masked[k] = "***"
+			continue
+		}
+		masked[k] = v
+	}
+	out["values"] = masked
+	return out
+}
+
+// cfgTouchedSecret 本次 cfg.set 是否成功改写了只写键（口令）。
+// 只看未被拒绝的键：写失败却对外声称“已改密”比不声称更糟。
+func cfgTouchedSecret(values map[string]any, rejected []string) bool {
+	if len(values) == 0 {
+		return false
+	}
+	for k := range values {
+		r, ok := cfgRules[k]
+		if !ok || r.t != cfgSecret {
+			continue
+		}
+		bad := false
+		for _, rk := range rejected {
+			if rk == k {
+				bad = true
+				break
+			}
+		}
+		if !bad {
+			return true
+		}
+	}
+	return false
 }
 
 // coerceCfg 按规则做类型/范围校验并归一化取值。
@@ -222,6 +304,14 @@ func coerceCfg(rule cfgRule, v any) (any, bool) {
 		return n, true
 	case cfgJSON:
 		return coerceRegions(v)
+	case cfgSecret:
+		// 只写键：只接受字符串，长度卡在规则给定的上下限（密码策略的唯一真相是固件/平台，
+		// 模拟器只负责“不合法就拒绝”，与其它键“类型不符直接拒绝”的语义一致）
+		s, ok := v.(string)
+		if !ok || len(s) < rule.min || len(s) > rule.max {
+			return nil, false
+		}
+		return s, true
 	default:
 		return nil, false
 	}

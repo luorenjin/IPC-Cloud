@@ -68,9 +68,16 @@ hal_err_t cfg_reset(const char *const *keep_keys, size_t n);
 typedef struct {
     const char *key_pattern;   /**< 支持 * 通配一层，如 "video.*.main.kbps" */
     cfg_type_t  type;
-    int64_t     min, max;      /**< INT 范围 */
+    int64_t     min, max;      /**< INT 范围；STR 时表示**字节长度**上下限（min>0 才校验） */
     const char *enum_csv;      /**< STR 枚举，逗号分隔；NULL 不限 */
     bool        reboot_required;
+    /**
+     * 只写键（如 localUser.password）：可下发、可校验，但**不回显**。
+     * 置位后该键不进持久化文件、也不进 cfg_dump_json 导出（接入规范 §11：日志与导出必须脱敏），
+     * 值只保留在内存里等消费者（如本地控制台认证模块）取走并转成哈希/盐存储。
+     * 接入规范 §5.7 的 cfg 最小集里 localUser.password、wifi.psk 属于这一类。
+     */
+    bool        write_only;
 } cfg_rule_t;
 
 hal_err_t cfg_register_rules(const cfg_rule_t *rules, size_t n);

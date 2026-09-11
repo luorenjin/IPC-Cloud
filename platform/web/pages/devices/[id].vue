@@ -301,7 +301,13 @@ const cfg = reactive({
   data: {} as any,
   denied: [] as string[],
   supported: [] as string[],
-  rebootRequired: [] as string[]
+  rebootRequired: [] as string[],
+  /**
+   * 只写键（当前只有 localUser.password）：设备接受这个键，但值永不回显。
+   * 它们不在 cfg.data 里（服务端已抹掉），因此既不会被“未保存修改”误判，
+   * 也不会被并进通用「保存并下发」——口令有自己的动作与确认。
+   */
+  writeOnly: [] as string[]
 })
 /** 保存→回读期间页面上的写操作一律锁住，避免“下发中又改一笔”造成的价值混淆 */
 const cfgSaving = computed(() => cfg.phase !== 'idle')
@@ -687,6 +693,7 @@ async function loadCfg() {
     cfg.data = res?.config || {}
     cfg.supported = res?.supported || []
     cfg.rebootRequired = res?.rebootRequired || []
+    cfg.writeOnly = res?.writeOnly || []
   } catch (e: any) {
     toastApiError(e, t('device.msg.configLoadFailed'))
     cfg.data = {}
@@ -789,6 +796,55 @@ async function saveNetwork() {
     toastApiError(e, t('common.saveFailed'))
   } finally {
     cfg.phase = 'idle'
+  }
+}
+
+/**
+ * 设备本地账户口令：只写键，独立动作 + 危险确认。
+ *
+ * 三个「不」的理由：不回显（设备侧只回空串，没有“当前值”可比对）、不比对（不参与脏值判定，
+ * 所以永远不点亮通用保存）、不随「保存并下发」（服务端也会拒绝该键走通用配置下发）。
+ * 策略与平台账号口令同一套（≥8 位且含字母数字），前端给即时反馈、后端是唯一真相。
+ * 改错口令会把人锁在设备外面，所以确认弹窗走危险配色而非普通确认。
+ */
+const pwdForm = reactive({ pwd: '', confirm: '', saving: false })
+const PWD_MAX = 63
+
+function pwdRuleOk(p: string) {
+  return p.length >= 8 && p.length <= PWD_MAX && /[A-Za-z]/.test(p) && /[0-9]/.test(p)
+}
+
+async function askChangePwd() {
+  if (!pwdRuleOk(pwdForm.pwd)) return toast.warning(t('device.msg.devPwdRuleFailed'))
+  if (pwdForm.pwd !== pwdForm.confirm) return toast.warning(t('device.msg.devPwdMismatch'))
+  const ok = await confirmBox.ask({
+    title: t('device.confirm.devPwdTitle'),
+    message: t('device.confirm.devPwdMsg', { name: dev.value?.name || devId }),
+    detail: t('device.confirm.devPwdDetail'),
+    danger: true,
+    confirmText: t('device.confirm.devPwdOk')
+  })
+  if (!ok) return
+  pwdForm.saving = true
+  try {
+    const res: any = await api.post('/devices/password', { ids: [devId], password: pwdForm.pwd })
+    const bad = (res?.results || []).find((r: any) => !r.ok)
+    if (bad) {
+      toast.error({ title: t('device.msg.devPwdFailed'), suggest: bad.msg || '' })
+    } else {
+      toast.success(t('device.msg.devPwdOk'))
+      // 口令没有“读回来再确认”这回事，留在输入框里只会多一份泄露面
+      pwdForm.pwd = ''
+      pwdForm.confirm = ''
+      // 标黄提示直接就地清掉：设备已 ack 且该键未进 rejected，按 localUserChanged 的定义
+      // （“默认口令是否已修改”）此刻必为 true。设备稍后会用一次 hello 重声明同一事实，
+      // 但页面不必等它——否则用户刚改完还看着“仍在使用出厂默认口令”，只能手动刷新。
+      if (dev.value?.meta) dev.value.meta.localUserChanged = true
+    }
+  } catch (e: any) {
+    toastApiError(e, t('device.msg.devPwdFailed'))
+  } finally {
+    pwdForm.saving = false
   }
 }
 
@@ -1381,6 +1437,34 @@ onMounted(load)
                       :bound-text="f.type === 'int' ? boundText(f.key) : ''"
                       @update:model-value="onCfgFieldInput(f, $event)"
                     />
+                  </div>
+
+                  <!-- 口令：只写键，独立动作 + 危险确认（理由见 askChangePwd）。
+                       只在设备真的接受该键（writeOnly 由服务端按 supported 过滤后下发）时出现，
+                       不支持远程改密的设备不会看到一个点了就报错的表单 -->
+                  <div
+                    v-if="g.key === 'localUser' && cfg.writeOnly.includes('localUser.password')"
+                    class="space-y-3 border-t border-line-soft p-3"
+                  >
+                    <div class="flex flex-wrap items-center gap-3">
+                      <span class="w-24 shrink-0 text-right text-sm text-muted">{{ t('device.config.newPassword') }}</span>
+                      <UiInput
+                        v-model="pwdForm.pwd" type="password" size="sm" width="w-48" :maxlength="PWD_MAX"
+                        autocomplete="new-password" :placeholder="t('device.config.pwdPlaceholder')"
+                      />
+                    </div>
+                    <div class="flex flex-wrap items-center gap-3">
+                      <span class="w-24 shrink-0 text-right text-sm text-muted">{{ t('device.config.pwdConfirm') }}</span>
+                      <UiInput
+                        v-model="pwdForm.confirm" type="password" size="sm" width="w-48" :maxlength="PWD_MAX"
+                        autocomplete="new-password" :placeholder="t('device.config.pwdConfirmPlaceholder')"
+                        @enter="askChangePwd"
+                      />
+                      <UiButton size="sm" :loading="pwdForm.saving" :disabled="!pwdForm.pwd" @click="askChangePwd">
+                        {{ t('device.config.changePwd') }}
+                      </UiButton>
+                    </div>
+                    <p class="text-xs text-placeholder md:pl-[4.75rem]">{{ t('device.config.pwdHint') }}</p>
                   </div>
 
                   <!-- 高级参数：gop/rc 改动频率低，折叠掉以降低「编码策略」页签的单屏字段密度；

@@ -645,6 +645,41 @@ static void test_cred_not_in_config(void)
         CHECK(strstr(dump, salt_hex) == NULL, "导出不含盐值本身");
         free(dump);
     }
+
+    /* 只写键（localUser.password）：能下发、卡长度，但不落盘也不进导出。
+       它是平台下发改密用的键，一旦进了导出/备份，等于把口令原样交给每次备份。 */
+    SECTION("只写键不进导出与持久化文件");
+    {
+        cfg_reject_t rejects[4];
+        FILE *f = NULL;
+        size_t n = 0;
+        memset(rejects, 0, sizeof(rejects));
+        n = cfg_apply_json("{\"localUser.password\":\"NewPass@123\"}", rejects, 4);
+        CHECK(n == 0, "合法口令写入被接受");
+        n = cfg_apply_json("{\"localUser.password\":\"short\"}", rejects, 4);
+        CHECK(n == 1, "过短口令按长度规则被拒绝");
+        n = cfg_apply_json("{\"localUser.password\":\"NoDigitsHere\"}", rejects, 4);
+        CHECK(n == 0, "长度合规即通过（字母+数字的要求在平台侧，固件只管长度）");
+
+        dump = (char *)malloc(cap);
+        CHECK(dump != NULL, "分配导出缓冲");
+        if (dump) {
+            CHECK(cfg_dump_json(dump, cap) == HAL_OK, "导出全部配置");
+            CHECK(strstr(dump, "localUser.password") == NULL, "导出不含只写键的键名");
+            CHECK(strstr(dump, "NewPass@123") == NULL, "导出不含口令明文");
+            free(dump);
+        }
+        f = fopen("console_test_cfg.json", "rb");
+        CHECK(f != NULL, "持久化文件存在");
+        if (f) {
+            char filebuf[4096];
+            size_t got = fread(filebuf, 1, sizeof(filebuf) - 1, f);
+            filebuf[got] = 0;
+            fclose(f);
+            CHECK(strstr(filebuf, "NewPass@123") == NULL, "持久化文件不含口令明文");
+            CHECK(strstr(filebuf, "localUser.password") == NULL, "持久化文件不含只写键");
+        }
+    }
     cfg_deinit();
     remove("console_test_cfg.json");
 }

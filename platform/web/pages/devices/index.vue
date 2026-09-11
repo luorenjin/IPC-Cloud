@@ -366,6 +366,58 @@ async function exportCsv() {
   }
 }
 
+/**
+ * 统一修改密码（设备本地账户口令）。
+ *
+ * 平台不保存设备口令：这里输入的字符串只在本次请求里存在，成功后立刻清空，
+ * 也不落任何本地缓存（§11 的加密落库针对第三方设备凭据，不适用于此）。
+ * 同一个口令会下发给选中的每一台：这是“统一改密”的字面需求，但口令强度因此按
+ * “最弱的那台”看待，所以确认弹窗要把台数写在最显眼处，不能默默批量。
+ */
+const pwdDlg = reactive({ show: false, pwd: '', confirm: '', saving: false })
+const PWD_MAX = 63
+
+function devPwdRuleOk(p: string) {
+  return p.length >= 8 && p.length <= PWD_MAX && /[A-Za-z]/.test(p) && /[0-9]/.test(p)
+}
+
+function openBatchPwd() {
+  if (!selection.value.length) return toast.warning(t('device.msg.selectDeviceFirst'))
+  pwdDlg.pwd = ''
+  pwdDlg.confirm = ''
+  pwdDlg.show = true
+}
+
+async function doBatchPwd() {
+  if (!devPwdRuleOk(pwdDlg.pwd)) return toast.warning(t('device.msg.devPwdRuleFailed'))
+  if (pwdDlg.pwd !== pwdDlg.confirm) return toast.warning(t('device.msg.devPwdMismatch'))
+  const ids = [...selection.value]
+  pwdDlg.saving = true
+  try {
+    const res: any = await api.post('/devices/password', { ids, password: pwdDlg.pwd })
+    const total = res?.total ?? ids.length
+    const okCount = res?.succeeded ?? 0
+    const failed = (res?.results || []).filter((r: any) => !r.ok)
+    if (!failed.length) {
+      toast.success(t('device.msg.devPwdOkN', { n: okCount }))
+    } else if (!okCount) {
+      // 全失败时把第一台的失败原因带出来：全是“设备不支持”与全是“离线”要采取的动作完全不同
+      toast.error({ title: t('device.msg.devPwdFailedAll', { n: total }), suggest: failed[0].msg || '' })
+    } else {
+      toast.warning(t('device.msg.devPwdPartial', { ok: okCount, failed: failed.length }))
+    }
+    pwdDlg.pwd = ''
+    pwdDlg.confirm = ''
+    pwdDlg.show = false
+    selection.value = []
+    load()
+  } catch (e: any) {
+    toastApiError(e, t('device.msg.devPwdFailed'))
+  } finally {
+    pwdDlg.saving = false
+  }
+}
+
 const syncing = ref(false)
 async function doBatchSync() {
   if (!selection.value.length) return toast.warning(t('device.msg.selectSyncFirst'))
@@ -891,6 +943,7 @@ onMounted(async () => {
             <UiButton size="sm" :disabled="!selection.length" @click="openBatchMove">{{ t('device.toolbar.moveGroup') }}</UiButton>
             <UiButton size="sm" :disabled="!selection.length" @click="openTransfer">{{ t('device.toolbar.transferProject') }}</UiButton>
             <UiButton size="sm" :disabled="!selection.length" @click="doBatchReboot">{{ t('device.toolbar.reboot') }}</UiButton>
+            <UiButton size="sm" :disabled="!selection.length" @click="openBatchPwd">{{ t('device.toolbar.password') }}</UiButton>
             <UiButton variant="dangerText" size="sm" :disabled="!selection.length" @click="doBatchDelete">{{ t('device.toolbar.delete') }}</UiButton>
             <UiButton size="sm" @click="exportCsv">{{ t('device.toolbar.export') }}</UiButton>
             <UiButton size="sm" :disabled="!selection.length || syncing" @click="doBatchSync">{{ t('device.toolbar.sync') }}</UiButton>
@@ -1282,6 +1335,38 @@ onMounted(async () => {
       <template #footer>
         <UiButton @click="batchMoveDlg.show = false">{{ t('common.cancel') }}</UiButton>
         <UiButton variant="primary" :loading="batchMoveDlg.saving" @click="doBatchMove">{{ t('device.transfer.submit') }}</UiButton>
+      </template>
+    </UiDialog>
+
+    <!-- 统一修改密码：同一口令下发到选中的每一台。
+         口令不做回显也不落库，所以关掉弹窗即丢弃输入（重开是空的），
+         避免“上次输到一半的口令”留在页面上 -->
+    <UiDialog v-model:open="pwdDlg.show" :title="t('device.pwd.title')" width="max-w-sm">
+      <div class="space-y-3">
+        <p class="text-xs text-placeholder">{{ t('device.pwd.hint', { n: selection.length }) }}</p>
+        <div>
+          <label class="mb-1 block text-xs text-muted">{{ t('device.config.newPassword') }}</label>
+          <UiInput
+            v-model="pwdDlg.pwd" type="password" :maxlength="PWD_MAX" autocomplete="new-password"
+            :placeholder="t('device.config.pwdPlaceholder')"
+          />
+        </div>
+        <div>
+          <label class="mb-1 block text-xs text-muted">{{ t('device.config.pwdConfirm') }}</label>
+          <UiInput
+            v-model="pwdDlg.confirm" type="password" :maxlength="PWD_MAX" autocomplete="new-password"
+            :placeholder="t('device.config.pwdConfirmPlaceholder')" @enter="doBatchPwd"
+          />
+        </div>
+        <p class="text-xs text-placeholder">{{ t('device.pwd.policy') }}</p>
+      </div>
+      <template #footer>
+        <UiButton size="sm" @click="pwdDlg.show = false">{{ t('common.cancel') }}</UiButton>
+        <UiButton
+          variant="primary" size="sm" :loading="pwdDlg.saving"
+          :disabled="!pwdDlg.pwd || !devPwdRuleOk(pwdDlg.pwd) || pwdDlg.pwd !== pwdDlg.confirm"
+          @click="doBatchPwd"
+        >{{ t('device.pwd.submit') }}</UiButton>
       </template>
     </UiDialog>
 

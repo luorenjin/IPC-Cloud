@@ -128,8 +128,12 @@ static hal_err_t persist_locked(void)
     if (!root) return HAL_ENOMEM;
     for (size_t i = 0; i < g.count; i++) {
         const entry_t *e = &g.items[i];
+        const cfg_rule_t *r = rule_for(e->key);
         json_t *v = NULL;
         if (!e->dirty || !e->set) continue;
+        /* 只写键（口令类）不落盘：持久化文件是要能被导出/备份的，
+           而凭据进备份等于把口令写在卡片上（接入规范 §11）。 */
+        if (r && r->write_only) continue;
         switch (e->type) {
         case CFG_T_BOOL: v = json_new_bool(e->v.b); break;
         case CFG_T_INT:  v = json_new_int(e->v.i); break;
@@ -152,6 +156,15 @@ static hal_err_t validate(const cfg_rule_t *r, cfg_type_t type, int64_t i, const
 {
     if (r->type != type) { *why = "type"; return HAL_EINVAL; }
     if (type == CFG_T_INT && (i < r->min || i > r->max)) { *why = "range"; return HAL_EINVAL; }
+    /* STR 的 min/max 在规则表里表示字节长度上下限，min>0 才生效：
+       现有字符串键全是 min=max=0，此项对它们无影响；密码类键则靠它把
+       “8–63 位”真的卡在固件侧，而不是只写在注释里（口径与本地控制台一致）。*/
+    if (type == CFG_T_STR && r->min > 0) {
+        size_t len = s ? strlen(s) : 0;
+        if ((int64_t)len < r->min || (r->max > 0 && (int64_t)len > r->max)) {
+            *why = "length"; return HAL_EINVAL;
+        }
+    }
     if ((type == CFG_T_STR || type == CFG_T_JSON) && r->enum_csv) {
         char list[CFG_STR_MAX * 4];
         size_t n = strlen(r->enum_csv);
@@ -287,7 +300,7 @@ static void seed_channel(const profile_channel_t *c)
 
 static void register_common_rules(void)
 {
-    static const struct { const char *k; cfg_type_t t; int64_t lo, hi; const char *en; bool rb; } common[] = {
+    static const struct { const char *k; cfg_type_t t; int64_t lo, hi; const char *en; bool rb; bool wo; } common[] = {
         { "record.enabled",          CFG_T_BOOL, 0, 1, NULL, false },
         { "record.mode",             CFG_T_STR,  0, 0, "continuous,event,schedule", false },
         { "record.channel",          CFG_T_INT,  0, 2, NULL, false },
@@ -310,6 +323,11 @@ static void register_common_rules(void)
         { "net.gw",                  CFG_T_STR,  0, 0, NULL, true },
         { "net.dns",                 CFG_T_STR,  0, 0, NULL, true },
         { "localUser.name",          CFG_T_STR,  0, 0, NULL, false },
+        /* 本地账户口令（接入规范 §5.7 的 cfg 最小集）：只写键——可下发、卡长度，
+         * 但不落盘、不进 cfg_dump_json，值只留在内存等认证模块取走转成哈希。
+         * 8–63 位与 modules/console/console_internal.h 的口令长度限制、
+         * 以及平台侧 pwdPolicyViolation() 三处口径一致；该处另要求含字母+数字。 */
+        { "localUser.password",      CFG_T_STR,  8, 63, NULL, false, true },
         { "osd.channelName.enable",  CFG_T_BOOL, 0, 1, NULL, false },
         { "osd.time.enable",         CFG_T_BOOL, 0, 1, NULL, false },
         { "alarm.motion.enable",     CFG_T_BOOL, 0, 1, NULL, false },
@@ -323,6 +341,7 @@ static void register_common_rules(void)
         r.key_pattern = common[i].k; r.type = common[i].t;
         r.min = common[i].lo; r.max = common[i].hi;
         r.enum_csv = common[i].en; r.reboot_required = common[i].rb;
+        r.write_only = common[i].wo;
         cfg_register_rules(&r, 1);
     }
 }
@@ -578,8 +597,11 @@ hal_err_t cfg_dump_json(char *buf, size_t cap)
         char *txt;
         for (size_t i = 0; root && i < g.count; i++) {
             const entry_t *e = &g.items[i];
+            const cfg_rule_t *r = rule_for(e->key);
             json_t *v = NULL;
             if (!e->set) continue;
+            /* 只写键不进导出：导出常用于排查/交付，口令不该出现在里面 */
+            if (r && r->write_only) continue;
             switch (e->type) {
             case CFG_T_BOOL: v = json_new_bool(e->v.b); break;
             case CFG_T_INT:  v = json_new_int(e->v.i); break;

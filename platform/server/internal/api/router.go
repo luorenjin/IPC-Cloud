@@ -49,6 +49,8 @@ func Router(hub *wshub.Hub) *gin.Engine {
 		v1.POST("/devices/idp/bind", AuthMiddleware(), requireProjectID(), requirePerm("config"), handleIdpBind)
 		v1.POST("/devices/idp/lookup", AuthMiddleware(), requireProjectID(), requirePerm("config"), handleIdpLookup)
 		v1.POST("/devices/batch", AuthMiddleware(), requireProjectID(), requirePerm("config"), handleDeviceBatch)
+		// 统一改密：单台与批量共用（ids 长度 1 即单台）
+		v1.POST("/devices/password", AuthMiddleware(), requireProjectID(), requirePerm("config"), handleDevicePassword)
 		v1.POST("/devices/idp/preadd", AuthMiddleware(), requireProjectID(), requirePerm("config"), handleIdpPreadd)
 		v1.GET("/devices/idp/preadd", AuthMiddleware(), requireProjectID(), requirePerm("view"), handleIdpPreaddList)
 		v1.POST("/devices/idp/preadd/:id/activate", AuthMiddleware(), requireProjectID(), requirePerm("config"), handleIdpPreaddActivate)
