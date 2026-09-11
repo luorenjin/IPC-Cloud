@@ -242,10 +242,11 @@ export default {
   'device.config.group.alarm': '移动侦测',
   'device.config.group.time': '时间同步',
   'device.config.group.maintain': '设备维护',
-  // localSettings 与 maintain 语义不同：maintain 是重启相关手写区块的标题，
-  // localSettings 是走通用 cfgGroups 渲染的「本地账户/指示灯」分组标题，
-  // 两者共处同一 cfgTab（设备维护）时不能复用同一个键，否则标题会重复出现两次
-  'device.config.group.localSettings': '本地设置',
+  // 设备维护页签下有三类标题，语义各不相同、不能复用：maintain 是手写重启区块，
+  // localUser / led 是走通用 cfgGroups 渲染的两个独立分组（身份凭据与设备外观行为）。
+  // 账户与指示灯分属两个区块：同处一个区块时“哪个字段属于哪个主题”全靠猜。
+  'device.config.group.localUser': '本地账户',
+  'device.config.group.led': '设备指示灯',
   // net.dhcp/net.ip 只读区块的标题；与 group.time（NTP/时区）区分，共处 time 页签
   'device.config.group.network': '网络',
   // ---- 画面信息 ----
@@ -338,8 +339,8 @@ export default {
   'device.config.netSaveConfirmOk': '确认下发',
   'device.config.netSaved': '网络设置已下发，需重启设备后生效',
   // ---- 本地设置（设备维护页签） ----
-  'device.config.localUser': '本地账户',
-  'device.config.led': '指示灯',
+  'device.config.localUser': '账户名',
+  'device.config.led': '启用指示灯',
   // ---- 设备维护（MGR-08）：立即重启按钮已收敛到页头工具栏，这里只保留定时重启计划 ----
   'device.config.scheduledReboot': '定时重启',
   'device.config.planOn': '已启用',

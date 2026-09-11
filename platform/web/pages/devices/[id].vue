@@ -531,11 +531,19 @@ const cfgGroups: CfgGroup[] = [
   },
   {
     // localUser.name / led.enable 说明书要求放"设备维护"页签，但该页签本身是手写模板
-    // （重启入口 + 定时重启计划），不走 cfgGroups 通用渲染——这里新增一个独立分组，
+    // （重启入口 + 定时重启计划），不走 cfgGroups 通用渲染——这里新增两个独立分组，
     // 让这两个字段仍然走 CfgField 通用渲染机制，而不是在模板里手搓一遍 UI。
-    key: 'localSettings', tab: 'maintain', titleKey: 'device.config.group.localSettings',
+    key: 'localUser', tab: 'maintain', titleKey: 'device.config.group.localUser',
     fields: [
-      { key: 'localUser.name', labelKey: 'device.config.localUser', type: 'str' },
+      // 行标签用「账户名」而不是「本地账户」：区块标题已经说了是哪个账户，
+      // 两处同名只是把同一句话说两遍（分区后标题与行标签必然贴合，得有一方更具体）。
+      { key: 'localUser.name', labelKey: 'device.config.localUser', type: 'str' }
+    ]
+  },
+  {
+    // 与账户分开：一个是身份凭据，一个是设备外观行为，放同一个区块等于没有分组。
+    key: 'led', tab: 'maintain', titleKey: 'device.config.group.led',
+    fields: [
       { key: 'led.enable', labelKey: 'device.config.led', type: 'bool' }
     ]
   }
@@ -1467,7 +1475,7 @@ onMounted(load)
                 </section>
 
                 <!-- 「设备维护」页签本身没有通用保存按钮（重启相关是独立操作），
-                     但本任务给它加了 localSettings 这个走通用 cfgGroups 渲染的分组，
+                     但本任务给它加了 localUser / led 这两个走通用 cfgGroups 渲染的分组，
                      所以要在有通用字段时放开这道口子，否则这两个新字段填了也存不下去 -->
                 <div v-if="cfgTab !== 'maintain' || visibleCfgGroups.length > 0" class="flex flex-wrap items-center gap-2">
                   <UiButton

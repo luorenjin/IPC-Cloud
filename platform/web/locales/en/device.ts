@@ -243,10 +243,11 @@ export default {
   'device.config.group.alarm': 'Motion detection',
   'device.config.group.time': 'Time sync',
   'device.config.group.maintain': 'Maintenance',
-  // localSettings is distinct from maintain: maintain titles the hand-written reboot block,
-  // localSettings titles the cfgGroups-rendered "local account / LED" group — both live in
-  // the same cfgTab (maintain), so they can't share one key without the title repeating twice
-  'device.config.group.localSettings': 'Local Settings',
+  // Three distinct headers live under the maintenance tab: maintain titles the hand-written
+  // reboot block, while localUser / led are two separate cfgGroups-rendered groups
+  // (identity credential vs. device appearance behaviour).
+  'device.config.group.localUser': 'Local account',
+  'device.config.group.led': 'Device indicator',
   // Title for the net.dhcp/net.ip read-only block; distinct from group.time (NTP/timezone), same tab
   'device.config.group.network': 'Network',
   // ---- Image ----
@@ -339,8 +340,8 @@ export default {
   'device.config.netSaveConfirmOk': 'Push settings',
   'device.config.netSaved': 'Network settings pushed — they take effect after a device reboot',
   // ---- Local settings (Maintenance tab) ----
-  'device.config.localUser': 'Local account',
-  'device.config.led': 'Status LED',
+  'device.config.localUser': 'Account name',
+  'device.config.led': 'Enable indicator',
   // ---- Maintenance (MGR-08): reboot-now now lives only in the header toolbar; this section keeps just the schedule ----
   'device.config.scheduledReboot': 'Scheduled reboot',
   'device.config.planOn': 'Enabled',
