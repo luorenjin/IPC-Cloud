@@ -434,6 +434,44 @@ func handleDeviceConfigSet(c *gin.Context) {
 	ok(c, gin.H{"rejected": rejected})
 }
 
+// handleDeviceConfigReset 恢复出厂设置：清除设备本地配置并重启，需输入设备名二次确认
+// （镜像 handleDeleteDevice 的确认模式）。
+func handleDeviceConfigReset(c *gin.Context) {
+	id := c.Param("id")
+	var req struct {
+		ConfirmName string `json:"confirmName" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		fail(c, errs.EBadRequest)
+		return
+	}
+	var d models.Device
+	if store.DB.First(&d, "id = ? AND deleted_at = 0", id).Error != nil {
+		fail(c, errs.ENotFound)
+		return
+	}
+	if d.Source != "idp" {
+		fail(c, errs.EForbid.WithMsg("该设备不支持远程配置"))
+		return
+	}
+	if d.Name != req.ConfirmName {
+		fail(c, errs.EBadRequest.WithMsg("设备名不一致"))
+		return
+	}
+	a, okk := adapter.Get("idp").(interface {
+		ConfigReset(deviceID string) error
+	})
+	if !okk {
+		fail(c, errs.EForbid.WithMsg("IDP 适配器未就绪"))
+		return
+	}
+	if err := a.ConfigReset(id); err != nil {
+		fail(c, toAppErr(err))
+		return
+	}
+	ok(c, nil)
+}
+
 // ---------- 批量操作（MGR-01 工具栏） ----------
 
 func handleDeviceBatch(c *gin.Context) {

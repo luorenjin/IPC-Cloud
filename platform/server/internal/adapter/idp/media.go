@@ -171,6 +171,12 @@ func (a *Adapter) ConfigSet(deviceID string, values map[string]any) ([]string, e
 	return rejected, nil
 }
 
+// ConfigReset 恢复出厂设置。
+func (a *Adapter) ConfigReset(deviceID string) error {
+	_, err := a.request(deviceID, "cfg", "cfg.reset", map[string]any{})
+	return err
+}
+
 // PTZ cmd.ptz。
 func (a *Adapter) PTZ(channelID, op string, pan, tilt, zoom, speed float64, preset int) error {
 	dev, ch, err := deviceChannel(channelID)

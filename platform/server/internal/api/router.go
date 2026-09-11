@@ -74,6 +74,7 @@ func Router(hub *wshub.Hub) *gin.Engine {
 		v1.POST("/devices/:id/reboot", AuthMiddleware(), requireProjectID(), requirePerm("config"), handleRebootDevice)
 		v1.GET("/devices/:id/config", AuthMiddleware(), requireProjectID(), requirePerm("config"), handleDeviceConfigGet)
 		v1.PUT("/devices/:id/config", AuthMiddleware(), requireProjectID(), requirePerm("config"), handleDeviceConfigSet)
+		v1.POST("/devices/:id/config/reset", AuthMiddleware(), requireProjectID(), requirePerm("config"), handleDeviceConfigReset)
 		v1.GET("/devices/:id/channels", AuthMiddleware(), requireProjectID(), requirePerm("view"), handleDeviceChannels)
 		v1.PUT("/channels/:id", AuthMiddleware(), requireProjectID(), requirePerm("config"), handleUpdateChannel)
 		v1.GET("/channels", AuthMiddleware(), requireProjectID(), requirePerm("view"), handleListChannels)
