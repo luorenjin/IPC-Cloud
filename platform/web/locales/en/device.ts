@@ -222,6 +222,9 @@ export default {
   'device.config.rejected': 'Rejected by device',
   'device.config.submit': 'Save and push',
   'device.config.reload': 'Read back',
+  'device.config.unsaved': 'Unsaved changes',
+  // State of the automatic read-back after a push (previously a silent timed refresh)
+  'device.config.rereading': 'Sent — reading back from device…',
   // ---- Sub-tabs (7 groups: image / encoding / OSD overlay / motion detection / recording / time & network / maintenance) ----
   'device.config.tab.image': 'Image',
   'device.config.tab.encode': 'Encoding',
@@ -312,10 +315,17 @@ export default {
   'device.msg.rebootPlanLoadFailed': 'Could not load the reboot schedule',
   'device.msg.rebootPlanSaved': 'Reboot schedule saved',
   'device.msg.configOutOfRange': '{n} value(s) out of range — fix them before pushing',
+  // Two confirmations that discard unsent changes: manual read-back and leaving the detail page
+  'device.msg.discardEditsTitle': 'Discard unsent changes?',
+  'device.msg.discardEditsMsg': 'Reading back will overwrite your unsent changes with the configuration currently on the device.',
+  'device.msg.leaveUnsavedTitle': 'Leave and discard unsent changes?',
+  'device.msg.leaveUnsavedMsg': 'The configuration panel still has changes that were not pushed to the device; leaving will lose them.',
   // ---- Restore factory settings ----
   'device.config.factoryReset': 'Restore factory settings',
   'device.config.factoryResetDesc': 'This clears all local configuration and reboots the device. It cannot be undone.',
   'device.confirm.factoryResetOk': 'Confirm factory reset',
+  'device.confirm.discardEdits': 'Discard and read back',
+  'device.confirm.leavePage': 'Leave',
   'device.msg.factoryResetTitle': 'Confirm factory reset',
   'device.msg.factoryResetMsg': 'This clears all local configuration on device "{name}" and reboots it!',
   'device.msg.factoryResetHint': 'To prevent mistakes, type the full device name below to confirm.',

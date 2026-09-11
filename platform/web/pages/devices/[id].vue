@@ -1,10 +1,13 @@
 <script setup lang="ts">
 // 设备详情（MGR-03）：概览 / 通道 / 配置 / 诊断 / 日志（PRD 五 Tab）
 import ConfigFieldRow, { type CfgField } from '~/components/device/ConfigFieldRow.vue'
+import { onBeforeRouteLeave } from 'vue-router'
 
 const route = useRoute()
 const api = useApi()
 const toast = useToast()
+// confirmBox 在顶部声明：配置面板的「放弃修改」与「离开确认」也要用它
+const confirmBox = useConfirm()
 const { t } = useI18n()
 const devId = String(route.params.id)
 
@@ -239,7 +242,10 @@ function syncMetricTimer() {
   if (!shouldRun && metricTimer) { clearInterval(metricTimer); metricTimer = null }
 }
 watch([tab, () => dev.value?.status], syncMetricTimer)
-onUnmounted(() => { if (metricTimer) clearInterval(metricTimer) })
+onUnmounted(() => {
+  if (metricTimer) clearInterval(metricTimer)
+  if (rereadTimer) clearTimeout(rereadTimer)
+})
 
 // ================= 通道操作 =================
 async function toggleCh(ch: any, val: any) {
@@ -280,7 +286,29 @@ interface CfgGroup { key: string; tab: CfgTabKey; titleKey: string; fields: CfgF
 
 // rebootRequired：固件规则表 reboot_required=true 键的静态镜像（服务端已按 supported 过滤），
 // 不是「改了就必须重启才生效」的实时判定——纯粹用来在对应字段旁挂一个「需重启生效」提示。
-const cfg = reactive({ loading: false, saving: false, data: {} as any, denied: [] as string[], supported: [] as string[], rebootRequired: [] as string[] })
+//
+// snapshot：上一次成功回读的配置快照，用来判定「有没有未保存的修改」。
+// phase：保存→回读的完整过程，把原本静默的 5 秒回读变成可见状态。
+// 初始 snapshot 取 '{}' 而不是空串：cfg.data 初值就是 {}，否则配置还没拉回来就显示「有未保存的修改」。
+const cfg = reactive({
+  loading: false,
+  phase: 'idle' as 'idle' | 'sending' | 'rereading',
+  snapshot: '{}',
+  data: {} as any,
+  denied: [] as string[],
+  supported: [] as string[],
+  rebootRequired: [] as string[]
+})
+/** 保存→回读期间页面上的写操作一律锁住，避免“下发中又改一笔”造成的价值混淆 */
+const cfgSaving = computed(() => cfg.phase !== 'idle')
+/**
+ * 是否有未保存的修改。用 JSON 快照字符串比较，而不是逐字段 diff：
+ * loadCfg 整体替换 cfg.data、编辑只改已有键的值，键序是稳定的；
+ * 用户把值改回原样也会自然回到“不脏”，不需要额外处理。
+ */
+const isCfgDirty = computed(() => JSON.stringify(cfg.data) !== cfg.snapshot)
+/** 自动回读定时器：离开页面要清掉，否则会在已卸载的组件上跑 loadCfg */
+let rereadTimer: ReturnType<typeof setTimeout> | null = null
 
 /** 画面调节四项（固件 0–100 整数），滑杆与数字框联动 */
 const IMAGE_SLIDERS = [
@@ -577,6 +605,9 @@ async function loadCfg() {
     toastApiError(e, t('device.msg.configLoadFailed'))
     cfg.data = {}
   } finally {
+    // 无论成败都要落快照：失败时把它对齐到“当前实际显示的内容”，
+    // 否则一个从未加载成功的面板会一直显示“有未保存的修改”
+    cfg.snapshot = JSON.stringify(cfg.data)
     cfg.loading = false
   }
 }
@@ -604,17 +635,43 @@ async function saveCfg() {
   // 越界项拦在本地，但只认当前页签：其它页签遗留的坏值不在这里堵门，交给设备端 rejected 兜底即可（问题④）
   const badInTab = invalidKeysByTab.value[cfgTab.value] || []
   if (badInTab.length) return toast.warning(t('device.msg.configOutOfRange', { n: badInTab.length }))
-  cfg.saving = true
+  // 记录“刚下发给设备的这份值”：它既是新的脏值基准（改动已交付），
+  // 也用来在回读前判断用户是否又改了东西（改了就不回读，否则会把新改动冲掉）
+  const sentSnapshot = JSON.stringify(cfg.data)
+  cfg.phase = 'sending'
   try {
     const res: any = await api.put(`/devices/${devId}/config`, { values: cfg.data })
     cfg.denied = res?.rejected || []
+    cfg.snapshot = sentSnapshot
     toast.success(cfg.denied.length ? t('device.msg.configPartlyRejected') : t('device.msg.configSent'))
-    setTimeout(loadCfg, 5000)
+    // 设备侧异步生效，回读一次才能显示设备上真实的值。这段等待必须可见：
+    // 旧实现是静默的 setTimeout，表单会在几秒后自己变一遍，看上去像页面出了问题。
+    cfg.phase = 'rereading'
+    rereadTimer = setTimeout(async () => {
+      rereadTimer = null
+      // 等待期间用户又改了东西就跳过回读：用设备值覆盖面板比“没自动刷新”糟得多
+      if (!isCfgDirty.value) await loadCfg()
+      cfg.phase = 'idle'
+    }, 5000)
   } catch (e: any) {
     toastApiError(e, t('common.saveFailed'))
-  } finally {
-    cfg.saving = false
+    // 只有失败路径需要在这里复位：成功路径要停在 rereading 直到回读完成
+    cfg.phase = 'idle'
   }
+}
+
+/** 「重新回读」：会用设备上的值覆盖面板，脏值时必须先确认，不能静默丢弃用户的修改 */
+async function reloadCfg() {
+  if (isCfgDirty.value) {
+    const ok = await confirmBox.ask({
+      title: t('device.msg.discardEditsTitle'),
+      message: t('device.msg.discardEditsMsg'),
+      danger: true,
+      confirmText: t('device.confirm.discardEdits')
+    })
+    if (!ok) return
+  }
+  await loadCfg()
 }
 
 // ================= 定时重启（MGR-08） =================
@@ -680,7 +737,6 @@ async function saveEdit() {
 }
 
 // ================= 重启 / 转移 / 升级 / 安全删除（MGR-08/10/11/12） =================
-const confirmBox = useConfirm()
 const router = useRouter()
 
 // 用 replace 不用 push：只是切了个子页签，不是导航到新页面，
@@ -832,6 +888,28 @@ useWs((ev: any) => {
     dev.value.status = ev.type === 'device.online' ? 'online' : 'offline'
     dev.value.lastSeenAt = ev.ts || Date.now()
   }
+})
+
+// ================= 未保存修改的离开保护 =================
+// 只拦「离开这个页面」：五 Tab 之间、配置子页签之间都不拦——cfg.data 是同一份状态，
+// 切页签不会丢修改，此时弹确认只会变成噪音。
+function onBeforeUnload(e: BeforeUnloadEvent) {
+  if (!isCfgDirty.value) return
+  e.preventDefault()
+  // 部分浏览器仍要求设置 returnValue 才会弹出「离开此网站？」确认
+  e.returnValue = ''
+}
+onMounted(() => window.addEventListener('beforeunload', onBeforeUnload))
+onUnmounted(() => window.removeEventListener('beforeunload', onBeforeUnload))
+
+onBeforeRouteLeave(async () => {
+  if (!isCfgDirty.value) return true
+  return await confirmBox.ask({
+    title: t('device.msg.leaveUnsavedTitle'),
+    message: t('device.msg.leaveUnsavedMsg'),
+    danger: true,
+    confirmText: t('device.confirm.leavePage')
+  })
 })
 
 onMounted(load)
@@ -1197,10 +1275,17 @@ onMounted(load)
                      但本任务给它加了 localSettings 这个走通用 cfgGroups 渲染的分组，
                      所以要在有通用字段时放开这道口子，否则这两个新字段填了也存不下去 -->
                 <div v-if="cfgTab !== 'maintain' || visibleCfgGroups.length > 0" class="flex flex-wrap items-center gap-2">
-                  <UiButton variant="primary" :disabled="cfg.saving || (invalidKeysByTab[cfgTab]?.length ?? 0) > 0" @click="saveCfg">{{ t('device.config.submit') }}</UiButton>
-                  <UiButton @click="loadCfg">{{ t('device.config.reload') }}</UiButton>
-                  <span v-if="invalidKeysByTab[cfgTab]?.length" class="text-xs text-danger">{{ t('device.msg.configOutOfRange', { n: invalidKeysByTab[cfgTab].length }) }}</span>
+                  <UiButton
+                    variant="primary" :loading="cfgSaving"
+                    :disabled="cfgSaving || !isCfgDirty || (invalidKeysByTab[cfgTab]?.length ?? 0) > 0"
+                    @click="saveCfg"
+                  >{{ t('device.config.submit') }}</UiButton>
+                  <UiButton :disabled="cfgSaving" @click="reloadCfg">{{ t('device.config.reload') }}</UiButton>
+                  <span v-if="cfg.phase === 'rereading'" class="text-xs text-primary">{{ t('device.config.rereading') }}</span>
+                  <span v-else-if="invalidKeysByTab[cfgTab]?.length" class="text-xs text-danger">{{ t('device.msg.configOutOfRange', { n: invalidKeysByTab[cfgTab].length }) }}</span>
                   <span v-else-if="cfg.denied.length" class="text-xs text-danger">{{ t('device.config.rejectedCount', { n: cfg.denied.length }) }}</span>
+                  <!-- 没有任何反馈时按钮是灰的，用户会以为是权限/设备问题；明确告知“没改过” -->
+                  <span v-else-if="isCfgDirty" class="text-xs text-placeholder">{{ t('device.config.unsaved') }}</span>
                 </div>
               </template>
             </div>

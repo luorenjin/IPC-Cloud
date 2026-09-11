@@ -221,6 +221,9 @@ export default {
   'device.config.rejected': '被设备拒绝',
   'device.config.submit': '保存并下发',
   'device.config.reload': '重新回读',
+  'device.config.unsaved': '有未保存的修改',
+  // 保存后的自动回读状态：旧实现是静默定时回读，表单会自己变一遍，用户以为页面坏了
+  'device.config.rereading': '已下发，正在回读设备…',
   // ---- 子页签（七段式：画面信息/编码策略/OSD 叠加/移动侦测/录像策略/时间与网络/设备维护）----
   'device.config.tab.image': '画面信息',
   'device.config.tab.encode': '编码策略',
@@ -311,10 +314,17 @@ export default {
   'device.msg.rebootPlanLoadFailed': '加载定时重启计划失败',
   'device.msg.rebootPlanSaved': '定时重启计划已保存',
   'device.msg.configOutOfRange': '{n} 项超出合法范围，请先修正后再下发',
+  // 两种「丢弃未保存修改」的确认：手动重新回读、离开设备详情页
+  'device.msg.discardEditsTitle': '放弃未保存的修改？',
+  'device.msg.discardEditsMsg': '重新回读会用设备上的当前配置覆盖页面上尚未下发的修改。',
+  'device.msg.leaveUnsavedTitle': '离开并放弃未保存的修改？',
+  'device.msg.leaveUnsavedMsg': '配置面板还有未下发给设备的修改，离开后这些修改会丢失。',
   // ---- 恢复出厂设置 ----
   'device.config.factoryReset': '恢复出厂设置',
   'device.config.factoryResetDesc': '将清空设备全部本地配置并重启，此操作不可逆。',
   'device.confirm.factoryResetOk': '确认恢复出厂设置',
+  'device.confirm.discardEdits': '放弃修改并回读',
+  'device.confirm.leavePage': '离开',
   'device.msg.factoryResetTitle': '恢复出厂设置二次确认',
   'device.msg.factoryResetMsg': '将清空设备「{name}」的全部本地配置并重启设备！',
   'device.msg.factoryResetHint': '为防止误操作，请在下方输入框中完整输入设备名称以确认。',
