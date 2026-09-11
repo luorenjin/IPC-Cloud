@@ -261,6 +261,13 @@ func (d *Device) onMessage(_ mqtt.Client, msg mqtt.Message) {
 	case "cfg.set":
 		values, _ := data["values"].(map[string]any)
 		d.ack(env, 0, "", map[string]any{"rejected": d.cfgSet(values)})
+	case "cfg.reset":
+		d.cfgReset()
+		d.ack(env, 0, "", map[string]any{})
+		go func() {
+			time.Sleep(time.Second)
+			d.hello()
+		}()
 	default:
 		d.ack(env, 400, "unknown type", nil)
 	}

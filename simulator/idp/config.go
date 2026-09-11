@@ -160,6 +160,14 @@ func (d *Device) cfgSet(values map[string]any) []string {
 	return rejected
 }
 
+// cfgReset 恢复出厂设置：清空当前配置并重置为出厂默认值，
+// 对齐固件 cfg_reset(keep_keys, n) 的语义（firmware/core/src/config.c:594-614）。
+func (d *Device) cfgReset() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.cfg = cfgDefaults()
+}
+
 // coerceCfg 按规则做类型/范围校验并归一化取值。
 // 固件对类型不符是直接拒绝（cfg_set_bool 打 int 键返回 HAL_EINVAL），这里同样不接受"就地转换"。
 func coerceCfg(rule cfgRule, v any) (any, bool) {
