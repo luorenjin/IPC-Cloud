@@ -286,14 +286,15 @@ export default {
   'device.msg.rebootPlanLoadFailed': '加载定时重启计划失败',
   'device.msg.rebootPlanSaved': '定时重启计划已保存',
   'device.msg.configOutOfRange': '{n} 项超出合法范围，请先修正后再下发',
-  // ---- 恢复出厂设置（占位交互，真实接口在阶段 2 接线）----
+  // ---- 恢复出厂设置 ----
   'device.config.factoryReset': '恢复出厂设置',
   'device.config.factoryResetDesc': '将清空设备全部本地配置并重启，此操作不可逆。',
   'device.confirm.factoryResetOk': '确认恢复出厂设置',
   'device.msg.factoryResetTitle': '恢复出厂设置二次确认',
   'device.msg.factoryResetMsg': '将清空设备「{name}」的全部本地配置并重启设备！',
   'device.msg.factoryResetHint': '为防止误操作，请在下方输入框中完整输入设备名称以确认。',
-  'device.msg.factoryResetComingSoon': '恢复出厂设置接口即将上线',
+  'device.msg.factoryResetOk': '恢复出厂设置指令已下发，设备即将重启',
+  'device.msg.factoryResetFailed': '恢复出厂设置失败',
   // ---- 保存结果 ----
   'device.config.outOfRange': '超出范围（{range}）',
   'device.config.rejectedCount': '{n} 项被设备拒绝',

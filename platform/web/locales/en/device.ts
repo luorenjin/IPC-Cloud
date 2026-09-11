@@ -286,14 +286,15 @@ export default {
   'device.msg.rebootPlanLoadFailed': 'Could not load the reboot schedule',
   'device.msg.rebootPlanSaved': 'Reboot schedule saved',
   'device.msg.configOutOfRange': '{n} value(s) out of range — fix them before pushing',
-  // ---- Restore factory settings (placeholder interaction; real endpoint wired in stage 2) ----
+  // ---- Restore factory settings ----
   'device.config.factoryReset': 'Restore factory settings',
   'device.config.factoryResetDesc': 'This clears all local configuration and reboots the device. It cannot be undone.',
   'device.confirm.factoryResetOk': 'Confirm factory reset',
   'device.msg.factoryResetTitle': 'Confirm factory reset',
   'device.msg.factoryResetMsg': 'This clears all local configuration on device "{name}" and reboots it!',
   'device.msg.factoryResetHint': 'To prevent mistakes, type the full device name below to confirm.',
-  'device.msg.factoryResetComingSoon': 'The factory-reset endpoint is not live yet',
+  'device.msg.factoryResetOk': 'Factory reset command sent, the device is about to reboot',
+  'device.msg.factoryResetFailed': 'Factory reset failed',
   // ---- Save result ----
   'device.config.outOfRange': 'Out of range ({range})',
   'device.config.rejectedCount': '{n} rejected by device',

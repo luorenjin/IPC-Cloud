@@ -596,8 +596,8 @@ async function askDeleteDevice() {
   }
 }
 
-// 恢复出厂设置：本阶段真实接口尚未上线，先把强确认交互（镜像删除设备的 inputConfirm）做完；
-// 接线留给后续任务，避免这里调用一个还不存在的端点、伪装出「已恢复」的假成功。
+// 恢复出厂设置隐含设备重启：确认交互镜像删除设备的 inputConfirm；
+// 成功后重新拉取配置面板，直接展示设备侧已生效的出厂默认值，而不是本地臆测一份。
 async function askFactoryReset() {
   const devName = dev.value?.name || devId
   const ok = await confirmBox.ask({
@@ -610,7 +610,13 @@ async function askFactoryReset() {
     inputPlaceholder: devName
   })
   if (!ok) return
-  toast.info(t('device.msg.factoryResetComingSoon'))
+  try {
+    await api.post(`/devices/${devId}/config/reset`, { confirmName: devName })
+    toast.success(t('device.msg.factoryResetOk'))
+    loadCfg()
+  } catch (e: any) {
+    toastApiError(e, t('device.msg.factoryResetFailed'))
+  }
 }
 
 // ================= 操作日志行 =================
