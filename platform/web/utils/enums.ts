@@ -204,3 +204,128 @@ export const TASK_TYPE_MAP: Record<string, string> = {
   ota: '固件升级',
   download: '录像下载'
 }
+
+// ---------- 设备能力集（接入规范 §3.4 能力标识表） ----------
+
+/**
+ * 能力标识 → 中文名。键名即后端 `capabilities[]` 的字面值（`device.capabilities`），
+ * 由适配器在设备上线时产出（接入规范 §3.4 规则：适配器必须产出能力集，不得猜测）。
+ * 表里没有的标识不编造名字：`capabilityKey()` 原样返回，页面按原始键渲染，便于发现后端新增能力未同步前端。
+ */
+export const CAPABILITY_MAP: Record<string, string> = {
+  'live.main': '主码流预览',
+  'live.sub': '子码流预览',
+  'live.h265': '主码流 H.265',
+  snapshot: '抓图',
+  ptz: '云台控制',
+  'ptz.preset': '预置位',
+  focus: '对焦',
+  'audio.talk': '语音对讲',
+  'event.motion': '移动侦测事件',
+  'record.device.query': '设备端录像检索',
+  'record.device.play': '设备端录像回放',
+  'record.device.speed': '回放倍速',
+  'record.device.seek': '回放定位',
+  'record.platform': '平台侧录像',
+  'status.metrics': '运行状态上报',
+  'config.remote': '远程配置',
+  ota: '固件升级',
+  reboot: '远程重启'
+}
+
+/**
+ * 展示顺序。语义分组：直播 → 抓图 → 云台 → 事件 → 录像 → 运维。
+ * 后端返回的顺序取决于适配器实现（数组顺序不稳定），不排序的话同一页面刷新两次能力标签的
+ * 排列可能不同，也看不出「这台设备比那台少了什么」。
+ */
+export const CAPABILITY_ORDER: string[] = [
+  'live.main', 'live.sub', 'live.h265',
+  'snapshot',
+  'ptz', 'ptz.preset', 'focus', 'audio.talk',
+  'event.motion',
+  'record.device.query', 'record.device.play', 'record.device.speed', 'record.device.seek', 'record.platform',
+  'status.metrics', 'config.remote', 'ota', 'reboot'
+]
+
+/** 能力标识词条键；未知标识回落为原始值（t() 缺键时原样返回） */
+export function capabilityKey(c?: string): string {
+  return c && CAPABILITY_MAP[c] ? `enum.cap.${c}` : (c || EMPTY)
+}
+
+/** 中文兜底名（不经 i18n）。界面渲染请用 t(capabilityKey(c))。 */
+export function capabilityName(c?: string): string {
+  return CAPABILITY_MAP[c || ''] || c || EMPTY
+}
+
+/** 按 CAPABILITY_ORDER 排序（未收录的标识排到最后，保持后端原顺序，不去重） */
+export function sortCapabilities(caps: string[] | undefined): string[] {
+  const list = [...(caps || [])]
+  const rank = (c: string) => {
+    const i = CAPABILITY_ORDER.indexOf(c)
+    return i < 0 ? CAPABILITY_ORDER.length : i
+  }
+  // 稳定性由 sort 保证（ES2019 起 sort 稳定），未收录项之间维持后端顺序
+  return list.sort((a, b) => rank(a) - rank(b))
+}
+
+// ---------- 操作日志动作（ACC-08 审计中间件的 auditVerbs） ----------
+
+/**
+ * 动作动词 → 中文名。后端 `AuditLog.Action` 存的是**动词本身**
+ * （`api/audit.go` 的 `auditVerbs` 命中路径段则取该段，否则按 HTTP 方法回落为 create/update/delete），
+ * 对象类型在 `Target`（如 `device:<id>`）里，不在动作串里——所以这里用通用动词名，
+ * 不要写成 `device.add` 这类「资源.动词」复合键（`pages/system/audit.vue` 原来就是这么写的，
+ * 键名与后端实际值永远对不上，一直靠原样兜底显示，现改为引用本表）。
+ * 键集合镜像 `auditVerbs` + 三种 HTTP 方法回落 + 登录事件，后端新增动词时两处同步。
+ */
+export const AUDIT_ACTION_MAP: Record<string, string> = {
+  // ① 通用回落（HTTP 方法）
+  create: '新增',
+  update: '修改',
+  delete: '删除',
+  // ② 设备与接入
+  config: '下发配置',
+  diag: '一键诊断',
+  reboot: '远程重启',
+  sync: '同步',
+  transfer: '转移分组',
+  bind: '绑定',
+  preadd: '预添加',
+  activate: '激活',
+  confirm: '确认',
+  reject: '驳回',
+  discover: '设备发现',
+  whitelist: '白名单',
+  batch: '批量操作',
+  'move-devices': '批量转移',
+  // ③ 视频与云台
+  play: '起播',
+  stop: '停播',
+  snapshot: '抓图',
+  cover: '刷新封面',
+  ptz: '云台控制',
+  presets: '预置位',
+  goto: '预置位调用',
+  playback: '回放',
+  download: '下载',
+  // ④ 运维与账号
+  selfcheck: '自检',
+  kick: '踢流',
+  read: '标记已读',
+  'read-all': '全部已读',
+  'reset-password': '重置密码',
+  password: '修改密码',
+  crl: 'CRL 更新',
+  login: '登录',
+  logout: '退出登录'
+}
+
+/** 动作词条键；未收录的动词回落为原始值（便于发现后端新增动作用户可见） */
+export function auditActionKey(a?: string): string {
+  return a && AUDIT_ACTION_MAP[a] ? `enum.audit.${a}` : (a || EMPTY)
+}
+
+/** 中文兜底名（不经 i18n）。界面渲染请用 t(auditActionKey(a))。 */
+export function auditActionName(a?: string): string {
+  return AUDIT_ACTION_MAP[a || ''] || a || EMPTY
+}

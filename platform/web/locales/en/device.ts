@@ -166,20 +166,36 @@ export default {
   'device.detail.model': 'Model',
   'device.detail.vendor': 'Vendor',
   'device.detail.firmware': 'Firmware',
-  'device.detail.hardware': 'Hardware version',
+  // hw is whatever the device reports in hello (in practice the SoC model), and the chip
+  // selection is not frozen yet (decision log §2.3) — "Hardware version" would state an
+  // unfrozen assumption as fact, so the label reads "Hardware / chip" with an inline note.
+  'device.detail.hardware': 'Hardware / chip',
+  'device.detail.hardwareHint': 'Hardware identifier reported by the device (hello.hw). The chip selection is not frozen yet, so this is not the final bill of materials.',
   'device.detail.location': 'Installation site',
+  // PRD MGR-03 requires a "network" area on the overview: IP/MAC/site/remark in one block,
+  // skipped entirely when all four are empty
+  'device.detail.network': 'Connectivity and network',
   'device.detail.lastOnline': 'Last online',
   'device.detail.caps': 'Capabilities',
+  'device.detail.capsCount': '{n} in total',
   'device.detail.capsNone': 'None',
+  'device.detail.capRaw': 'Raw capability value: {cap}',
+  'device.detail.capUnknown': 'Unrecognized capability (shown as-is so new backend capabilities get noticed)',
   'device.detail.metrics': 'Runtime metrics',
+  'device.detail.metricsUpdated': 'Updated {at}',
+  'device.detail.metricsStale': 'Device is offline — values below are from its last report',
   'device.detail.memory': 'Memory',
   'device.detail.temperature': 'Temperature',
   'device.detail.tfCard': 'SD card',
   'device.detail.bitrate': 'Bitrate',
   'device.detail.recentEvents': 'Recent events',
+  'device.detail.viewAllLogs': 'View all logs',
   'device.detail.uptime': 'Uptime',
+  'device.detail.uptimeUnknown': 'This device does not report uptime',
   'device.detail.streamState': 'Stream status',
   'device.detail.lastDiag': 'Last diagnostics',
+  'device.detail.runDiagAria': 'Run diagnostics',
+  'device.detail.viewDiagAria': 'View diagnostic results',
   'device.detail.currentStatus': 'Current status: {status}',
   'device.detail.streamCount': '{live}/{total} streaming',
   'device.detail.noChannel': 'No channels',
@@ -311,7 +327,7 @@ export default {
 
   // ---- Diagnostics tab ----
   'device.diag.run': 'Run diagnostics',
-  'device.diag.summary': '{total} checks · {pass} passed',
+  'device.diag.summary': '{total} checks · {pass} passed · {at}',
   'device.diag.item': 'Check',
   'device.diag.itemFail': 'Failed',
   'device.diag.itemOk': 'OK',
@@ -321,16 +337,20 @@ export default {
   'device.diag.idle': 'Select "Run diagnostics" to check device connectivity and configuration',
   'device.diag.running': 'Running',
   'device.diag.notRun': 'Not run yet',
-  'device.diag.notRunSub': 'Open the Diagnostics tab and run the check',
-  'device.diag.noResultSub': 'The device returned no probe results this time',
+  'device.diag.notRunSub': 'Select here to run the check',
+  'device.diag.noResultSub': 'The device returned no probe results · {at}',
   'device.diag.failCount': '{n} failed',
-  'device.diag.totalCount': '{n} checks in total',
+  'device.diag.totalCount': '{n} checks in total · {at}',
   'device.diag.allOk': 'All passed',
-  'device.diag.allOkSub': 'All {n} checks passed',
+  'device.diag.allOkSub': 'All {n} checks passed · {at}',
 
   // ---- Logs tab ----
   'device.log.operator': 'Operator',
+  'device.log.operatorIp': 'Source IP: {ip}',
   'device.log.result': 'Result',
+  // The audit middleware only stores {method, path, status}; on failure that tuple is the most
+  // specific reason available, so we do not invent explanations the backend never recorded.
+  'device.log.failReason': '{method} {path} · HTTP {status}',
   'device.log.empty': 'No operations recorded yet',
 
   // ---- GB/T 28181 pending approval ----

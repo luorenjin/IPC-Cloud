@@ -166,20 +166,35 @@ export default {
   'device.detail.model': '型号',
   'device.detail.vendor': '厂商',
   'device.detail.firmware': '固件',
-  'device.detail.hardware': '硬件版本',
+  // 后端 hw 是设备 hello 自报的硬件标识（模拟器/真机报的都是 SoC 型号），
+  // 而芯片选型尚未冻结（《决策记录与待定事项》§2.3），叫「硬件版本」会把未定假设说成既定事实，
+  // 因此改叫「硬件/芯片」并在值旁挂「设备上报值」说明。
+  'device.detail.hardware': '硬件/芯片',
+  'device.detail.hardwareHint': '由设备上报（hello.hw）的硬件标识；芯片选型尚未冻结，此处不代表平台已定型的物料清单。',
   'device.detail.location': '安装位置',
+  // PRD MGR-03 要求概览含「网络」：IP/MAC/安装位置/备注合成一块，四项全空则不渲染
+  'device.detail.network': '接入与网络',
   'device.detail.lastOnline': '最后在线',
   'device.detail.caps': '能力集',
+  'device.detail.capsCount': '共 {n} 项',
   'device.detail.capsNone': '无',
+  'device.detail.capRaw': '接口原始值：{cap}',
+  'device.detail.capUnknown': '未收录的能力标识（原样显示，便于发现后端新增能力未同步前端）',
   'device.detail.metrics': '运行指标',
+  'device.detail.metricsUpdated': '更新于 {at}',
+  'device.detail.metricsStale': '设备离线，以下为最后一次上报值',
   'device.detail.memory': '内存',
   'device.detail.temperature': '温度',
   'device.detail.tfCard': 'TF 卡',
   'device.detail.bitrate': '码率',
   'device.detail.recentEvents': '最近事件',
+  'device.detail.viewAllLogs': '查看全部日志',
   'device.detail.uptime': '在线时长',
+  'device.detail.uptimeUnknown': '该设备未上报运行时长',
   'device.detail.streamState': '码流状态',
   'device.detail.lastDiag': '最近诊断结果',
+  'device.detail.runDiagAria': '运行一键诊断',
+  'device.detail.viewDiagAria': '查看诊断结果',
   'device.detail.currentStatus': '当前状态：{status}',
   'device.detail.streamCount': '{live}/{total} 路',
   'device.detail.noChannel': '无通道',
@@ -310,7 +325,7 @@ export default {
 
   // ---- 诊断 Tab ----
   'device.diag.run': '开始诊断',
-  'device.diag.summary': '共 {total} 项 · {pass} 项通过',
+  'device.diag.summary': '共 {total} 项 · {pass} 项通过 · {at}',
   'device.diag.item': '检查项',
   'device.diag.itemFail': '未通过',
   'device.diag.itemOk': '正常',
@@ -320,16 +335,20 @@ export default {
   'device.diag.idle': '点击「开始诊断」检查设备连通性与配置',
   'device.diag.running': '诊断中',
   'device.diag.notRun': '尚未诊断',
-  'device.diag.notRunSub': '前往「诊断」页运行一键检测',
-  'device.diag.noResultSub': '设备本次未返回任何探测结果',
+  'device.diag.notRunSub': '点击此处运行一键检测',
+  'device.diag.noResultSub': '设备未返回探测结果 · {at}',
   'device.diag.failCount': '{n} 项异常',
-  'device.diag.totalCount': '共 {n} 项检测',
+  'device.diag.totalCount': '共 {n} 项检测 · {at}',
   'device.diag.allOk': '全部正常',
-  'device.diag.allOkSub': '共 {n} 项检测均通过',
+  'device.diag.allOkSub': '共 {n} 项检测均通过 · {at}',
 
   // ---- 日志 Tab ----
   'device.log.operator': '操作人',
+  'device.log.operatorIp': '来源 IP：{ip}',
   'device.log.result': '结果',
+  // 审计中间件只落了 {method, path, status}，失败时能给出的最具体原因就是这一组，
+  // 不编造「网络超时」这类后端并未记录的解释
+  'device.log.failReason': '{method} {path} · HTTP {status}',
   'device.log.empty': '暂无操作记录',
 
   // ---- 国标待确认 ----

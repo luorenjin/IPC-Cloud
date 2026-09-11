@@ -65,8 +65,15 @@ func handleListDevices(c *gin.Context) {
 	for _, d := range devs {
 		items = append(items, deviceJSON(d))
 	}
-	// 类型状态卡片
-	var stats struct{ All, Online, Offline int64 }
+	// 类型状态卡片（项目全量口径，与筛选/分页无关）。
+	// 键名必须显式小写：匿名结构体没有 json tag 时，编码器直接输出 Go 字段名
+	// （All/Online/Offline），前端读 stats.all 全取不到 → 静默回退 0，
+	// 表现为「全部分组 (0)」「0 台 / 离线 0」而分组里明明有设备。
+	var stats struct {
+		All     int64 `json:"all"`
+		Online  int64 `json:"online"`
+		Offline int64 `json:"offline"`
+	}
 	store.DB.Model(&models.Device{}).Where("project_id = ? AND deleted_at = 0", ctx.ProjectID).Count(&stats.All)
 	store.DB.Model(&models.Device{}).Where("project_id = ? AND deleted_at = 0 AND status = 'online'", ctx.ProjectID).Count(&stats.Online)
 	stats.Offline = stats.All - stats.Online
@@ -135,6 +142,12 @@ func handleDeviceDetail(c *gin.Context) {
 	resp["channels"] = chs
 	if m, ok := d.Meta["metrics"]; ok {
 		resp["metrics"] = m
+	}
+	// 最近一次诊断结果（MGR-07）：概览的「最近诊断结果」段与诊断 Tab 都读它。
+	// 放在详情响应里而不是单开 GET /devices/:id/diag——详情页本来就要拉一次详情，
+	// 前端不用为一个可选的展示项多打一次往返。
+	if ld := recentDiag(d); ld != nil {
+		resp["lastDiag"] = ld
 	}
 	// 最近事件
 	var events []models.AuditLog
@@ -267,7 +280,34 @@ func handleDiagDevice(c *gin.Context) {
 		}
 		results = r
 	}
-	ok(c, gin.H{"results": results, "at": models.NowMilli()})
+	at := models.NowMilli()
+	// 落地「最近一次」诊断结果。以前只回给这一次请求，刷新页面概览就回到「尚未诊断」，
+	// 而 PRD MGR-07 要求诊断记录保留 7 天。存 meta.lastDiag（与 meta.metrics 同套路，不建新表），
+	// 注意 meta 在响应里是白名单投影（safeMeta），不会因此泄到列表接口。
+	if d.Meta == nil {
+		d.Meta = models.JSONB{}
+	}
+	d.Meta["lastDiag"] = models.JSONB{"at": at, "results": results}
+	_ = store.DB.Model(&d).Update("meta", d.Meta).Error
+	ok(c, gin.H{"results": results, "at": at})
+}
+
+// 诊断记录保留窗口（PRD MGR-07：诊断记录保留 7 天）。
+const diagRetentionMs = 7 * 24 * 60 * 60 * 1000
+
+// recentDiag 取设备最近一次诊断结果；无记录或已超出保留窗口返回 nil。
+// 过期不下发（而不是下发一个 8 天前的结果），前端于是回到「尚未诊断」，语义与「记录已过期」一致。
+func recentDiag(d models.Device) models.JSONB {
+	ld, _ := d.Meta["lastDiag"].(map[string]any)
+	if ld == nil {
+		return nil
+	}
+	// meta 经 JSONB 往返后数字是 float64
+	at, _ := ld["at"].(float64)
+	if at <= 0 || models.NowMilli()-int64(at) > diagRetentionMs {
+		return nil
+	}
+	return models.JSONB(ld)
 }
 
 // handleRebootDevice MGR-08。
@@ -951,8 +991,8 @@ func handleOnvifAdd(c *gin.Context) {
 		ID: "ch_" + models.NewID(), DeviceID: dev.ID, ProjectID: ctx.ProjectID,
 		Idx: 1, Name: name, Enabled: true, StreamState: "idle",
 		Capabilities: dev.Capabilities,
-		Meta: models.JSONB{"rtspMain": profileURI(info, 0), "rtspSub": profileURI(info, 1)},
-		CreatedAt: models.NowMilli(), UpdatedAt: models.NowMilli(),
+		Meta:         models.JSONB{"rtspMain": profileURI(info, 0), "rtspSub": profileURI(info, 1)},
+		CreatedAt:    models.NowMilli(), UpdatedAt: models.NowMilli(),
 	}
 	store.DB.Create(&ch)
 	devsvc.ApplyDefaultRecordPlan(ch.ID, ctx.ProjectID) // ADD-09

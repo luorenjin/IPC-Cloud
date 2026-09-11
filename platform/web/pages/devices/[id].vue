@@ -20,6 +20,15 @@ function hasCap(prefix: string) {
   return caps.value.some((c) => c.startsWith(prefix))
 }
 
+// 能力标签：按接入规范 §3.4 的顺序排列并中文化（未收录的标识原样显示，见 utils/enums.ts）。
+// 原来把后端原始键直接铺在中文界面上（record.device.query 等），既看不懂，
+// 也因为后端数组顺序不稳定而看不清「这台设备比那台少了什么」。
+const capItems = computed(() => sortCapabilities(caps.value).map((raw) => ({
+  raw,
+  labelKey: capabilityKey(raw),
+  known: !!CAPABILITY_MAP[raw]
+})))
+
 // 注意：后端 handleRebootDevice 目前对 idp 来源不做能力清单校验（有适配器就转发 cmd.reboot），
 // 这里的 idp 分支判断是前端单独收紧的保守展示，不是与后端对称的双向契约；
 // 真正的硬拒绝只有 rtsp（适配器 Reboot() 直接返回 EForbid）。后端若日后补上 idp 侧能力校验，
@@ -41,34 +50,54 @@ const streamInfo = (ch: any) => streamStatusInfo(ch.streamState ?? ch.streamStat
 const pct = (v: any) => fmtPercent(v)
 const temp = (v: any) => fmtTemp(v)
 
-// 概览字段（空字段隐藏，修复审计 B7）
-// 键名必须与后端 deviceJSON 一致：响应里是 fw / hw / lastSeenAt，
-// 之前读的是 firmware / firmwareVersion / lastOnline / lastSeen，
-// 四个键全部取不到值，行又被下面的 filter 静默丢掉——固件与最后在线因此从未显示过。
-const infoRows = computed(() => {
+// 概览字段分两块：
+// ① 基本信息：**恒定 6 项**（md 三列恰好两整行），空值占位为 —。字段数固定，
+//    不同设备之间网格行数不跳动，也不会出现「一行只剩两个格子」的参差边框。
+//    旧实现把空值整行删掉（审计 B7），字段数一变（IDP 无 IP/MAC、GB 无固件）就差分线。
+// ② 接入与网络（PRD MGR-03 要求概览含「网络」）：四项**全空则整块不渲染**，
+//    避免出现一整块全是 — 的空壳；块内空值仍占位，保持列对齐。
+const coreRows = computed(() => {
   const d = dev.value || {}
+  const last = d.lastSeenAt || d.lastOnline
   return [
-    { label: t('device.detail.deviceId'), value: d.id },
-    { label: t('device.detail.model'), value: d.model },
-    { label: t('device.detail.vendor'), value: d.vendor },
-    { label: t('device.detail.firmware'), value: d.fw || d.firmware },
-    { label: t('device.detail.hardware'), value: d.hw },
-    { label: 'IP', value: d.ip },
-    { label: 'MAC', value: d.mac },
-    { label: t('device.detail.location'), value: d.location },
-    { label: t('common.remark'), value: d.remark },
-    { label: t('device.detail.lastOnline'), value: d.lastSeenAt || d.lastOnline ? ago(d.lastSeenAt || d.lastOnline, t) : '' }
-  ].filter((r) => r.value !== undefined && r.value !== null && r.value !== '')
+    { key: 'id', label: t('device.detail.deviceId'), value: d.id },
+    { key: 'model', label: t('device.detail.model'), value: d.model },
+    { key: 'vendor', label: t('device.detail.vendor'), value: d.vendor },
+    // 后端 deviceJSON 的键名是 fw（不是 firmware）
+    { key: 'fw', label: t('device.detail.firmware'), value: d.fw || d.firmware },
+    // hw 是设备 hello 自报值，芯片选型未冻结（《决策记录与待定事项》§2.3）→ 挂说明
+    { key: 'hw', label: t('device.detail.hardware'), value: d.hw, hintKey: 'device.detail.hardwareHint' },
+    { key: 'lastSeen', label: t('device.detail.lastOnline'), value: last ? ago(last, t) : '' }
+  ]
+})
+const netRows = computed(() => {
+  const d = dev.value || {}
+  const rows = [
+    { key: 'ip', label: 'IP', value: d.ip },
+    { key: 'mac', label: 'MAC', value: d.mac },
+    { key: 'location', label: t('device.detail.location'), value: d.location },
+    { key: 'remark', label: t('common.remark'), value: d.remark }
+  ]
+  const hasAny = rows.some((r) => r.value !== undefined && r.value !== null && r.value !== '')
+  if (!hasAny) return []
+  // 补足到 3 的整数倍：栅格用 gap-px + 容器底色画分隔线（line-soft），
+  // 缺格时底色会露出成一块灰块；补位格在单列（移动端）下隐藏，不然会多出空行。
+  const need = (3 - (rows.length % 3)) % 3
+  return [
+    ...rows,
+    ...Array.from({ length: need }, (_, i) => ({ key: 'filler' + i, label: '', value: '', filler: true }))
+  ]
 })
 
-// ================= 诊断（MGR-07：读取 /devices/:id/diag 的 { results, at }） =================
-const diag = reactive({ loading: false, ran: false, items: [] as any[] })
+// ================= 诊断（MGR-07：POST /devices/:id/diag 返回 { results, at }；结果由后端保留 7 天） =================
+const diag = reactive({ loading: false, ran: false, at: 0, items: [] as any[] })
 async function runDiag() {
   diag.loading = true
   diag.items = []
   try {
     const res: any = await api.post(`/devices/${devId}/diag`)
     diag.items = res?.results || []
+    diag.at = res?.at || Date.now()
     diag.ran = true
   } catch (e: any) {
     toastApiError(e, t('device.msg.diagFailed'))
@@ -86,16 +115,39 @@ function diagDotClass(it: any) {
 // ================= 健康仪表条（概览 Tab 顶部三段式，纯展示计算属性） =================
 const barDot: Record<string, string> = { success: 'bg-success', warning: 'bg-warning', danger: 'bg-danger', info: 'bg-info' }
 const barText: Record<string, string> = { success: 'text-success', warning: 'text-warning', danger: 'text-danger', info: 'text-info' }
+/** 健康条单段。onClick 存在时该段整体是一个按钮（目前只有「最近诊断结果」需要可点） */
+interface HealthSeg {
+  key: string
+  icon: string
+  titleKey: string
+  color: string
+  value: string
+  sub: string
+  /** 由 healthSegs 统一 t() 后的展示标题 */
+  title?: string
+  pulse?: boolean
+  onClick?: () => void
+  /** 可点段的 aria 文案键（运行 / 查看随当前是否已有结果而变化） */
+  ariaKey?: string
+}
+
+/**
+ * 在线时长段的标题随状态切换：在线且设备上报 metrics.uptime（秒，IDP 侧真实运行时长）时才叫「在线时长」，
+ * 否则叫「最后在线」——旧实现是「标题恒为在线时长 + 离线时填先后心跳时间」，
+ * 读出来是「在线时长 3 小时前」，语义不成立。非 IDP 协议不上报 uptime，就如实显示 —，不编造时长。
+ */
 const uptimeSeg = computed(() => {
   const d = dev.value || {}
   const st = statusInfo(d.status)
-  // IDP 会上报 metrics.uptime（秒），这是设备侧真实运行时长，优先用它；
-  // 其它协议没有 uptime，退回「最后心跳距今」。两者都比原来恒为 — 有意义。
+  const statusText = t('device.detail.currentStatus', { status: t(st.labelKey) })
   const up = metrics.value?.uptime
-  const value = d.status === 'online' && up != null
-    ? fmtDuration(up)
-    : d.lastSeenAt || d.lastOnline ? ago(d.lastSeenAt || d.lastOnline, t) : EMPTY
-  return { color: st.color, value, sub: t('device.detail.currentStatus', { status: t(st.labelKey) }) }
+  if (d.status === 'online') {
+    return up != null
+      ? { color: st.color, titleKey: 'device.detail.uptime', value: fmtDuration(up), sub: statusText }
+      : { color: st.color, titleKey: 'device.detail.uptime', value: EMPTY, sub: t('device.detail.uptimeUnknown') }
+  }
+  const last = d.lastSeenAt || d.lastOnline
+  return { color: st.color, titleKey: 'device.detail.lastOnline', value: last ? ago(last, t) : EMPTY, sub: statusText }
 })
 const streamSeg = computed(() => {
   const chs = channels.value
@@ -109,19 +161,83 @@ const streamSeg = computed(() => {
   }
 })
 const diagSeg = computed(() => {
+  // 结果可能是后端保留的旧记录（7 天窗口内），必须带出「什么时候跑的」：
+  // 不带时间的话，6 天前的结果和刚刚跑完的结果长得一模一样。
+  const ranAt = diag.at ? ago(diag.at, t) : EMPTY
   if (diag.loading) return { color: 'warning', value: t('device.diag.running'), sub: t('device.diag.probing'), pulse: true }
   if (!diag.ran) return { color: 'info', value: t('device.diag.notRun'), sub: t('device.diag.notRunSub') }
-  if (!diag.items.length) return { color: 'info', value: t('device.diag.noResult'), sub: t('device.diag.noResultSub') }
+  if (!diag.items.length) return { color: 'info', value: t('device.diag.noResult'), sub: t('device.diag.noResultSub', { at: ranAt }) }
   const failCount = diag.items.filter((it: any) => it.ok === false).length
   return failCount
-    ? { color: 'danger', value: t('device.diag.failCount', { n: failCount }), sub: t('device.diag.totalCount', { n: diag.items.length }) }
-    : { color: 'success', value: t('device.diag.allOk'), sub: t('device.diag.allOkSub', { n: diag.items.length }) }
+    ? { color: 'danger', value: t('device.diag.failCount', { n: failCount }), sub: t('device.diag.totalCount', { n: diag.items.length, at: ranAt }) }
+    : { color: 'success', value: t('device.diag.allOk'), sub: t('device.diag.allOkSub', { n: diag.items.length, at: ranAt }) }
 })
-const healthSegs = computed(() => [
-  { key: 'uptime', icon: 'clock', title: t('device.detail.uptime'), ...uptimeSeg.value },
-  { key: 'stream', icon: 'video', title: t('device.detail.streamState'), ...streamSeg.value },
-  { key: 'diag', icon: 'activity', title: t('device.detail.lastDiag'), ...diagSeg.value }
-])
+const healthSegs = computed<HealthSeg[]>(() => ([
+  { key: 'uptime', icon: 'clock', ...uptimeSeg.value },
+  { key: 'stream', icon: 'video', titleKey: 'device.detail.streamState', ...streamSeg.value },
+  {
+    key: 'diag', icon: 'activity', titleKey: 'device.detail.lastDiag', ...diagSeg.value, onClick: goDiag,
+    // 已有结果时点击只跳转不再重跑（重跑是一次设备往返），aria 文案要跟着变
+    ariaKey: diag.ran ? 'device.detail.viewDiagAria' : 'device.detail.runDiagAria'
+  }
+]).map((s) => ({ ...s, title: t(s.titleKey) })))
+
+// 「最近诊断结果」段本身就是入口：点一下切到诊断 Tab 并直接开跑（已跑过/正在跑不重复触发）。
+// 原来只写了「前往「诊断」页运行一键检测」却不可点，概览页最该提供的动作反而要用户自己找 Tab。
+function goDiag() {
+  tab.value = 'diag'
+  if (!diag.loading && !diag.ran) runDiag()
+}
+function goLogs() {
+  tab.value = 'logs'
+}
+
+// ================= 运行指标（status.metrics，PRD MGR-03） =================
+// 只列有值的项，宽度用 flex 自适应；旧实现是固定 grid-cols-5 + v-show 隐藏空值，
+// 设备只上报 3 项（IDP 模拟器：cpu/mem/temp）时右侧会留两个空槽，看上去像渲染坏了。
+const metricItems = computed(() => {
+  const m = metrics.value
+  if (!m) return []
+  const tf = m.tfHealth || (m.tfTotal ? `${m.tfUsed || 0}/${m.tfTotal} GB` : '')
+  return [
+    { key: 'cpu', label: 'CPU', value: pct(m.cpu) },
+    { key: 'mem', label: t('device.detail.memory'), value: pct(m.memory ?? m.mem) },
+    { key: 'temp', label: t('device.detail.temperature'), value: temp(m.temperature ?? m.temp) },
+    { key: 'tf', label: t('device.detail.tfCard'), value: tf },
+    { key: 'bitrate', label: t('device.detail.bitrate'), value: m.bitrate ? m.bitrate + ' kbps' : '' }
+  ].filter((x) => x.value && x.value !== EMPTY)
+})
+
+// 指标刷新：IDP 每 30s 上报一次 status.report（simulator/idp/device.go 的 reportLoop），
+// 因此概览停留期间自动跟进一次 + 提供手动刷新；两者都走 GET /devices/:id（metrics 同包返回），
+// 不新增端点。不用 load()，是因为它会把整页塞进 UiLoading 转一圈。
+const metricState = reactive({ busy: false, at: 0 })
+async function refreshMetrics() {
+  if (metricState.busy) return
+  metricState.busy = true
+  try {
+    const res: any = await api.get(`/devices/${devId}`)
+    if (!dev.value) return
+    // 只合并概览相关的三个字段，不用整个响应覆盖 dev（避免把 channels 等一并替换掉）
+    if (res?.metrics) dev.value.metrics = res.metrics
+    if (res?.status) dev.value.status = res.status
+    if (res?.lastSeenAt) dev.value.lastSeenAt = res.lastSeenAt
+    metricState.at = Date.now()
+  } catch {
+    // 自动刷新失败不弹错：设备短暂离线是常态，WS 会推在线态，手动刷新按钮仍在
+  } finally {
+    metricState.busy = false
+  }
+}
+let metricTimer: ReturnType<typeof setInterval> | null = null
+function syncMetricTimer() {
+  // 只在概览 Tab 停留且设备在线时轮询，离开/离线立即停，不在后台白打接口
+  const shouldRun = tab.value === 'overview' && dev.value?.status === 'online'
+  if (shouldRun && !metricTimer) metricTimer = setInterval(refreshMetrics, 30_000)
+  if (!shouldRun && metricTimer) { clearInterval(metricTimer); metricTimer = null }
+}
+watch([tab, () => dev.value?.status], syncMetricTimer)
+onUnmounted(() => { if (metricTimer) clearInterval(metricTimer) })
 
 // ================= 通道操作 =================
 async function toggleCh(ch: any, val: any) {
@@ -627,19 +743,47 @@ async function askFactoryReset() {
   }
 }
 
-// ================= 操作日志行 =================
-const opRows = computed(() => (dev.value?.recentOps || []).map((o: any) => ({
-  ts: o.ts || o.time || o.createdAt || 0,
-  action: o.action || o.type || '—',
-  operator: o.operator || o.user || o.username || '—',
-  ok: o.ok ?? !(o.result === '失败' || o.result === 'fail' || o.result === 'error'),
-  msg: o.msg || o.detail || ''
-})))
+// ================= 操作日志行（概览「最近事件」与「日志」Tab 共用） =================
+// 后端返回的是 models.AuditLog：{ action（动词，如 config/diag/reboot）、target、result（success|fail）、
+// username、ip、detail{method,path,status}、ts }（见 server/internal/api/audit.go）。
+// 旧实现只看 action 与「成功/失败」：username（操作人）、ip、detail 全丢，
+// 结果判定还写成 `o.result === '失败'` 这类字符串比较——后端从不发这些值，实际上始终靠 `o.ok` 兜底。
+const opRows = computed(() => (dev.value?.recentOps || []).map((o: any) => {
+  const detail = o?.detail && typeof o.detail === 'object' ? o.detail : {}
+  const ok = o?.result ? o.result !== 'fail' : o?.ok !== false
+  const method = detail.method || ''
+  const path = detail.path || ''
+  const status = detail.status
+  const request = [method, path].filter(Boolean).join(' ')
+  // 失败原因只说后端真记下的东西（HTTP 状态码 + 请求），不编造「网络超时」这类解释
+  const detailText = !ok && request
+    ? t('device.log.failReason', { method, path, status: status ?? EMPTY })
+    : request
+  return {
+    ts: o.ts || o.time || o.createdAt || 0,
+    action: o.action || o.type || '',
+    actionKey: auditActionKey(o.action || o.type),
+    operator: o.username || o.operator || o.user || EMPTY,
+    ip: o.ip || '',
+    ok,
+    detailText
+  }
+}))
 
 async function load() {
   loading.value = true
   try {
     dev.value = await api.get(`/devices/${devId}`)
+    // 指标“更新于”的起点：首屏拿到的那份就是刚取回的，不必等 30s 轮询才有时间戳
+    metricState.at = Date.now()
+    // 诊断结果由后端保留 7 天（meta.lastDiag，见 api/devices.go 的 recentDiag）：
+    // 有存量就回填，否则刷新一次页面概览就退回「尚未诊断」，而实际上刚跑过。
+    const ld = dev.value?.lastDiag
+    if (Array.isArray(ld?.results) && ld.results.length) {
+      diag.items = ld.results
+      diag.at = Number(ld.at) || 0
+      diag.ran = true
+    }
   } catch (e: any) {
     toastApiError(e, t('common.loadFailed'))
   } finally {
@@ -695,58 +839,109 @@ onMounted(load)
         <div v-if="tab === 'overview'" class="space-y-4 pt-4">
           <!-- 健康仪表条：在线时长 / 码流状态 / 最近诊断结果，三段式横向排列 -->
           <div class="grid grid-cols-1 divide-y divide-line-soft rounded-signal border border-line bg-zone md:grid-cols-3 md:divide-x md:divide-y-0">
-            <div v-for="seg in healthSegs" :key="seg.key" class="flex items-center gap-3 px-4 py-3">
+            <div
+              v-for="seg in healthSegs" :key="seg.key"
+              class="group relative flex items-center gap-3 px-4 py-3"
+            >
               <span class="h-2 w-2 shrink-0 rounded-full" :class="[barDot[seg.color], seg.pulse ? 'animate-pulse' : '']" />
               <Icon :name="seg.icon" :size="15" class="shrink-0 text-placeholder" />
               <div class="min-w-0">
                 <p class="text-xs text-placeholder">{{ seg.title }}</p>
                 <p class="truncate text-sm font-semibold" :class="barText[seg.color]">{{ seg.value }}</p>
-                <p class="truncate text-[11px] text-muted">{{ seg.sub }}</p>
+                <p class="truncate text-[11px]" :class="seg.onClick ? 'text-primary group-hover:underline' : 'text-muted'">{{ seg.sub }}</p>
+              </div>
+              <Icon v-if="seg.onClick" name="chevron-right" :size="14" class="ml-auto shrink-0 text-placeholder group-hover:text-primary" />
+              <!-- 可点段用铺满整段的透明按钮接管点击与键盘焦点。
+                   不要写 <component :is="'button'">：nuxt.config.ts 用 pathPrefix:false 把
+                   components/ui/Button.vue 同时注册为全局 `Button`，动态 :is 传 'button' 会被解析成 UiButton
+                   （类名合并 + h-8 把整段压成 32px，内容被裁）；铺在内容之上而非包住内容，
+                   也避免把非交互文本塞进 button。 -->
+              <button
+                v-if="seg.onClick" type="button"
+                class="ipc-focus-ring absolute inset-0 cursor-pointer outline-none"
+                :aria-label="seg.ariaKey ? t(seg.ariaKey) : undefined"
+                @click="seg.onClick()"
+              />
+            </div>
+          </div>
+
+          <!-- 基本信息：恒定六项，空值占位 —；单元格分隔线用 gap-px + 容器底色画，
+               不再靠第一个/最后一个子元素的 border 修补（旧实现 last:border-0 在 3 列下只能去掉第 6 格） -->
+          <div class="grid grid-cols-1 gap-px overflow-hidden rounded-signal border border-line bg-line-soft md:grid-cols-3">
+            <div v-for="r in coreRows" :key="r.key" class="flex min-w-0 items-center gap-1 bg-surface px-3 py-2 text-sm">
+              <span class="w-24 shrink-0 text-placeholder">{{ r.label }}</span>
+              <span class="min-w-0 truncate" :class="r.value ? 'text-ink' : 'text-placeholder'" :title="r.value ? String(r.value) : ''">{{ r.value || EMPTY }}</span>
+              <UiTooltip v-if="r.hintKey" :label="t(r.hintKey)">
+                <span class="shrink-0 cursor-help text-placeholder"><Icon name="help-circle" :size="12" /></span>
+              </UiTooltip>
+            </div>
+          </div>
+
+          <!-- 接入与网络（PRD MGR-03：概览需含「网络」）：四项全空则整块不渲染 -->
+          <div v-if="netRows.length">
+            <p class="mb-2 text-xs text-placeholder">{{ t('device.detail.network') }}</p>
+            <div class="grid grid-cols-1 gap-px overflow-hidden rounded-signal border border-line bg-line-soft md:grid-cols-3">
+              <div
+                v-for="r in netRows" :key="r.key" class="bg-surface px-3 py-2 text-sm"
+                :class="r.filler ? 'hidden md:block' : 'flex min-w-0 items-center gap-1'"
+              >
+                <template v-if="!r.filler">
+                  <span class="w-24 shrink-0 text-placeholder">{{ r.label }}</span>
+                  <span class="min-w-0 truncate" :class="r.value ? 'text-ink' : 'text-placeholder'" :title="r.value ? String(r.value) : ''">{{ r.value || EMPTY }}</span>
+                </template>
               </div>
             </div>
           </div>
 
-          <div class="grid grid-cols-1 gap-x-8 gap-y-2 rounded-signal border border-line md:grid-cols-3">
-            <div v-for="r in infoRows" :key="r.label" class="flex border-b border-line-soft px-3 py-2 text-sm last:border-0">
-              <span class="w-24 shrink-0 text-placeholder">{{ r.label }}</span>
-              <span class="min-w-0 truncate text-ink" :title="String(r.value)">{{ r.value }}</span>
-            </div>
-          </div>
-
+          <!-- 能力集：中文名 + 展示顺序，保留接口原始值供对接核对；未收录标识原样显示 -->
           <div>
-            <p class="mb-2 text-xs text-placeholder">{{ t('device.detail.caps') }}</p>
+            <div class="mb-2 flex items-center gap-2">
+              <p class="text-xs text-placeholder">{{ t('device.detail.caps') }}</p>
+              <span v-if="capItems.length" class="text-[11px] text-placeholder">{{ t('device.detail.capsCount', { n: capItems.length }) }}</span>
+            </div>
             <div class="flex flex-wrap gap-2">
-              <UiTag v-for="(c, i) in caps" :key="i" color="primary" plain>{{ c }}</UiTag>
-              <span v-if="!caps.length" class="text-sm text-placeholder">{{ t('device.detail.capsNone') }}</span>
+              <UiTooltip v-for="c in capItems" :key="c.raw" :label="c.known ? t('device.detail.capRaw', { cap: c.raw }) : t('device.detail.capUnknown')">
+                <UiTag :color="c.known ? 'primary' : 'default'" plain>{{ t(c.labelKey) }}</UiTag>
+              </UiTooltip>
+              <span v-if="!capItems.length" class="text-sm text-placeholder">{{ t('device.detail.capsNone') }}</span>
             </div>
           </div>
 
-          <!-- status.metrics（IDP 运行指标，MGR-03） -->
-          <div v-if="metrics">
-            <p class="mb-2 text-xs text-placeholder">{{ t('device.detail.metrics') }}</p>
-            <div class="grid grid-cols-2 gap-3 md:grid-cols-5">
-              <div v-for="m in [
-                { label: 'CPU', value: pct(metrics.cpu) },
-                { label: t('device.detail.memory'), value: pct(metrics.memory ?? metrics.mem) },
-                { label: t('device.detail.temperature'), value: temp(metrics.temperature ?? metrics.temp) },
-                { label: t('device.detail.tfCard'), value: metrics.tfHealth || (metrics.tfTotal ? (metrics.tfUsed || 0) + '/' + metrics.tfTotal + 'GB' : '') },
-                { label: t('device.detail.bitrate'), value: metrics.bitrate ? metrics.bitrate + 'kbps' : '' }
-              ]" :key="m.label" v-show="m.value && m.value !== '—'"
-                class="rounded-signal border border-line py-3 text-center">
+          <!-- status.metrics（IDP 运行指标，MGR-03）：只列有值的项，flex 自适应不留空槽 -->
+          <div v-if="metricItems.length">
+            <div class="mb-2 flex flex-wrap items-center gap-2">
+              <p class="text-xs text-placeholder">{{ t('device.detail.metrics') }}</p>
+              <span v-if="metricState.at" class="text-[11px] text-placeholder">{{ t('device.detail.metricsUpdated', { at: ago(metricState.at, t) }) }}</span>
+              <span v-if="dev?.status !== 'online'" class="text-[11px] text-warning">{{ t('device.detail.metricsStale') }}</span>
+              <UiButton class="ml-auto" variant="text" size="sm" :disabled="metricState.busy" @click="refreshMetrics">
+                <Icon name="refresh" :size="12" :class="metricState.busy ? 'ipc-spin' : ''" />{{ t('common.refresh') }}
+              </UiButton>
+            </div>
+            <div class="flex flex-wrap gap-3">
+              <div v-for="m in metricItems" :key="m.key" class="min-w-[110px] flex-1 basis-28 rounded-signal border border-line py-3 text-center">
                 <p class="text-xs text-placeholder">{{ m.label }}</p>
                 <p class="mt-1 text-lg font-bold text-ink">{{ m.value }}</p>
               </div>
             </div>
           </div>
 
-          <!-- 最近事件 -->
+          <!-- 最近事件：动作中文化 + 操作人 + 失败原因，并给出进「日志」Tab 的出口 -->
           <div v-if="opRows.length">
-            <p class="mb-2 text-xs text-placeholder">{{ t('device.detail.recentEvents') }}</p>
-            <div class="space-y-1">
-              <div v-for="(o, i) in opRows.slice(0, 5)" :key="i" class="flex items-center gap-2 text-[13px]">
-                <span class="text-placeholder">{{ ago(o.ts, t) }}</span>
-                <span class="text-body">{{ o.action }}</span>
-                <UiTag :color="o.ok ? 'success' : 'danger'" plain>{{ o.ok ? t('common.success') : t('common.failed') }}</UiTag>
+            <div class="mb-2 flex items-center gap-2">
+              <p class="text-xs text-placeholder">{{ t('device.detail.recentEvents') }}</p>
+              <button type="button" class="ipc-focus-ring ml-auto flex items-center gap-0.5 rounded-chrome px-1 text-xs text-primary outline-none hover:underline" @click="goLogs">
+                {{ t('device.detail.viewAllLogs') }}<Icon name="chevron-right" :size="12" />
+              </button>
+            </div>
+            <div class="divide-y divide-line-soft rounded-signal border border-line">
+              <div v-for="(o, i) in opRows.slice(0, 5)" :key="i" class="flex flex-col gap-0.5 px-3 py-2">
+                <div class="flex min-w-0 items-center gap-2 text-[13px]">
+                  <span class="shrink-0 text-placeholder">{{ ago(o.ts, t) }}</span>
+                  <span class="shrink-0 text-body">{{ t(o.actionKey) }}</span>
+                  <span class="min-w-0 flex-1 truncate text-placeholder" :title="o.ip ? t('device.log.operatorIp', { ip: o.ip }) : ''">{{ o.operator }}</span>
+                  <UiTag :color="o.ok ? 'success' : 'danger'" plain>{{ o.ok ? t('common.success') : t('common.failed') }}</UiTag>
+                </div>
+                <p v-if="!o.ok && o.detailText" class="text-xs text-danger">{{ o.detailText }}</p>
               </div>
             </div>
           </div>
@@ -1018,7 +1213,7 @@ onMounted(load)
               <Icon name="activity" :size="14" :class="diag.loading ? 'ipc-spin' : ''" />{{ t('device.diag.run') }}
             </UiButton>
             <span v-if="diag.items.length && !diag.loading" class="text-xs text-placeholder">
-              {{ t('device.diag.summary', { total: diag.items.length, pass: diag.items.filter((it) => it.ok).length }) }}
+              {{ t('device.diag.summary', { total: diag.items.length, pass: diag.items.filter((it) => it.ok).length, at: diag.at ? ago(diag.at, t) : EMPTY }) }}
             </span>
           </div>
 
@@ -1052,7 +1247,10 @@ onMounted(load)
             :rows="opRows" :empty="t('device.log.empty')"
           >
             <template #ts="{ row }">{{ ago(row.ts, t) }}</template>
+            <template #action="{ row }">{{ t(row.actionKey) }}</template>
+            <template #operator="{ row }"><span :title="row.ip ? t('device.log.operatorIp', { ip: row.ip }) : ''">{{ row.operator }}</span></template>
             <template #ok="{ row }"><UiTag :color="row.ok ? 'success' : 'danger'">{{ row.ok ? t('common.success') : t('common.failed') }}</UiTag></template>
+            <template #msg="{ row }"><span class="font-mono text-xs text-placeholder">{{ row.detailText || EMPTY }}</span></template>
           </UiTable>
         </div>
       </UiTabs>

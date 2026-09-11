@@ -18,25 +18,14 @@ const total = ref(0)
 const items = ref<any[]>([])
 const loading = ref(false)
 
-/* 动作中文映射（未匹配的动作原样展示） */
-const ACTION_MAP = computed<Record<string, string>>(() => ({
-  'device.add': t('system.audit.actDeviceAdd'),
-  'device.delete': t('system.audit.actDeviceDelete'),
-  'device.transfer': t('system.audit.actDeviceTransfer'),
-  'user.create': t('system.audit.actUserCreate'),
-  'user.delete': t('system.audit.actUserDelete'),
-  'role.create': t('system.audit.actRoleCreate'),
-  'role.update': t('system.audit.actRoleUpdate'),
-  'role.delete': t('system.audit.actRoleDelete'),
-  'group.create': t('system.audit.actGroupCreate'),
-  'group.delete': t('system.audit.actGroupDelete'),
-  'node.create': t('system.audit.actNodeCreate'),
-  'node.delete': t('system.audit.actNodeDelete'),
-  'settings.update': t('system.audit.actSettingsUpdate'),
-  'login': t('system.audit.actLogin'),
-  'logout': t('system.audit.actLogout')
-}))
-const actionLabel = (a: string) => ACTION_MAP.value[a] || a || '-'
+/*
+ * 动作中文名见 utils/enums.ts 的 AUDIT_ACTION_MAP（唯一的动作词条来源）。
+ * 旧实现是页内自建映射，键名写成 `device.add` / `user.create` 这类「资源.动词」，
+ * 而后端 AuditLog.Action 存的是**动词本身**（api/audit.go：路径命中 auditVerbs 取该段，
+ * 否则按 HTTP 方法回落 create/update/delete），资源类型在 Target（如 `device:<id>`）里
+ * → 旧映射永远匹配不上，动作列一直靠原样显示。
+ */
+const actionLabel = (a: string) => (a ? t(auditActionKey(a)) : '-')
 
 /* 对象类型（由动作前缀推断） */
 const TARGET_TYPES = computed(() => [

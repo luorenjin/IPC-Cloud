@@ -46,7 +46,7 @@ for p in (glob.glob('pages/**/*.vue', recursive=True) + glob.glob('layouts/*.vue
 # 动态构造的键（模板字符串）无法静态解析，这些前缀一律豁免
 DYNAMIC_PREFIX = ('enum.day.', 'enum.source.', 'enum.alarmKind.', 'enum.alarmLevel.',
                   'enum.deviceStatus.', 'enum.nodeStatus.', 'enum.streamStatus.',
-                  'enum.result.', 'task.status.', 'task.type.')
+                  'enum.result.', 'enum.cap.', 'enum.audit.', 'task.status.', 'task.type.')
 
 missing_en = sorted(set(zh) - set(en))
 missing_zh = sorted(set(en) - set(zh))
