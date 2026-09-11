@@ -20,27 +20,43 @@ function hasCap(prefix: string) {
   return caps.value.some((c) => c.startsWith(prefix))
 }
 
+// 重启能力判定必须与后端 supportsReboot 同构，否则会出现「按钮可点但接口 403」：
+// rtsp 无重启通道；idp 在声明了能力清单时必须显式声明 reboot；其余来源默认允许。
+// 后端改动时此处需同步（AGENTS.md 双向契约一致性）。
+const canReboot = computed(() => {
+  const src = dev.value?.source
+  if (!src) return false
+  if (src === 'rtsp') return false
+  if (src === 'idp' && caps.value.length > 0) return caps.value.includes('reboot')
+  return true
+})
+
 // 来源展示名/颜色见 utils/enums.ts SOURCE_MAP（全站唯一来源，PRD §9.1）
 // 设备/推流状态映射见 utils/enums.ts
 const statusInfo = (s?: string) => deviceStatusInfo(s)
-const streamInfo = (ch: any) => streamStatusInfo(ch.streamStatus ?? ch.status ?? '')
+// 通道流状态字段名是 streamState（models.Channel），不是 streamStatus/status
+const streamInfo = (ch: any) => streamStatusInfo(ch.streamState ?? ch.streamStatus ?? ch.status ?? '')
 // 相对时间/百分比/温度格式化见 utils/format.ts
 const pct = (v: any) => fmtPercent(v)
 const temp = (v: any) => fmtTemp(v)
 
 // 概览字段（空字段隐藏，修复审计 B7）
+// 键名必须与后端 deviceJSON 一致：响应里是 fw / hw / lastSeenAt，
+// 之前读的是 firmware / firmwareVersion / lastOnline / lastSeen，
+// 四个键全部取不到值，行又被下面的 filter 静默丢掉——固件与最后在线因此从未显示过。
 const infoRows = computed(() => {
   const d = dev.value || {}
   return [
     { label: t('device.detail.deviceId'), value: d.id },
     { label: t('device.detail.model'), value: d.model },
     { label: t('device.detail.vendor'), value: d.vendor },
-    { label: t('device.detail.firmware'), value: d.firmware || d.firmwareVersion },
+    { label: t('device.detail.firmware'), value: d.fw || d.firmware },
+    { label: t('device.detail.hardware'), value: d.hw },
     { label: 'IP', value: d.ip },
     { label: 'MAC', value: d.mac },
     { label: t('device.detail.location'), value: d.location },
     { label: t('common.remark'), value: d.remark },
-    { label: t('device.detail.lastOnline'), value: d.lastOnline || d.lastSeen ? ago(d.lastOnline || d.lastSeen, t) : '' }
+    { label: t('device.detail.lastOnline'), value: d.lastSeenAt || d.lastOnline ? ago(d.lastSeenAt || d.lastOnline, t) : '' }
   ].filter((r) => r.value !== undefined && r.value !== null && r.value !== '')
 })
 
@@ -72,8 +88,13 @@ const barText: Record<string, string> = { success: 'text-success', warning: 'tex
 const uptimeSeg = computed(() => {
   const d = dev.value || {}
   const st = statusInfo(d.status)
-  const ts = d.lastOnline || d.lastSeen
-  return { color: st.color, value: ts ? ago(ts, t) : '—', sub: t('device.detail.currentStatus', { status: t(st.labelKey) }) }
+  // IDP 会上报 metrics.uptime（秒），这是设备侧真实运行时长，优先用它；
+  // 其它协议没有 uptime，退回「最后心跳距今」。两者都比原来恒为 — 有意义。
+  const up = metrics.value?.uptime
+  const value = d.status === 'online' && up != null
+    ? fmtDuration(up)
+    : d.lastSeenAt || d.lastOnline ? ago(d.lastSeenAt || d.lastOnline, t) : EMPTY
+  return { color: st.color, value, sub: t('device.detail.currentStatus', { status: t(st.labelKey) }) }
 })
 const streamSeg = computed(() => {
   const chs = channels.value
@@ -130,19 +151,189 @@ async function takeSnap(ch: any) {
   }
 }
 
-// ================= 远程配置（MGR-09，按能力集渲染） =================
+// ================= 远程配置（MGR-09） =================
+// 字段声明对齐固件 `firmware/core/src/config.c` 的规则表：键名 / 类型 / 取值范围三处一致。
+// 控件由 type 决定（开关 / 下拉 / 数字），不再像旧实现那样把 image.mirror 这种 0/1 开关
+// 渲染成自由文本——那样既容易写出越界值，也看不出合法取值。
+// 编码键带通道号：video.<ch>.<name>.<field>，0/main = 主码流。
+type CfgField =
+  | { key: string; labelKey: string; type: 'int'; min: number; max: number }
+  | { key: string; labelKey: string; type: 'bool' }
+  | { key: string; labelKey: string; type: 'enum'; options: { label: string; value: string }[] }
+  | { key: string; labelKey: string; type: 'str' }
+interface CfgGroup { key: string; tab: CfgTabKey; titleKey: string; fields: CfgField[] }
+
 const cfg = reactive({ loading: false, saving: false, data: {} as any, denied: [] as string[], supported: [] as string[] })
-// 配置键 → 中文标签（与后端 cfgKeys 对齐）
-const CFG_LABELS: Record<string, string> = {
-  'video.main.resolution': 'device.config.resolution', 'video.main.fps': 'device.config.fps', 'video.main.bitrate': 'device.config.bitrate',
-  'video.main.gop': 'device.config.gop', 'video.main.encode': 'device.config.encode',
-  'image.brightness': 'device.config.brightness', 'image.contrast': 'device.config.contrast', 'image.saturation': 'device.config.saturation',
-  'image.sharpness': 'device.config.sharpness', 'image.mirror': 'device.config.mirror', 'image.wdr': 'device.config.wdr',
-  'osd.enable': 'device.config.osdEnable', 'osd.text': 'device.config.osdText', 'record.mode': 'device.config.recordMode',
-  'alarm.motion.sensitivity': 'device.config.motionSens', 'time.ntp': 'device.config.ntp'
+
+/** 画面调节四项（固件 0–100 整数），滑杆与数字框联动 */
+const IMAGE_SLIDERS = [
+  { key: 'image.brightness', labelKey: 'device.config.brightness', min: 0, max: 100 },
+  { key: 'image.contrast', labelKey: 'device.config.contrast', min: 0, max: 100 },
+  { key: 'image.saturation', labelKey: 'device.config.saturation', min: 0, max: 100 },
+  { key: 'image.sharpness', labelKey: 'device.config.sharpness', min: 0, max: 100 }
+]
+
+// 子页签：22 个键按语义拆成 7 组，每个分组名直接对应它管的内容——
+// OSD 叠加与移动侦测不再共用「事件侦测」这个筐，时间同步也不再挂在录像分组下面。
+type CfgTabKey = 'image' | 'encode' | 'osd' | 'alarm' | 'record' | 'time' | 'maintain'
+const cfgTab = ref<CfgTabKey>('image')
+// 逐条写 t('…') 而不是拼字符串：i18n 检查脚本只能静态识别字面量，
+// 拼出来的键会被当成「定义了但未引用」。
+const cfgTabItems = computed(() => [
+  { label: t('device.config.tab.image'), value: 'image' },
+  { label: t('device.config.tab.encode'), value: 'encode' },
+  { label: t('device.config.tab.osd'), value: 'osd' },
+  { label: t('device.config.tab.alarm'), value: 'alarm' },
+  { label: t('device.config.tab.record'), value: 'record' },
+  { label: t('device.config.tab.time'), value: 'time' },
+  { label: t('device.config.tab.maintain'), value: 'maintain' }
+] as { label: string; value: CfgTabKey }[])
+
+// 画面镜像在固件里是 image.mirror / image.flip 两个独立的 0/1 键。
+// 面板按惯例合成一个四选一下拉（与厂商面板一致），保存时再拆回两个键。
+const MIRROR_OPTIONS = [
+  { value: 'none', labelKey: 'device.config.mirrorNone' },
+  { value: 'mirror', labelKey: 'device.config.mirrorH' },
+  { value: 'flip', labelKey: 'device.config.mirrorV' },
+  { value: 'both', labelKey: 'device.config.mirrorHV' }
+]
+function cfgNum(k: string) {
+  const n = Number(cfg.data?.[k])
+  return Number.isFinite(n) ? n : 0
 }
-const cfgFields = computed(() =>
-  (cfg.supported.length ? cfg.supported : Object.keys(CFG_LABELS)).map((k) => ({ key: k, label: CFG_LABELS[k] ? t(CFG_LABELS[k]) : k })))
+const mirrorMode = computed({
+  get() {
+    const m = cfgNum('image.mirror') === 1
+    const f = cfgNum('image.flip') === 1
+    return m && f ? 'both' : m ? 'mirror' : f ? 'flip' : 'none'
+  },
+  set(v) {
+    cfg.data['image.mirror'] = v === 'mirror' || v === 'both' ? 1 : 0
+    cfg.data['image.flip'] = v === 'flip' || v === 'both' ? 1 : 0
+  }
+})
+const mirrorOptions = computed(() => MIRROR_OPTIONS.map((o) => ({ label: t(o.labelKey), value: o.value })))
+
+/**
+ * 数字框回写：只挡空值与非数字，**不静默钳制**。
+ * 旧实现把越界值直接改成边界值，用户以为改成了 300、实际下发 100；
+ * 现在越界由 invalidKeysByTab 就地报错并按页签拦住保存。
+ */
+function setCfgNum(key: string, v: string) {
+  const n = Number(v)
+  cfg.data[key] = v.trim() === '' || !Number.isFinite(n) ? v : n
+}
+
+/** 数值字段合法区间查找表（画面四项 + 各分组 int 字段）：就地提示与提交前拦截共用，本身是静态表，不需要按 tab 拆 */
+const intBounds = computed(() => {
+  const m: Record<string, { min: number; max: number }> = {}
+  for (const f of IMAGE_SLIDERS) m[f.key] = { min: f.min, max: f.max }
+  for (const g of cfgGroups) for (const f of g.fields) if (f.type === 'int') m[f.key] = { min: f.min, max: f.max }
+  return m
+})
+
+/** 单个键是否越界：非空且不是有限数字、或超出区间 */
+function isOutOfRange(k: string) {
+  const b = intBounds.value[k]
+  if (!b) return false
+  const raw = cfg.data?.[k]
+  if (raw === undefined || raw === null || raw === '') return false
+  const n = Number(raw)
+  return !Number.isFinite(n) || n < b.min || n > b.max
+}
+
+/**
+ * 越界键按子页签分桶：保存按钮的禁用条件、就地报错与导航项红点都只认当前 cfgTab 这一份，
+ * 不让 A 页签的越界值隔空拦住 B 页签的保存——这正是重分组前的问题④。
+ */
+const invalidKeysByTab = computed(() => {
+  const m: Record<CfgTabKey, string[]> = { image: [], encode: [], osd: [], alarm: [], record: [], time: [], maintain: [] }
+  m.image = IMAGE_SLIDERS.filter((f) => isOutOfRange(f.key)).map((f) => f.key)
+  for (const g of cfgGroups) {
+    const bad = g.fields.filter((f) => f.type === 'int' && isOutOfRange(f.key)).map((f) => f.key)
+    if (bad.length) m[g.tab] = [...m[g.tab], ...bad]
+  }
+  return m
+})
+
+const boundText = (k: string) => {
+  const b = intBounds.value[k]
+  return b ? `${b.min}–${b.max}` : ''
+}
+
+// 其余分组：键名已与固件对齐、按类型渲染，精细 UI（子页签/联动）待后续补充。
+const cfgGroups: CfgGroup[] = [
+  {
+    key: 'video', tab: 'encode', titleKey: 'device.config.group.video',
+    fields: [
+      { key: 'video.0.main.codec', labelKey: 'device.config.encode', type: 'enum', options: [{ label: 'H.265', value: 'h265' }, { label: 'H.264', value: 'h264' }, { label: 'MJPEG', value: 'mjpeg' }] },
+      { key: 'video.0.main.w', labelKey: 'device.config.width', type: 'int', min: 64, max: 1920 },
+      { key: 'video.0.main.h', labelKey: 'device.config.height', type: 'int', min: 64, max: 1080 },
+      { key: 'video.0.main.fps', labelKey: 'device.config.fps', type: 'int', min: 1, max: 30 },
+      { key: 'video.0.main.kbps', labelKey: 'device.config.bitrate', type: 'int', min: 32, max: 16384 },
+      { key: 'video.0.main.gop', labelKey: 'device.config.gop', type: 'int', min: 1, max: 300 },
+      { key: 'video.0.main.rc', labelKey: 'device.config.rc', type: 'enum', options: [{ label: 'CBR', value: 'cbr' }, { label: 'VBR', value: 'vbr' }] }
+    ]
+  },
+  {
+    key: 'osd', tab: 'osd', titleKey: 'device.config.group.osd',
+    fields: [
+      { key: 'osd.channelName.enable', labelKey: 'device.config.osdName', type: 'bool' },
+      { key: 'osd.time.enable', labelKey: 'device.config.osdTime', type: 'bool' }
+    ]
+  },
+  {
+    key: 'record', tab: 'record', titleKey: 'device.config.group.record',
+    fields: [
+      { key: 'record.enabled', labelKey: 'device.config.recordEnable', type: 'bool' },
+      { key: 'record.mode', labelKey: 'device.config.recordMode', type: 'enum', options: [
+        { label: t('device.config.rec_continuous'), value: 'continuous' },
+        { label: t('device.config.rec_event'), value: 'event' },
+        { label: t('device.config.rec_schedule'), value: 'schedule' }
+      ] },
+      { key: 'record.retention_days', labelKey: 'device.config.retention', type: 'int', min: 1, max: 365 }
+    ]
+  },
+  {
+    key: 'alarm', tab: 'alarm', titleKey: 'device.config.group.alarm',
+    fields: [
+      { key: 'alarm.motion.enable', labelKey: 'device.config.motionEnable', type: 'bool' },
+      { key: 'alarm.motion.sensitivity', labelKey: 'device.config.motionSens', type: 'int', min: 0, max: 100 }
+    ]
+  },
+  {
+    key: 'time', tab: 'time', titleKey: 'device.config.group.time',
+    fields: [
+      { key: 'time.ntp.enable', labelKey: 'device.config.ntpEnable', type: 'bool' },
+      { key: 'time.ntp.server', labelKey: 'device.config.ntp', type: 'str' }
+    ]
+  }
+]
+
+// 只渲染设备确实拥有的键（supported 为空时不过滤，兼容旧后端）
+const visibleCfgGroups = computed(() => cfgGroups
+  .filter((g) => g.tab === cfgTab.value)
+  .map((g) => ({ ...g, fields: cfg.supported.length ? g.fields.filter((f) => cfg.supported.includes(f.key)) : g.fields }))
+  .filter((g) => g.fields.length))
+
+// 画面预览：走 /channels/:id/snapshot（IDP 由设备上传一帧）。
+// 调亮度/对比度时有个参照图才谈得上“调”，否则只能盲改数字。
+const preview = reactive({ src: '', loading: false })
+async function loadPreview() {
+  const ch = channels.value[0]
+  if (!ch?.id) return
+  preview.loading = true
+  const fallback = ch.coverUrl || ''
+  try {
+    const res: any = await api.post(`/channels/${ch.id}/snapshot`)
+    preview.src = res?.url || fallback
+  } catch {
+    // 设备不在线/不支持抓图时退到已有封面，不弹错抢配置页的注意力
+    preview.src = preview.src || fallback
+  } finally {
+    preview.loading = false
+  }
+}
 async function loadCfg() {
   cfg.loading = true
   cfg.denied = []
@@ -157,8 +348,20 @@ async function loadCfg() {
     cfg.loading = false
   }
 }
-watch(tab, (t) => { if (t === 'config' && !Object.keys(cfg.data).length) loadCfg() })
+watch(tab, (v) => {
+  if (v !== 'config') return
+  // 设备不在线时 cfg.get 会等到超时，所以不在进详情页时就预拉，只在切到这个 Tab 时才发
+  if (!Object.keys(cfg.data).length) loadCfg()
+  if (!preview.src) loadPreview()
+})
+// 定时重启只在切到「设备维护」子页签时才拉：它跟 cfg.get 是两次设备往返，没必要都预热
+watch(cfgTab, (v) => {
+  if (v === 'maintain' && !rebootPlan.loaded) loadRebootPlan()
+})
 async function saveCfg() {
+  // 越界项拦在本地，但只认当前页签：其它页签遗留的坏值不在这里堵门，交给设备端 rejected 兜底即可（问题④）
+  const badInTab = invalidKeysByTab.value[cfgTab.value] || []
+  if (badInTab.length) return toast.warning(t('device.msg.configOutOfRange', { n: badInTab.length }))
   cfg.saving = true
   try {
     const res: any = await api.put(`/devices/${devId}/config`, { values: cfg.data })
@@ -169,6 +372,47 @@ async function saveCfg() {
     toastApiError(e, t('common.saveFailed'))
   } finally {
     cfg.saving = false
+  }
+}
+
+// ================= 定时重启（MGR-08） =================
+// 复用「配置」页的位置：与手动重启同属对设备的写操作，且都需要 config 权限。
+const rebootPlan = reactive({
+  loading: false, loaded: false, saving: false, enabled: false,
+  days: [] as number[], time: '03:00', lastFiredKey: ''
+})
+async function loadRebootPlan() {
+  rebootPlan.loading = true
+  try {
+    const res: any = await api.get(`/devices/${devId}/reboot-plan`)
+    rebootPlan.enabled = !!res?.enabled
+    rebootPlan.time = res?.schedule?.time || '03:00'
+    // days 可能是 []any([]float64) 或 []number，统一成 number[] 再给星期选择器
+    rebootPlan.days = Array.isArray(res?.schedule?.days) ? res.schedule.days.map((d: any) => Number(d)) : []
+    rebootPlan.lastFiredKey = res?.lastFiredKey || ''
+  } catch (e: any) {
+    toastApiError(e, t('device.msg.rebootPlanLoadFailed'))
+  } finally {
+    rebootPlan.loading = false
+    rebootPlan.loaded = true
+  }
+}
+function toggleRebootDay(d: number) {
+  rebootPlan.days = rebootPlan.days.includes(d) ? rebootPlan.days.filter((x) => x !== d) : [...rebootPlan.days, d].sort()
+}
+async function saveRebootPlan() {
+  rebootPlan.saving = true
+  try {
+    await api.put(`/devices/${devId}/reboot-plan`, {
+      enabled: rebootPlan.enabled,
+      schedule: { days: rebootPlan.days, time: rebootPlan.time }
+    })
+    toast.success(t('device.msg.rebootPlanSaved'))
+    await loadRebootPlan()
+  } catch (e: any) {
+    toastApiError(e, t('common.saveFailed'))
+  } finally {
+    rebootPlan.saving = false
   }
 }
 
@@ -264,6 +508,23 @@ async function askDeleteDevice() {
   }
 }
 
+// 恢复出厂设置：本阶段真实接口尚未上线，先把强确认交互（镜像删除设备的 inputConfirm）做完；
+// 接线留给后续任务，避免这里调用一个还不存在的端点、伪装出「已恢复」的假成功。
+async function askFactoryReset() {
+  const devName = dev.value?.name || devId
+  const ok = await confirmBox.ask({
+    title: t('device.msg.factoryResetTitle'),
+    message: t('device.msg.factoryResetMsg', { name: devName }),
+    detail: t('device.msg.factoryResetHint'),
+    danger: true,
+    confirmText: t('device.confirm.factoryResetOk'),
+    inputConfirm: devName,
+    inputPlaceholder: devName
+  })
+  if (!ok) return
+  toast.info(t('device.msg.factoryResetComingSoon'))
+}
+
 // ================= 操作日志行 =================
 const opRows = computed(() => (dev.value?.recentOps || []).map((o: any) => ({
   ts: o.ts || o.time || o.createdAt || 0,
@@ -309,7 +570,10 @@ onMounted(load)
         <UiTag :color="sourceInfo(dev?.source).color as any" plain>{{ t(sourceInfo(dev?.source).labelKey) }}</UiTag>
         <div class="ml-auto flex flex-wrap items-center gap-2">
           <UiButton variant="primary" @click="openEdit"><Icon name="edit" :size="13" />{{ t('common.edit') }}</UiButton>
-          <UiButton @click="rebootDevice"><Icon name="refresh-cw" :size="13" />{{ t('device.detail.reboot') }}</UiButton>
+          <UiTooltip v-if="!canReboot" :label="t('device.detail.rebootUnsupported')">
+            <span><UiButton disabled><Icon name="refresh-cw" :size="13" />{{ t('device.detail.reboot') }}</UiButton></span>
+          </UiTooltip>
+          <UiButton v-else @click="rebootDevice"><Icon name="refresh-cw" :size="13" />{{ t('device.detail.reboot') }}</UiButton>
           <UiButton @click="openMoveDlg"><Icon name="folder" :size="13" />{{ t('device.detail.moveGroup') }}</UiButton>
           <UiTooltip :label="t('device.detail.otaDisabled')">
             <span><UiButton disabled><Icon name="upload" :size="13" />{{ t('device.detail.ota') }}</UiButton></span>
@@ -424,19 +688,147 @@ onMounted(load)
                 {{ t('device.config.unsupported', { source: t(sourceInfo(dev?.source).labelKey) }) }}
               </div>
               <template v-else>
-                <div class="grid grid-cols-1 gap-x-8 gap-y-3 md:grid-cols-2">
-                  <div v-for="f in cfgFields" :key="f.key" class="flex items-center gap-3">
-                    <label class="w-28 shrink-0 text-right text-sm text-muted">{{ f.label }}</label>
-                    <UiInput
-                      :model-value="String(cfg.data?.[f.key] ?? '')" size="sm" width="w-40"
-                      @update:model-value="cfg.data[f.key] = $event"
-                    />
-                    <span v-if="cfg.denied.includes(f.key)" class="text-xs text-danger">{{ t('device.config.rejected') }}</span>
-                  </div>
+                <!-- 手写而非 UiSegmented：越界红点要挂在每个页签项旁，组件本身没有角标 slot -->
+                <div role="tablist" class="inline-flex max-w-xl flex-wrap items-center gap-0.5 rounded-chrome border border-line bg-zone p-0.5">
+                  <button
+                    v-for="item in cfgTabItems" :key="item.value" type="button" role="tab"
+                    class="relative rounded-chrome px-3 py-1 text-xs outline-none ipc-focus-ring transition-colors"
+                    :class="cfgTab === item.value ? 'bg-primary text-white shadow-sm' : 'text-muted hover:text-ink'"
+                    :aria-selected="cfgTab === item.value"
+                    @click="cfgTab = item.value"
+                  >
+                    {{ item.label }}
+                    <span v-if="invalidKeysByTab[item.value]?.length" class="absolute -right-0.5 -top-0.5 h-1.5 w-1.5 rounded-full bg-danger" />
+                  </button>
                 </div>
-                <div class="flex gap-2">
-                  <UiButton variant="primary" :disabled="cfg.saving" @click="saveCfg">{{ t('device.config.submit') }}</UiButton>
+
+                <!-- ① 画面信息：预览 + 镜像 + 四项滑杆 -->
+                <section v-if="cfgTab === 'image'" class="rounded-signal border border-line">
+                  <header class="flex items-center justify-between border-b border-line-soft px-3 py-2">
+                    <span class="text-sm font-medium text-ink">{{ t('device.config.group.image') }}</span>
+                    <UiButton size="sm" :disabled="preview.loading" @click="loadPreview">
+                      <Icon name="refresh" :size="13" :class="preview.loading ? 'ipc-spin' : ''" />{{ t('device.config.refreshPreview') }}
+                    </UiButton>
+                  </header>
+                  <div class="grid gap-4 p-3 md:grid-cols-[minmax(0,320px)_1fr]">
+                    <div class="flex h-44 items-center justify-center overflow-hidden rounded-signal border border-line bg-zone">
+                      <img v-if="preview.src" :src="preview.src" class="block h-full w-full object-contain" :alt="t('device.config.preview')">
+                      <span v-else class="text-xs text-placeholder">{{ t('device.config.previewEmpty') }}</span>
+                    </div>
+                    <div class="space-y-3">
+                      <div class="flex items-center gap-3">
+                        <label class="w-16 shrink-0 text-right text-sm text-muted">{{ t('device.config.mirror') }}</label>
+                        <UiSelect v-model="mirrorMode" :options="mirrorOptions" size="sm" width="w-36" />
+                      </div>
+                      <div v-for="f in IMAGE_SLIDERS" :key="f.key" class="flex items-center gap-3">
+                        <label class="w-16 shrink-0 text-right text-sm text-muted">{{ t(f.labelKey) }}</label>
+                        <UiSlider
+                          class="max-w-52 flex-1" :model-value="cfgNum(f.key)" :min="f.min" :max="f.max"
+                          @update:model-value="cfg.data[f.key] = $event"
+                        />
+                        <UiInput
+                          type="number" size="sm" width="w-16" :invalid="invalidKeysByTab[cfgTab]?.includes(f.key)"
+                          :model-value="String(cfgNum(f.key))"
+                          @update:model-value="setCfgNum(f.key, $event)"
+                        />
+                        <span v-if="cfg.denied.includes(f.key)" class="text-xs text-danger">{{ t('device.config.rejected') }}</span>
+                        <span v-else-if="invalidKeysByTab[cfgTab]?.includes(f.key)" class="text-xs text-danger">{{ t('device.config.outOfRange', { range: boundText(f.key) }) }}</span>
+                      </div>
+                    </div>
+                  </div>
+                </section>
+
+                <!-- ② 其余配置分组：键名与固件对齐，控件按类型渲染 -->
+                <section v-for="g in visibleCfgGroups" :key="g.key" class="rounded-signal border border-line">
+                  <header class="border-b border-line-soft px-3 py-2 text-sm font-medium text-ink">{{ t(g.titleKey) }}</header>
+                  <div class="grid grid-cols-1 gap-x-8 gap-y-3 p-3 md:grid-cols-2">
+                    <div v-for="f in g.fields" :key="f.key" class="flex items-center gap-3">
+                      <label class="w-24 shrink-0 text-right text-sm text-muted">{{ t(f.labelKey) }}</label>
+                      <UiSwitch
+                        v-if="f.type === 'bool'" size="sm"
+                        :model-value="Boolean(cfg.data[f.key])" :aria-label="t(f.labelKey)"
+                        @update:model-value="cfg.data[f.key] = $event"
+                      />
+                      <UiSelect
+                        v-else-if="f.type === 'enum'"
+                        :model-value="String(cfg.data[f.key] ?? '')" :options="f.options" size="sm" width="w-32"
+                        @update:model-value="cfg.data[f.key] = $event"
+                      />
+                      <UiInput
+                        v-else-if="f.type === 'int'" type="number" size="sm" width="w-24"
+                        :invalid="invalidKeysByTab[cfgTab]?.includes(f.key)"
+                        :model-value="String(cfgNum(f.key))"
+                        @update:model-value="setCfgNum(f.key, $event)"
+                      />
+                      <UiInput
+                        v-else size="sm" width="w-48"
+                        :model-value="String(cfg.data[f.key] ?? '')"
+                        @update:model-value="cfg.data[f.key] = $event"
+                      />
+                      <span v-if="cfg.denied.includes(f.key)" class="text-xs text-danger">{{ t('device.config.rejected') }}</span>
+                      <span v-else-if="invalidKeysByTab[cfgTab]?.includes(f.key)" class="text-xs text-danger">{{ t('device.config.outOfRange', { range: boundText(f.key) }) }}</span>
+                      <!-- 合法区间就地显示：否则用户只能靠"试一次被拒"来猜范围 -->
+                      <span v-else-if="f.type === 'int'" class="text-xs text-placeholder">{{ boundText(f.key) }}</span>
+                    </div>
+                  </div>
+                </section>
+
+                <!-- ③ 设备维护：定时重启计划（MGR-08）。立即重启只保留页头工具栏那一个入口，这里不再重复放一个 -->
+                <section v-if="cfgTab === 'maintain'" class="rounded-signal border border-line">
+                  <header class="border-b border-line-soft px-3 py-2 text-sm font-medium text-ink">{{ t('device.config.group.maintain') }}</header>
+                  <div class="space-y-3 p-3">
+                    <div class="flex items-center gap-3">
+                      <label class="w-24 shrink-0 text-right text-sm text-muted">{{ t('device.config.scheduledReboot') }}</label>
+                      <UiSwitch
+                        v-model="rebootPlan.enabled" size="sm" :disabled="!canReboot"
+                        :aria-label="t('device.config.scheduledReboot')"
+                      />
+                      <span class="text-xs text-placeholder">
+                        {{ rebootPlan.enabled ? t('device.config.planOn') : t('device.config.planOff') }}
+                      </span>
+                    </div>
+                    <template v-if="rebootPlan.enabled">
+                      <div class="flex items-center gap-3">
+                        <label class="w-24 shrink-0 text-right text-sm text-muted">{{ t('device.config.rebootDays') }}</label>
+                        <div class="flex flex-wrap items-center gap-1">
+                          <button
+                            v-for="d in [1, 2, 3, 4, 5, 6, 7]" :key="d" type="button"
+                            class="h-7 rounded-chrome border px-2 text-xs transition-colors"
+                            :class="rebootPlan.days.includes(d) ? 'border-primary bg-primary-soft text-primary' : 'border-line text-muted hover:border-primary'"
+                            @click="toggleRebootDay(d)"
+                          >{{ t('enum.day.' + d) }}</button>
+                        </div>
+                        <span v-if="!rebootPlan.days.length" class="text-xs text-placeholder">{{ t('device.config.rebootEveryDay') }}</span>
+                      </div>
+                      <div class="flex items-center gap-3">
+                        <label class="w-24 shrink-0 text-right text-sm text-muted">{{ t('device.config.rebootTime') }}</label>
+                        <UiInput v-model="rebootPlan.time" type="time" size="sm" width="w-32" />
+                      </div>
+                    </template>
+                    <div class="flex flex-wrap items-center gap-3">
+                      <span class="hidden w-24 shrink-0 md:block" />
+                      <UiButton variant="primary" size="sm" :loading="rebootPlan.saving" @click="saveRebootPlan">{{ t('common.save') }}</UiButton>
+                      <span v-if="rebootPlan.lastFiredKey" class="text-xs text-placeholder">
+                        {{ t('device.config.rebootLastFired', { at: rebootPlan.lastFiredKey }) }}
+                      </span>
+                    </div>
+                  </div>
+                </section>
+
+                <!-- 恢复出厂设置单独成块并用危险配色：与常规维护操作物理隔离，降低误触概率 -->
+                <section v-if="cfgTab === 'maintain'" class="rounded-signal border border-danger/30">
+                  <header class="border-b border-danger/20 px-3 py-2 text-sm font-medium text-danger">{{ t('device.config.factoryReset') }}</header>
+                  <div class="flex flex-wrap items-center gap-3 p-3">
+                    <UiButton variant="danger" size="sm" @click="askFactoryReset"><Icon name="alert-triangle" :size="13" />{{ t('device.config.factoryReset') }}</UiButton>
+                    <span class="text-xs text-placeholder">{{ t('device.config.factoryResetDesc') }}</span>
+                  </div>
+                </section>
+
+                <div v-if="cfgTab !== 'maintain'" class="flex flex-wrap items-center gap-2">
+                  <UiButton variant="primary" :disabled="cfg.saving || (invalidKeysByTab[cfgTab]?.length ?? 0) > 0" @click="saveCfg">{{ t('device.config.submit') }}</UiButton>
                   <UiButton @click="loadCfg">{{ t('device.config.reload') }}</UiButton>
+                  <span v-if="invalidKeysByTab[cfgTab]?.length" class="text-xs text-danger">{{ t('device.msg.configOutOfRange', { n: invalidKeysByTab[cfgTab].length }) }}</span>
+                  <span v-else-if="cfg.denied.length" class="text-xs text-danger">{{ t('device.config.rejectedCount', { n: cfg.denied.length }) }}</span>
                 </div>
               </template>
             </div>
