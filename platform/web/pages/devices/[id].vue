@@ -610,13 +610,21 @@ const regionModel = computed<number[][]>({
 
 // net.* 走独立的 NetworkSettings 区块而非通用字段渲染：这五个键改错会让设备从平台上失联，
 // 且固件规则表里全是 reboot_required，「保存」与「生效」还隔着一次重启，
-// 需要独立保存按钮 + 危险确认（见 components/device/NetworkSettings.vue）。
+// 因此下发要独立成键、独立确认（按钮在下方保存栏，与通用保存并排但各管一段）。
 //
 // 这个清单只在这里定义一次，其它地方不要再各自过滤网络键（包括 saveCfg 的提交范围）。
 const NET_KEYS = ['net.dhcp', 'net.ip', 'net.mask', 'net.gw', 'net.dns']
 /** 设备实际支持的网络键（supported 是平台白名单 ∩ 设备回包，见 api/devices.go） */
 const visibleNetKeys = computed(() => NET_KEYS
   .filter((k) => !cfg.supported.length || cfg.supported.includes(k)))
+/**
+ * 网络键是否有未保存修改。与 isNonNetDirty 一起构成“两块分别提交”的判断依据，
+ * 保存栏据此同时给出两颗按钮各自的可用性——不靠开区块里再挂一颗按钮。
+ */
+const isNetDirty = computed(() => NET_KEYS.some(
+  (k) => k in cfg.data && JSON.stringify(cfg.data[k]) !== JSON.stringify(cfg.snapshotData[k])))
+/** 网络字段当前是否有校验错误（由 NetworkSettings 上报；非法值不该被下发） */
+const netInvalid = ref(false)
 /** 通用「保存并下发」实际提交的键值：排除网络键，它们只走 saveNetwork() */
 function nonNetData(): Record<string, any> {
   const out: Record<string, any> = {}
@@ -733,6 +741,22 @@ async function saveCfg() {
     // 只有失败路径需要在这里复位：成功路径要停在 rereading 直到回读完成
     cfg.phase = 'idle'
   }
+}
+
+/**
+ * 网络下发前的强确认：改错会让设备失联，且需重启才生效。
+ * 按钮虽然和「保存并下发」并排（同一个提交区），但这一步不能省——两个按钮下发的东西不同，
+ * 风险也不同（见 NetworkSettings 顶部注释）。
+ */
+async function askSaveNetwork() {
+  const ok = await confirmBox.ask({
+    title: t('device.config.netSaveConfirmTitle'),
+    message: t('device.config.netSaveConfirmMsg'),
+    detail: t('device.config.netSaveConfirmDetail'),
+    danger: true,
+    confirmText: t('device.config.netSaveConfirmOk')
+  })
+  if (ok) await saveNetwork()
 }
 
 /** 网络字段回写：只改页面状态，真正的下发走 saveNetwork() 的独立流程 */
@@ -1377,16 +1401,15 @@ onMounted(load)
                   </div>
                 </section>
 
-                <!-- 网络：独立保存 + 危险确认（理由见 NetworkSettings 顶部注释），不并入通用「保存并下发」 -->
+                <!-- 网络：只负责渲染与就地校验，下发按钮在下方保存栏（理由见保存栏注释） -->
                 <NetworkSettings
                   v-if="cfgTab === 'time' && visibleNetKeys.length"
                   :keys="visibleNetKeys"
                   :data="cfg.data"
-                  :baseline="cfg.snapshotData"
                   :reboot-required="cfg.rebootRequired"
                   :saving="cfgSaving"
                   @change="onNetChange"
-                  @save="saveNetwork"
+                  @invalid="netInvalid = $event"
                 />
 
                 <!-- ③ 设备维护：定时重启计划（MGR-08）。立即重启只保留页头工具栏那一个入口，这里不再重复放一个 -->
@@ -1433,7 +1456,9 @@ onMounted(load)
                     </template>
                     <div class="flex flex-wrap items-center gap-3">
                       <span class="hidden w-24 shrink-0 md:block" />
-                      <UiButton variant="primary" size="sm" :loading="rebootPlan.saving" @click="saveRebootPlan">{{ t('device.config.saveRebootPlan') }}</UiButton>
+                      <!-- 次级样式：这是另一个端点（PUT /reboot-plan）的动作，留在自己区块里，
+                           但不应与页面级主按钮同级争视线 -->
+                      <UiButton size="sm" :loading="rebootPlan.saving" @click="saveRebootPlan">{{ t('device.config.saveRebootPlan') }}</UiButton>
                       <span v-if="rebootPlan.lastFiredKey" class="text-xs text-placeholder">
                         {{ t('device.config.rebootLastFired', { at: rebootPlan.lastFiredKey }) }}
                       </span>
@@ -1450,12 +1475,23 @@ onMounted(load)
                     :disabled="cfgSaving || !isNonNetDirty || (invalidKeysByTab[cfgTab]?.length ?? 0) > 0"
                     @click="saveCfg"
                   >{{ t('device.config.submit') }}</UiButton>
+                  <!-- 网络下发与「保存并下发」打同一个端点，但只带 net.* 且带危险确认。
+                       按钮放在同一保存栏而不是区块里：区块尾再挂一颗同款主色按钮会与这颗上下相邻，
+                       读起来像“重复的两次保存”；集中到一处后按钮区只有一个，各自的范围靠文案与配色区分。
+                       只在网络有改动时出现，避免常态多一颗灰按钮。 -->
+                  <UiButton
+                    v-if="cfgTab === 'time' && isNetDirty"
+                    variant="dangerOutline" :disabled="cfgSaving || netInvalid"
+                    @click="askSaveNetwork"
+                  >{{ t('device.config.netSave') }}</UiButton>
                   <UiButton :disabled="cfgSaving" @click="reloadCfg">{{ t('device.config.reload') }}</UiButton>
                   <span v-if="cfg.phase === 'rereading'" class="text-xs text-primary">{{ t('device.config.rereading') }}</span>
+                  <span v-else-if="cfgTab === 'time' && netInvalid" class="text-xs text-danger">{{ t('device.config.netFixFirst') }}</span>
                   <span v-else-if="invalidKeysByTab[cfgTab]?.length" class="text-xs text-danger">{{ t('device.msg.configOutOfRange', { n: invalidKeysByTab[cfgTab].length }) }}</span>
                   <span v-else-if="cfg.denied.length" class="text-xs text-danger">{{ t('device.config.rejectedCount', { n: cfg.denied.length }) }}</span>
                   <!-- 没有任何反馈时按钮是灰的，用户会以为是权限/设备问题；明确告知“没改过” -->
                   <span v-else-if="isNonNetDirty" class="text-xs text-placeholder">{{ t('device.config.unsaved') }}</span>
+                  <span v-else-if="cfgTab === 'time' && isNetDirty" class="text-xs text-placeholder">{{ t('device.config.netUnsaved') }}</span>
                 </div>
 
                 <!-- 恢复出厂设置排在保存栏之后并用危险配色：破坏性操作不该紧贴常规保存按钮，
