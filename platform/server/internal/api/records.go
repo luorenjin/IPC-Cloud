@@ -47,9 +47,9 @@ func handleCreateRecordTemplate(c *gin.Context) {
 
 // handleUpdateRecordTemplate REC-05：修改录像计划模板（内置不可改；自定义 ≤7 个）。
 func handleUpdateRecordTemplate(c *gin.Context) {
-	var t models.RecordTemplate
-	if store.DB.First(&t, "id = ?", c.Param("id")).Error != nil {
-		fail(c, errs.ENotFound)
+	// 归属校验：模板必须属于当前项目（requirePerm 只看当前项目的权限位，不校验实体归属）
+	t, okt := recordTemplateInProject(c, c.Param("id"))
+	if !okt {
 		return
 	}
 	if t.Builtin {
@@ -75,15 +75,14 @@ func handleUpdateRecordTemplate(c *gin.Context) {
 	if req.Schedule != nil {
 		updates["schedule"] = req.Schedule
 	}
-	store.DB.Model(&t).Updates(updates)
-	store.DB.First(&t, "id = ?", c.Param("id"))
+	store.DB.Model(t).Updates(updates)
+	store.DB.First(t, "id = ?", t.ID)
 	ok(c, t)
 }
 
 func handleDeleteRecordTemplate(c *gin.Context) {
-	var t models.RecordTemplate
-	if store.DB.First(&t, "id = ?", c.Param("id")).Error != nil {
-		fail(c, errs.ENotFound)
+	t, okt := recordTemplateInProject(c, c.Param("id"))
+	if !okt {
 		return
 	}
 	if t.Builtin {
@@ -96,7 +95,7 @@ func handleDeleteRecordTemplate(c *gin.Context) {
 		fail(c, errs.EBadRequest.WithMsg("模板已被录像计划使用"))
 		return
 	}
-	store.DB.Delete(&t)
+	store.DB.Delete(t)
 	ok(c, nil)
 }
 
@@ -141,7 +140,12 @@ func handleCreateRecordPlan(c *gin.Context) {
 }
 
 func handleUpdateRecordPlan(c *gin.Context) {
+	ctx := getCtx(c)
 	id := c.Param("id")
+	// 归属校验：录像计划经所属通道判定项目归属（见 scope.go）
+	if _, okp := recordPlanInProject(c, id); !okp {
+		return
+	}
 	var req struct {
 		TemplateID string `json:"templateId"`
 		Profile    string `json:"profile"`
@@ -150,6 +154,12 @@ func handleUpdateRecordPlan(c *gin.Context) {
 	if err := c.ShouldBindJSON(&req); err != nil {
 		fail(c, errs.EBadRequest)
 		return
+	}
+	// 换绑的模板也必须属于当前项目，否则计划会指向别处的模板
+	if req.TemplateID != "" {
+		if _, okt := recordTemplateInProject(c, req.TemplateID); !okt {
+			return
+		}
 	}
 	updates := map[string]any{"updated_at": models.NowMilli()}
 	if req.TemplateID != "" {
@@ -161,12 +171,21 @@ func handleUpdateRecordPlan(c *gin.Context) {
 	if req.Enabled != nil {
 		updates["enabled"] = *req.Enabled
 	}
-	store.DB.Model(&models.RecordPlan{}).Where("id = ?", id).Updates(updates)
+	// 写条件经 channel_id 关联到本项目通道（双保险）
+	store.DB.Model(&models.RecordPlan{}).
+		Where("id = ? AND channel_id IN (SELECT id FROM channels WHERE project_id = ?)", id, ctx.ProjectID).
+		Updates(updates)
 	ok(c, nil)
 }
 
 func handleDeleteRecordPlan(c *gin.Context) {
-	store.DB.Delete(&models.RecordPlan{}, "id = ?", c.Param("id"))
+	ctx := getCtx(c)
+	id := c.Param("id")
+	if _, okp := recordPlanInProject(c, id); !okp {
+		return
+	}
+	store.DB.Where("id = ? AND channel_id IN (SELECT id FROM channels WHERE project_id = ?)", id, ctx.ProjectID).
+		Delete(&models.RecordPlan{})
 	ok(c, nil)
 }
 
@@ -183,6 +202,10 @@ func handleRecordDays(c *gin.Context) {
 	}
 	chID := c.Param("id")
 	ctx := getCtx(c)
+	// 归属校验：通道必须属于当前项目（否则能检索到别家项目的录像）
+	if _, okc := channelInProject(c, chID); !okc {
+		return
+	}
 	type row struct {
 		StartTs int64
 		EndTs   int64
@@ -231,6 +254,9 @@ func handleRecordDownload(c *gin.Context) {
 		return
 	}
 	chID := c.Param("id")
+	if _, okc := channelInProject(c, chID); !okc {
+		return
+	}
 	var recs []models.RecordIndex
 	dq := store.DB.Where("channel_id = ? AND start_ts < ? AND end_ts > ?", chID, int64(req.End), int64(req.Start))
 	if req.Source == "device" || req.Source == "platform" {

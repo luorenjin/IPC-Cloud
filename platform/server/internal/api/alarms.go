@@ -39,9 +39,9 @@ func handleCreateAlarmTemplate(c *gin.Context) {
 
 // handleUpdateAlarmTemplate ALM-01：修改布防模板（内置模板不可改；级联提示由前端负责）。
 func handleUpdateAlarmTemplate(c *gin.Context) {
-	var t models.AlarmTemplate
-	if store.DB.First(&t, "id = ?", c.Param("id")).Error != nil {
-		fail(c, errs.ENotFound)
+	// 归属校验：模板必须属于当前项目（requirePerm 只看当前项目的权限位，不校验实体归属）
+	t, okt := alarmTemplateInProject(c, c.Param("id"))
+	if !okt {
 		return
 	}
 	if t.Builtin {
@@ -63,15 +63,14 @@ func handleUpdateAlarmTemplate(c *gin.Context) {
 	if req.Schedule != nil {
 		updates["schedule"] = req.Schedule
 	}
-	store.DB.Model(&t).Updates(updates)
-	store.DB.First(&t, "id = ?", c.Param("id"))
+	store.DB.Model(t).Updates(updates)
+	store.DB.First(t, "id = ?", t.ID)
 	ok(c, t)
 }
 
 func handleDeleteAlarmTemplate(c *gin.Context) {
-	var t models.AlarmTemplate
-	if store.DB.First(&t, "id = ?", c.Param("id")).Error != nil {
-		fail(c, errs.ENotFound)
+	t, okt := alarmTemplateInProject(c, c.Param("id"))
+	if !okt {
 		return
 	}
 	if t.Builtin {
@@ -84,7 +83,7 @@ func handleDeleteAlarmTemplate(c *gin.Context) {
 		fail(c, errs.EBadRequest.WithMsg("模板已被告警规则使用"))
 		return
 	}
-	store.DB.Delete(&t)
+	store.DB.Delete(t)
 	ok(c, nil)
 }
 
@@ -121,6 +120,10 @@ func handleCreateAlarmRule(c *gin.Context) {
 }
 
 func handleUpdateAlarmRule(c *gin.Context) {
+	ctx := getCtx(c)
+	if _, okr := alarmRuleInProject(c, c.Param("id")); !okr {
+		return
+	}
 	id := c.Param("id")
 	var req struct {
 		Kinds      []string `json:"kinds"`
@@ -130,6 +133,12 @@ func handleUpdateAlarmRule(c *gin.Context) {
 	if err := c.ShouldBindJSON(&req); err != nil {
 		fail(c, errs.EBadRequest)
 		return
+	}
+	// 换绑的模板也必须属于当前项目，否则规则会指向别处的模板
+	if req.TemplateID != "" {
+		if _, okt := alarmTemplateInProject(c, req.TemplateID); !okt {
+			return
+		}
 	}
 	updates := map[string]any{"updated_at": models.NowMilli()}
 	if req.Kinds != nil {
@@ -141,12 +150,16 @@ func handleUpdateAlarmRule(c *gin.Context) {
 	if req.Enabled != nil {
 		updates["enabled"] = *req.Enabled
 	}
-	store.DB.Model(&models.AlarmRule{}).Where("id = ?", id).Updates(updates)
+	store.DB.Model(&models.AlarmRule{}).Where("id = ? AND project_id = ?", id, ctx.ProjectID).Updates(updates)
 	ok(c, nil)
 }
 
 func handleDeleteAlarmRule(c *gin.Context) {
-	store.DB.Delete(&models.AlarmRule{}, "id = ?", c.Param("id"))
+	ctx := getCtx(c)
+	if _, okr := alarmRuleInProject(c, c.Param("id")); !okr {
+		return
+	}
+	store.DB.Delete(&models.AlarmRule{}, "id = ? AND project_id = ?", c.Param("id"), ctx.ProjectID)
 	ok(c, nil)
 }
 
@@ -236,7 +249,11 @@ func handleListAlarms(c *gin.Context) {
 }
 
 func handleReadAlarm(c *gin.Context) {
-	store.DB.Model(&models.AlarmEvent{}).Where("id = ?", c.Param("id")).Update("read", true)
+	ctx := getCtx(c)
+	if _, oke := alarmEventInProject(c, c.Param("id")); !oke {
+		return
+	}
+	store.DB.Model(&models.AlarmEvent{}).Where("id = ? AND project_id = ?", c.Param("id"), ctx.ProjectID).Update("read", true)
 	ok(c, nil)
 }
 
@@ -247,9 +264,8 @@ func handleReadAllAlarms(c *gin.Context) {
 }
 
 func handleAlarmDetail(c *gin.Context) {
-	var ev models.AlarmEvent
-	if err := store.DB.First(&ev, "id = ?", c.Param("id")).Error; err != nil {
-		fail(c, errs.ENotFound)
+	ev, oke := alarmEventInProject(c, c.Param("id"))
+	if !oke {
 		return
 	}
 	resp := map[string]any{}

@@ -13,8 +13,16 @@ import (
 // ---------- 项目 ACC-03 ----------
 
 func handleListProjects(c *gin.Context) {
+	ctx := getCtx(c)
+	q := store.DB.Order("created_at ASC")
+	// 只列出租户内的项目：别家租户的项目名/数量同属租户数据。
+	// 上下文 TenantID 为空时（老会话等无租户上下文的场景）退回全量，
+	// 否则会一个项目都列不出来，项目切换器直接空掉。
+	if ctx != nil && ctx.TenantID != "" {
+		q = q.Where("tenant_id = ?", ctx.TenantID)
+	}
 	var projs []models.Project
-	store.DB.Order("created_at ASC").Find(&projs)
+	q.Find(&projs)
 	ok(c, gin.H{"items": projs})
 }
 
@@ -58,6 +66,17 @@ func handleCreateProject(c *gin.Context) {
 
 func handleUpdateProject(c *gin.Context) {
 	id := c.Param("id")
+	ctx := getCtx(c)
+	// 项目按租户判定归属（多项目成员本就需要访问多个项目）；
+	// 而权限按**待修改的目标项目**校验，而非请求头里的当前项目：
+	// 否则在 A 项目具备 config 权限即可改名/改时区/启停 B 项目（跨租户同理）。
+	if _, okp := projectInTenant(c, id); !okp {
+		return
+	}
+	if !roleHasAction(loadRole(ctx.UserID, id), "config") {
+		fail(c, errs.EForbid.WithMsg("无该项目的配置权限"))
+		return
+	}
 	var req struct {
 		Name      *string `json:"name"`
 		TZ        *string `json:"tz"`
@@ -81,7 +100,7 @@ func handleUpdateProject(c *gin.Context) {
 	if req.SetupDone != nil {
 		updates["setup_done"] = *req.SetupDone
 	}
-	if err := store.DB.Model(&models.Project{}).Where("id = ?", id).Updates(updates).Error; err != nil {
+	if err := store.DB.Model(&models.Project{}).Where("id = ? AND tenant_id = ?", id, ctx.TenantID).Updates(updates).Error; err != nil {
 		fail(c, errs.EServerInternal)
 		return
 	}
@@ -103,10 +122,10 @@ func handleDeleteProject(c *gin.Context) {
 		fail(c, errs.EUnauthorized)
 		return
 	}
-	// 先判存在性再判权限：handleListProjects 本就把全部项目返回给任意已登录用户，
-	// 项目是否存在并非机密，据此换取"项目不存在"与"无权限"两种准确提示。
+	// 先判租户归属再判权限：handleListProjects 返回全量项目时，项目是否存在并非机密，
+	// 据此换取"项目不存在"与"无权限"两种准确提示。
 	var p models.Project
-	if err := store.DB.First(&p, "id = ?", id).Error; err != nil {
+	if err := store.DB.First(&p, "id = ? AND tenant_id = ?", id, ctx.TenantID).Error; err != nil {
 		fail(c, errs.ENotFound.WithMsg("项目不存在"))
 		return
 	}
@@ -179,10 +198,23 @@ func handleDeleteProject(c *gin.Context) {
 // ---------- 分组 ACC-04 ----------
 
 func handleListGroups(c *gin.Context) {
+	ctx := getCtx(c)
+	if ctx == nil {
+		fail(c, errs.EUnauthorized)
+		return
+	}
+	// projectId 是客户端给的：只允许当前项目，或租户内且调用者确实拥有角色的项目。
+	// 不做校验就等于任何登录用户都能用一个 ID 读到别家项目的分组名与设备数。
 	pid := c.Query("projectId")
-	if pid == "" {
-		if ctx := getCtx(c); ctx != nil {
-			pid = ctx.ProjectID
+	if pid == "" || pid == ctx.ProjectID {
+		pid = ctx.ProjectID
+	} else {
+		if _, okp := projectInTenant(c, pid); !okp {
+			return
+		}
+		if loadRole(ctx.UserID, pid) == nil {
+			fail(c, errs.EForbid.WithMsg("无该项目的访问权限"))
+			return
 		}
 	}
 	var groups []models.DeviceGroup
@@ -229,7 +261,8 @@ func handleCreateGroup(c *gin.Context) {
 	parent := req.ParentID
 	for parent != "" {
 		var g models.DeviceGroup
-		if store.DB.First(&g, "id = ?", parent).Error != nil {
+		// 父分组按项目归属查：否则可以指名别家项目的分组作父节点，把树接到别人家去
+		if store.DB.First(&g, "id = ? AND project_id = ?", parent, ctx.ProjectID).Error != nil {
 			break
 		}
 		depth++
@@ -254,6 +287,11 @@ func handleCreateGroup(c *gin.Context) {
 
 func handleUpdateGroup(c *gin.Context) {
 	id := c.Param("id")
+	ctx := getCtx(c)
+	g0, okg := groupInProject(c, id)
+	if !okg {
+		return
+	}
 	var req struct {
 		Name string `json:"name"`
 		Sort *int   `json:"sort"`
@@ -269,15 +307,19 @@ func handleUpdateGroup(c *gin.Context) {
 	if req.Sort != nil {
 		updates["sort"] = *req.Sort
 	}
-	store.DB.Model(&models.DeviceGroup{}).Where("id = ?", id).Updates(updates)
+	store.DB.Model(&models.DeviceGroup{}).Where("id = ? AND project_id = ?", id, ctx.ProjectID).Updates(updates)
 	var g models.DeviceGroup
-	store.DB.First(&g, "id = ?", id)
+	store.DB.First(&g, "id = ? AND project_id = ?", id, g0.ProjectID)
 	ok(c, g)
 }
 
 // handleDeleteGroup 删除含设备的分组须先转移。
 func handleDeleteGroup(c *gin.Context) {
 	id := c.Param("id")
+	ctx := getCtx(c)
+	if _, okg := groupInProject(c, id); !okg {
+		return
+	}
 	var cnt int64
 	store.DB.Model(&models.Device{}).Where("group_id = ? AND deleted_at = 0", id).Count(&cnt)
 	if cnt > 0 {
@@ -290,12 +332,13 @@ func handleDeleteGroup(c *gin.Context) {
 		fail(c, errs.EBadRequest.WithMsg("存在子分组"))
 		return
 	}
-	store.DB.Delete(&models.DeviceGroup{}, "id = ?", id)
+	store.DB.Delete(&models.DeviceGroup{}, "id = ? AND project_id = ?", id, ctx.ProjectID)
 	ok(c, nil)
 }
 
 // handleMoveDevices 拖拽移动设备到分组。
 func handleMoveDevices(c *gin.Context) {
+	ctx := getCtx(c)
 	var req struct {
 		DeviceIDs []string `json:"deviceIds" binding:"required"`
 		GroupID   string   `json:"groupId"`
@@ -304,7 +347,14 @@ func handleMoveDevices(c *gin.Context) {
 		fail(c, errs.EBadRequest)
 		return
 	}
-	store.DB.Model(&models.Device{}).Where("id IN ?", req.DeviceIDs).
+	// 目标分组必须属于当前项目（空串 = 移出分组）
+	if req.GroupID != "" {
+		if _, okg := groupInProject(c, req.GroupID); !okg {
+			return
+		}
+	}
+	// 设备 ID 也限定在当前项目内：否则传入别家项目的设备 ID 就能把它们拽进本项目的分组
+	store.DB.Model(&models.Device{}).Where("id IN ? AND project_id = ?", req.DeviceIDs, ctx.ProjectID).
 		Update("group_id", req.GroupID)
 	ok(c, nil)
 }

@@ -131,14 +131,14 @@ func handleExportDevices(c *gin.Context) {
 // handleDeviceDetail MGR-03。
 func handleDeviceDetail(c *gin.Context) {
 	id := c.Param("id")
-	var d models.Device
-	if err := store.DB.First(&d, "id = ? AND deleted_at = 0", id).Error; err != nil {
-		fail(c, errs.ENotFound)
+	// 归属校验：设备必须属于当前项目（见 scope.go 的说明）
+	d, okd := deviceInProject(c, id)
+	if !okd {
 		return
 	}
 	var chs []models.Channel
 	store.DB.Where("device_id = ?", id).Order("idx ASC").Find(&chs)
-	resp := deviceJSON(d)
+	resp := deviceJSON(*d)
 	resp["channels"] = chs
 	if m, ok := d.Meta["metrics"]; ok {
 		resp["metrics"] = m
@@ -146,7 +146,7 @@ func handleDeviceDetail(c *gin.Context) {
 	// 最近一次诊断结果（MGR-07）：概览的「最近诊断结果」段与诊断 Tab 都读它。
 	// 放在详情响应里而不是单开 GET /devices/:id/diag——详情页本来就要拉一次详情，
 	// 前端不用为一个可选的展示项多打一次往返。
-	if ld := recentDiag(d); ld != nil {
+	if ld := recentDiag(*d); ld != nil {
 		resp["lastDiag"] = ld
 	}
 	// 最近事件
@@ -159,6 +159,10 @@ func handleDeviceDetail(c *gin.Context) {
 // handleUpdateDevice MGR-04。
 func handleUpdateDevice(c *gin.Context) {
 	id := c.Param("id")
+	ctx := getCtx(c)
+	if _, okd := deviceInProject(c, id); !okd {
+		return
+	}
 	var req struct {
 		Name     *string `json:"name"`
 		GroupID  *string `json:"groupId"`
@@ -168,6 +172,12 @@ func handleUpdateDevice(c *gin.Context) {
 	if err := c.ShouldBindJSON(&req); err != nil {
 		fail(c, errs.EBadRequest)
 		return
+	}
+	// 目标分组必须属于同一项目：否则可以把设备挂到别的项目的分组下（设备树/分组树随之错乱）
+	if req.GroupID != nil && *req.GroupID != "" {
+		if _, okg := groupInProject(c, *req.GroupID); !okg {
+			return
+		}
 	}
 	updates := map[string]any{"updated_at": models.NowMilli()}
 	if req.Name != nil {
@@ -182,12 +192,13 @@ func handleUpdateDevice(c *gin.Context) {
 	if req.Remark != nil {
 		updates["remark"] = *req.Remark
 	}
-	if err := store.DB.Model(&models.Device{}).Where("id = ?", id).Updates(updates).Error; err != nil {
+	// WHERE 里再带一次 project_id：即便将来有人误删上面的前置校验，也改不到别的项目
+	if err := store.DB.Model(&models.Device{}).Where("id = ? AND project_id = ?", id, ctx.ProjectID).Updates(updates).Error; err != nil {
 		fail(c, errs.EServerInternal)
 		return
 	}
 	var d models.Device
-	store.DB.First(&d, "id = ?", id)
+	store.DB.First(&d, "id = ? AND project_id = ?", id, ctx.ProjectID)
 	ok(c, deviceJSON(d))
 }
 
@@ -201,22 +212,25 @@ func handleDeleteDevice(c *gin.Context) {
 		fail(c, errs.EBadRequest)
 		return
 	}
-	var d models.Device
-	if store.DB.First(&d, "id = ? AND deleted_at = 0", id).Error != nil {
-		fail(c, errs.ENotFound)
+	d, okd := deviceInProject(c, id)
+	if !okd {
 		return
 	}
 	if d.Name != req.ConfirmName {
 		fail(c, errs.EBadRequest.WithMsg("设备名不一致"))
 		return
 	}
-	store.DB.Model(&d).Update("deleted_at", models.NowMilli())
+	store.DB.Model(d).Update("deleted_at", models.NowMilli())
 	ok(c, nil)
 }
 
 // handleTransferDevice MGR-12。
 func handleTransferDevice(c *gin.Context) {
 	id := c.Param("id")
+	d, okd := deviceInProject(c, id)
+	if !okd {
+		return
+	}
 	var req struct {
 		ProjectID string `json:"projectId"`
 		GroupID   string `json:"groupId"`
@@ -225,20 +239,35 @@ func handleTransferDevice(c *gin.Context) {
 		fail(c, errs.EBadRequest)
 		return
 	}
-	var d models.Device
-	if store.DB.First(&d, "id = ?", id).Error != nil {
-		fail(c, errs.ENotFound)
-		return
-	}
+	// 目标项目必须属于当前租户：请求体里的 projectId 是客户端说了算的，
+	// 不校验就等于任何项目管理员都能把设备（连同通道）划进别的租户——既越权写入，也是资产外流。
+	targetPID := d.ProjectID
 	if req.ProjectID != "" && req.ProjectID != d.ProjectID {
-		if a := adapter.Get(d.Source); a != nil {
-			_ = a.Transfer(c.Request.Context(), id, req.ProjectID)
+		if _, okp := projectInTenant(c, req.ProjectID); !okp {
+			return
 		}
-		store.DB.Model(&d).Update("project_id", req.ProjectID)
-		store.DB.Model(&models.Channel{}).Where("device_id = ?", id).Update("project_id", req.ProjectID)
+		targetPID = req.ProjectID
+	}
+	// 目标分组必须落在转移后的项目里（分组属项目，跨项目挂靠会让设备树错乱）
+	if req.GroupID != "" {
+		var g models.DeviceGroup
+		if store.DB.First(&g, "id = ? AND project_id = ?", req.GroupID, targetPID).Error != nil {
+			fail(c, errs.ENotFound.WithMsg("目标分组不存在"))
+			return
+		}
+	}
+	if targetPID != d.ProjectID {
+		if a := adapter.Get(d.Source); a != nil {
+			_ = a.Transfer(c.Request.Context(), id, targetPID)
+		}
+		store.DB.Model(d).Update("project_id", targetPID)
+		store.DB.Model(&models.Channel{}).Where("device_id = ?", id).Update("project_id", targetPID)
 	}
 	if req.GroupID != "" {
-		store.DB.Model(&d).Update("group_id", req.GroupID)
+		store.DB.Model(d).Update("group_id", req.GroupID)
+	} else if d.GroupID != "" && targetPID != d.ProjectID {
+		// 原分组属于旧项目，转移后已无意义：清掉，避免留下跨项目的 group_id 悬空引用
+		store.DB.Model(d).Update("group_id", "")
 	}
 	ok(c, nil)
 }
@@ -246,9 +275,8 @@ func handleTransferDevice(c *gin.Context) {
 // handleSyncDevice MGR-06。
 func handleSyncDevice(c *gin.Context) {
 	id := c.Param("id")
-	var d models.Device
-	if store.DB.First(&d, "id = ?", id).Error != nil {
-		fail(c, errs.ENotFound)
+	d, okd := deviceInProject(c, id)
+	if !okd {
 		return
 	}
 	switch d.Source {
@@ -266,9 +294,8 @@ func handleSyncDevice(c *gin.Context) {
 // handleDiagDevice MGR-07。
 func handleDiagDevice(c *gin.Context) {
 	id := c.Param("id")
-	var d models.Device
-	if store.DB.First(&d, "id = ?", id).Error != nil {
-		fail(c, errs.ENotFound)
+	d, okd := deviceInProject(c, id)
+	if !okd {
 		return
 	}
 	results := []map[string]any{}
@@ -288,7 +315,7 @@ func handleDiagDevice(c *gin.Context) {
 		d.Meta = models.JSONB{}
 	}
 	d.Meta["lastDiag"] = models.JSONB{"at": at, "results": results}
-	_ = store.DB.Model(&d).Update("meta", d.Meta).Error
+	_ = store.DB.Model(d).Update("meta", d.Meta).Error
 	ok(c, gin.H{"results": results, "at": at})
 }
 
@@ -313,9 +340,8 @@ func recentDiag(d models.Device) models.JSONB {
 // handleRebootDevice MGR-08。
 func handleRebootDevice(c *gin.Context) {
 	id := c.Param("id")
-	var d models.Device
-	if store.DB.First(&d, "id = ?", id).Error != nil {
-		fail(c, errs.ENotFound)
+	d, okd := deviceInProject(c, id)
+	if !okd {
 		return
 	}
 	a := adapter.Get(d.Source)
@@ -334,9 +360,7 @@ func handleRebootDevice(c *gin.Context) {
 // 没配过也返回一份「已关闭」的空计划，前端不必把 404 当成错误处理。
 func handleGetRebootPlan(c *gin.Context) {
 	id := c.Param("id")
-	var d models.Device
-	if store.DB.First(&d, "id = ? AND deleted_at = 0", id).Error != nil {
-		fail(c, errs.ENotFound)
+	if _, okd := deviceInProject(c, id); !okd {
 		return
 	}
 	var p models.RebootPlan
@@ -350,9 +374,8 @@ func handleGetRebootPlan(c *gin.Context) {
 // handleSetRebootPlan MGR-08 定时重启：保存计划（设备与计划一对一，upsert）。
 func handleSetRebootPlan(c *gin.Context) {
 	id := c.Param("id")
-	var d models.Device
-	if store.DB.First(&d, "id = ? AND deleted_at = 0", id).Error != nil {
-		fail(c, errs.ENotFound)
+	d, okd := deviceInProject(c, id)
+	if !okd {
 		return
 	}
 	var req struct {
@@ -365,7 +388,7 @@ func handleSetRebootPlan(c *gin.Context) {
 	}
 	// 不支持重启的来源（RTSP）不允许**启用**定时任务——否则到点必然失败，
 	// 每天在日志里刷一条 fail，用户会以为设备坏了。只是关掉计划时不该拦。
-	if req.Enabled && !supportsReboot(&d) {
+	if req.Enabled && !supportsReboot(d) {
 		fail(c, errs.EForbid.WithMsg("该设备不支持远程重启，无法启用定时任务"))
 		return
 	}
@@ -454,6 +477,9 @@ func parseHHMM(s string) (string, bool) {
 // handleDeviceChannels MGR-05。
 func handleDeviceChannels(c *gin.Context) {
 	id := c.Param("id")
+	if _, okd := deviceInProject(c, id); !okd {
+		return
+	}
 	var chs []models.Channel
 	store.DB.Where("device_id = ?", id).Order("idx ASC").Find(&chs)
 	ok(c, gin.H{"items": chs})
@@ -461,6 +487,10 @@ func handleDeviceChannels(c *gin.Context) {
 
 func handleUpdateChannel(c *gin.Context) {
 	id := c.Param("id")
+	ch0, okc := channelInProject(c, id)
+	if !okc {
+		return
+	}
 	var req struct {
 		Name    *string `json:"name"`
 		Enabled *bool   `json:"enabled"`
@@ -476,9 +506,9 @@ func handleUpdateChannel(c *gin.Context) {
 	if req.Enabled != nil {
 		updates["enabled"] = *req.Enabled
 	}
-	store.DB.Model(&models.Channel{}).Where("id = ?", id).Updates(updates)
+	store.DB.Model(&models.Channel{}).Where("id = ? AND project_id = ?", id, ch0.ProjectID).Updates(updates)
 	var ch models.Channel
-	store.DB.First(&ch, "id = ?", id)
+	store.DB.First(&ch, "id = ? AND project_id = ?", id, ch0.ProjectID)
 	ok(c, ch)
 }
 
@@ -526,9 +556,8 @@ var cfgRebootRequired = map[string]bool{
 
 func handleDeviceConfigGet(c *gin.Context) {
 	id := c.Param("id")
-	var d models.Device
-	if store.DB.First(&d, "id = ? AND deleted_at = 0", id).Error != nil {
-		fail(c, errs.ENotFound)
+	d, okd := deviceInProject(c, id)
+	if !okd {
 		return
 	}
 	if d.Source != "idp" {
@@ -564,9 +593,8 @@ func handleDeviceConfigGet(c *gin.Context) {
 
 func handleDeviceConfigSet(c *gin.Context) {
 	id := c.Param("id")
-	var d models.Device
-	if store.DB.First(&d, "id = ? AND deleted_at = 0", id).Error != nil {
-		fail(c, errs.ENotFound)
+	d, okd := deviceInProject(c, id)
+	if !okd {
 		return
 	}
 	if d.Source != "idp" {
@@ -606,9 +634,8 @@ func handleDeviceConfigReset(c *gin.Context) {
 		fail(c, errs.EBadRequest)
 		return
 	}
-	var d models.Device
-	if store.DB.First(&d, "id = ? AND deleted_at = 0", id).Error != nil {
-		fail(c, errs.ENotFound)
+	d, okd := deviceInProject(c, id)
+	if !okd {
 		return
 	}
 	if d.Source != "idp" {
@@ -659,6 +686,14 @@ func handleDeviceBatch(c *gin.Context) {
 		}
 		switch req.Action {
 		case "move":
+			// 目标分组必须属于当前项目（空串 = 移出分组）
+			if req.GroupID != "" {
+				var g models.DeviceGroup
+				if store.DB.First(&g, "id = ? AND project_id = ?", req.GroupID, ctx.ProjectID).Error != nil {
+					results = append(results, gin.H{"id": id, "ok": false, "msg": "目标分组不存在"})
+					continue
+				}
+			}
 			if err := store.DB.Model(&d).Update("group_id", req.GroupID).Error; err != nil {
 				results = append(results, gin.H{"id": id, "ok": false, "msg": err.Error()})
 			} else {
@@ -742,12 +777,18 @@ func handleIdpBind(c *gin.Context) {
 	idp := a.(interface {
 		Bind(projectID, groupID, name, deviceID, verifyCode string) error
 	})
+	// 目标分组必须属于当前项目
+	if req.GroupID != "" {
+		if _, okg := groupInProject(c, req.GroupID); !okg {
+			return
+		}
+	}
 	if err := idp.Bind(ctx.ProjectID, req.GroupID, req.Name, req.DeviceID, req.VerifyCode); err != nil {
 		fail(c, toAppErr(err))
 		return
 	}
 	var d models.Device
-	if store.DB.First(&d, "id = ?", req.DeviceID).Error == nil {
+	if store.DB.First(&d, "id = ? AND project_id = ?", req.DeviceID, ctx.ProjectID).Error == nil {
 		ok(c, deviceJSON(d))
 		return
 	}
@@ -773,6 +814,14 @@ func handleIdpPreadd(c *gin.Context) {
 	results := make([]gin.H, 0, len(req.Items))
 	for _, it := range req.Items {
 		id := strings.ToUpper(strings.TrimSpace(it.DeviceID))
+		// 目标分组必须属于当前项目
+		if it.GroupID != "" {
+			var g models.DeviceGroup
+			if store.DB.First(&g, "id = ? AND project_id = ?", it.GroupID, ctx.ProjectID).Error != nil {
+				results = append(results, gin.H{"deviceId": id, "ok": false, "msg": "目标分组不存在"})
+				continue
+			}
+		}
 		rec := models.IdpPreadd{
 			ID: "pre_" + models.NewID(), ProjectID: ctx.ProjectID, DeviceID: id,
 			GroupID: it.GroupID, Name: it.Name, Location: it.Location,
@@ -805,8 +854,9 @@ func handleIdpPreaddList(c *gin.Context) {
 }
 
 func handleIdpPreaddActivate(c *gin.Context) {
+	ctx := getCtx(c)
 	id := c.Param("id")
-	store.DB.Model(&models.IdpPreadd{}).Where("id = ?", id).
+	store.DB.Model(&models.IdpPreadd{}).Where("id = ? AND project_id = ?", id, ctx.ProjectID).
 		Update("expires_at", models.NowMilli()+7*24*3600*1000)
 	ok(c, nil)
 }
@@ -849,9 +899,16 @@ func handleGbConfirm(c *gin.Context) {
 		return
 	}
 	var p models.GbPending
-	if store.DB.First(&p, "id = ?", id).Error != nil {
+	// GbPending 的 project_id 可能为空（未分配来电），与 handleGbPendingList 同口径
+	if store.DB.First(&p, "id = ? AND (project_id = ? OR project_id = '')", id, ctx.ProjectID).Error != nil {
 		fail(c, errs.ENotFound)
 		return
+	}
+	// 目标分组必须属于当前项目
+	if req.GroupID != "" {
+		if _, okg := groupInProject(c, req.GroupID); !okg {
+			return
+		}
 	}
 	// 创建设备（确认入组）
 	gb := adapter.Get("gb28181")
@@ -887,8 +944,9 @@ func handleGbConfirm(c *gin.Context) {
 }
 
 func handleGbReject(c *gin.Context) {
+	ctx := getCtx(c)
 	id := c.Param("id")
-	store.DB.Delete(&models.GbPending{}, "id = ?", id)
+	store.DB.Delete(&models.GbPending{}, "id = ? AND (project_id = ? OR project_id = '')", id, ctx.ProjectID)
 	ok(c, nil)
 }
 
@@ -915,6 +973,12 @@ func handleGbWhitelistAdd(c *gin.Context) {
 		fail(c, errs.EBadRequest)
 		return
 	}
+	// 目标分组必须属于当前项目
+	if req.GroupID != "" {
+		if _, okg := groupInProject(c, req.GroupID); !okg {
+			return
+		}
+	}
 	w := models.GbWhitelist{ID: "wl_" + models.NewID(), ProjectID: ctx.ProjectID,
 		GbID: req.GbID, PwdEnc: crypto_Enc(req.Pwd), GroupID: req.GroupID, Name: req.Name,
 		CreatedAt: models.NowMilli()}
@@ -923,7 +987,8 @@ func handleGbWhitelistAdd(c *gin.Context) {
 }
 
 func handleGbWhitelistDelete(c *gin.Context) {
-	store.DB.Delete(&models.GbWhitelist{}, "id = ?", c.Param("id"))
+	ctx := getCtx(c)
+	store.DB.Delete(&models.GbWhitelist{}, "id = ? AND project_id = ?", c.Param("id"), ctx.ProjectID)
 	ok(c, nil)
 }
 

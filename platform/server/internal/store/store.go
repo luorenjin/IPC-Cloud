@@ -58,8 +58,8 @@ func ProjectTenant(projectID string) string {
 // audit_logs 早期没有 tenant_id 列，加上后若不回填，旧记录会因 tenant_id 为空
 // 而从所有带租户条件的查询里消失（表现形如“审计日志丢了”，本次就是这样发现的）。
 //
-// 注意 AutoMigrate 给已有行补的列值是 **NULL** 而不是 ''，
-// 所以判定必须用 coalesce(tenant_id, '') = ''，直接写 `= ''` 会一条都匹配不上。
+// 注意 AutoMigrate 给已有行补的列值是 **NULL** 而不是 ”，
+// 所以判定必须用 coalesce(tenant_id, ”) = ”，直接写 `= ”` 会一条都匹配不上。
 //
 // 两轮按可靠度递减回填：
 //  1. 有 project_id 的按项目取租户（projects.tenant_id 是权威来源，覆盖定时重启等

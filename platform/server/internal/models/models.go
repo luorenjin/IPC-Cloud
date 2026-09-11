@@ -379,9 +379,9 @@ type AlarmEvent struct {
 // ---------- 运维 ----------
 
 type AuditLog struct {
-	ID        string `gorm:"primaryKey;size:48" json:"id"`
-	UserID    string `gorm:"index;size:40" json:"userId"`
-	Username  string `gorm:"size:64" json:"username"`
+	ID       string `gorm:"primaryKey;size:48" json:"id"`
+	UserID   string `gorm:"index;size:40" json:"userId"`
+	Username string `gorm:"size:64" json:"username"`
 	// TenantID 审计日志的租户维度。登录事件没有项目（project_id 为空），
 	// 早期只按 project_id 过滤时会让所有租户的登录记录互相可见；查询一律同时带租户。
 	TenantID  string `gorm:"index;size:40" json:"tenantId"`
