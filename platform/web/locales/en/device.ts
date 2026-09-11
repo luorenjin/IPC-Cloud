@@ -229,6 +229,7 @@ export default {
   'device.config.contrast': 'Contrast',
   'device.config.saturation': 'Saturation',
   'device.config.sharpness': 'Sharpness',
+  'device.config.sharpnessHint': 'Handled by the device encoder; the web preview does not simulate sharpening',
   // ---- Encoding ----
   'device.config.encode': 'Codec',
   'device.config.width': 'Width',
@@ -237,6 +238,12 @@ export default {
   'device.config.bitrate': 'Bitrate (kbps)',
   'device.config.gop': 'GOP',
   'device.config.rc': 'Rate control',
+  'device.config.advanced': 'Advanced',
+  'device.config.presetFluent': 'Smooth',
+  'device.config.presetSd': 'SD',
+  'device.config.presetHd': 'HD',
+  'device.config.presetUhd': 'UHD',
+  'device.config.presetCustom': 'Custom',
   // ---- OSD overlay ----
   'device.config.osdName': 'Channel name',
   'device.config.osdTime': 'Timestamp',

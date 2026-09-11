@@ -229,6 +229,7 @@ export default {
   'device.config.contrast': '对比度',
   'device.config.saturation': '饱和度',
   'device.config.sharpness': '锐度',
+  'device.config.sharpnessHint': '由设备编码器处理，网页预览不模拟锐化效果',
   // ---- 编码参数 ----
   'device.config.encode': '编码格式',
   'device.config.width': '画面宽度',
@@ -237,6 +238,12 @@ export default {
   'device.config.bitrate': '码率(kbps)',
   'device.config.gop': 'GOP',
   'device.config.rc': '码率控制',
+  'device.config.advanced': '高级参数',
+  'device.config.presetFluent': '流畅',
+  'device.config.presetSd': '标清',
+  'device.config.presetHd': '高清',
+  'device.config.presetUhd': '超清',
+  'device.config.presetCustom': '自定义',
   // ---- OSD 叠加 ----
   'device.config.osdName': '通道名叠加',
   'device.config.osdTime': '时间叠加',

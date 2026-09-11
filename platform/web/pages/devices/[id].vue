@@ -176,7 +176,13 @@ const IMAGE_SLIDERS = [
 // 子页签：22 个键按语义拆成 7 组，每个分组名直接对应它管的内容——
 // OSD 叠加与移动侦测不再共用「事件侦测」这个筐，时间同步也不再挂在录像分组下面。
 type CfgTabKey = 'image' | 'encode' | 'osd' | 'alarm' | 'record' | 'time' | 'maintain'
-const cfgTab = ref<CfgTabKey>('image')
+const CFG_TAB_KEYS: CfgTabKey[] = ['image', 'encode', 'osd', 'alarm', 'record', 'time', 'maintain']
+function isCfgTabKey(v: unknown): v is CfgTabKey {
+  return typeof v === 'string' && (CFG_TAB_KEYS as string[]).includes(v)
+}
+// 子页签挂进 URL query：把当前子页签的链接发给同事复核时，对方打开要落在同一分组，
+// 不然每次都从「画面信息」开始翻，等于链接没带上关键信息。
+const cfgTab = ref<CfgTabKey>(isCfgTabKey(route.query.tab) ? route.query.tab : 'image')
 // 逐条写 t('…') 而不是拼字符串：i18n 检查脚本只能静态识别字面量，
 // 拼出来的键会被当成「定义了但未引用」。
 const cfgTabItems = computed(() => [
@@ -213,6 +219,24 @@ const mirrorMode = computed({
   }
 })
 const mirrorOptions = computed(() => MIRROR_OPTIONS.map((o) => ({ label: t(o.labelKey), value: o.value })))
+
+/**
+ * 亮度/对比度/饱和度 0–100 映射到 CSS filter 系数：中点 50 落在 1（视觉中性，即“不叠加任何效果”），
+ * 两端线性伸展到 0.5/1.5——只为了让预览图跟着滑杆方向变化，不追求还原设备编码器的实际曲线。
+ * 锐度没有对应的原生 CSS 效果，不在此列，页面上改用文字提示代替。
+ */
+function imageFilterValue(v: number) {
+  return 0.5 + v / 100
+}
+/** 预览层实时叠加：滑杆/镜像下拉一改就生效，抓帧本身仍要靠「刷新预览」手动取新的设备帧 */
+const previewStyle = computed(() => {
+  const scaleX = mirrorMode.value === 'mirror' || mirrorMode.value === 'both' ? -1 : 1
+  const scaleY = mirrorMode.value === 'flip' || mirrorMode.value === 'both' ? -1 : 1
+  return {
+    filter: `brightness(${imageFilterValue(cfgNum('image.brightness'))}) contrast(${imageFilterValue(cfgNum('image.contrast'))}) saturate(${imageFilterValue(cfgNum('image.saturation'))})`,
+    transform: `scaleX(${scaleX}) scaleY(${scaleY})`
+  }
+})
 
 /**
  * 数字框回写：只挡空值与非数字，**不静默钳制**。
@@ -309,6 +333,35 @@ const cfgGroups: CfgGroup[] = [
     ]
   }
 ]
+
+/** gop / rc 改动频率低，收进「编码策略」页签的折叠区，降低主网格的字段密度 */
+const ADVANCED_VIDEO_KEYS = ['video.0.main.gop', 'video.0.main.rc']
+/** 画质档位代管的三个字段：与 supported 过滤后的 g.fields 对照，判断 chips 是否还有意义 */
+const ENCODE_PRESET_GOVERNED_KEYS = ['video.0.main.fps', 'video.0.main.kbps', 'video.0.main.gop']
+
+interface EncodePreset { key: string; label: string; fps: number; kbps: number; gop: number }
+// 逐条写 t('…') 而不是拼字符串：与 cfgTabItems 同一顾虑，i18n 检查脚本只识别字面量。
+// 四档数值是纯前端预设，不新增后端字段；gop 大致取 fps 的 2 倍（≈2 秒一个关键帧），
+// 流畅档降帧率与码率以适配弱网，其余三档对齐常见摄像头面板的标清/高清/超清档位。
+const encodePresets = computed<EncodePreset[]>(() => [
+  { key: 'fluent', label: t('device.config.presetFluent'), fps: 15, kbps: 512, gop: 30 },
+  { key: 'sd', label: t('device.config.presetSd'), fps: 25, kbps: 1024, gop: 50 },
+  { key: 'hd', label: t('device.config.presetHd'), fps: 25, kbps: 2048, gop: 50 },
+  { key: 'uhd', label: t('device.config.presetUhd'), fps: 30, kbps: 4096, gop: 60 }
+])
+/** 三项代管字段（fps/kbps/gop）都命中同一档才高亮该 chip；只要其中一项被手动改动就不再匹配
+ * 任何预设——不去猜用户改动后的组合是否“恰好”等于某个预设之外的合理值，避免给出误导性的选中态。 */
+const activeEncodePreset = computed(() => {
+  const fps = cfgNum('video.0.main.fps')
+  const kbps = cfgNum('video.0.main.kbps')
+  const gop = cfgNum('video.0.main.gop')
+  return encodePresets.value.find((p) => p.fps === fps && p.kbps === kbps && p.gop === gop)?.key || 'custom'
+})
+function applyEncodePreset(p: EncodePreset) {
+  setCfgNum('video.0.main.fps', String(p.fps))
+  setCfgNum('video.0.main.kbps', String(p.kbps))
+  setCfgNum('video.0.main.gop', String(p.gop))
+}
 
 // 只渲染设备确实拥有的键（supported 为空时不过滤，兼容旧后端）
 const visibleCfgGroups = computed(() => cfgGroups
@@ -443,6 +496,13 @@ async function saveEdit() {
 // ================= 重启 / 转移 / 升级 / 安全删除（MGR-08/10/11/12） =================
 const confirmBox = useConfirm()
 const router = useRouter()
+
+// 用 replace 不用 push：只是切了个子页签，不是导航到新页面，
+// 否则点一次「返回」只退掉上一次切换的 tab，要连点多次才能真正离开设备详情页。
+function selectCfgTab(v: CfgTabKey) {
+  cfgTab.value = v
+  router.replace({ query: { ...route.query, tab: v } })
+}
 
 async function rebootDevice() {
   const ok = await confirmBox.ask({
@@ -695,7 +755,7 @@ onMounted(load)
                     class="relative rounded-chrome px-3 py-1 text-xs outline-none ipc-focus-ring transition-colors"
                     :class="cfgTab === item.value ? 'bg-primary text-white shadow-sm' : 'text-muted hover:text-ink'"
                     :aria-selected="cfgTab === item.value"
-                    @click="cfgTab = item.value"
+                    @click="selectCfgTab(item.value)"
                   >
                     {{ item.label }}
                     <span v-if="invalidKeysByTab[item.value]?.length" class="absolute -right-0.5 -top-0.5 h-1.5 w-1.5 rounded-full bg-danger" />
@@ -712,7 +772,7 @@ onMounted(load)
                   </header>
                   <div class="grid gap-4 p-3 md:grid-cols-[minmax(0,320px)_1fr]">
                     <div class="flex h-44 items-center justify-center overflow-hidden rounded-signal border border-line bg-zone">
-                      <img v-if="preview.src" :src="preview.src" class="block h-full w-full object-contain" :alt="t('device.config.preview')">
+                      <img v-if="preview.src" :src="preview.src" :style="previewStyle" class="block h-full w-full object-contain" :alt="t('device.config.preview')">
                       <span v-else class="text-xs text-placeholder">{{ t('device.config.previewEmpty') }}</span>
                     </div>
                     <div class="space-y-3">
@@ -733,6 +793,8 @@ onMounted(load)
                         />
                         <span v-if="cfg.denied.includes(f.key)" class="text-xs text-danger">{{ t('device.config.rejected') }}</span>
                         <span v-else-if="invalidKeysByTab[cfgTab]?.includes(f.key)" class="text-xs text-danger">{{ t('device.config.outOfRange', { range: boundText(f.key) }) }}</span>
+                        <!-- 锐度没有对应的原生 CSS 效果，如实告知而不是假装模拟了锐化 -->
+                        <span v-else-if="f.key === 'image.sharpness'" class="text-xs text-placeholder">{{ t('device.config.sharpnessHint') }}</span>
                       </div>
                     </div>
                   </div>
@@ -741,8 +803,24 @@ onMounted(load)
                 <!-- ② 其余配置分组：键名与固件对齐，控件按类型渲染 -->
                 <section v-for="g in visibleCfgGroups" :key="g.key" class="rounded-signal border border-line">
                   <header class="border-b border-line-soft px-3 py-2 text-sm font-medium text-ink">{{ t(g.titleKey) }}</header>
+
+                  <!-- 画质档位 chips：只代管 fps/kbps/gop 三项，w/h/codec/rc 不在预设范围内；
+                       设备若不支持这三项（supported 已把它们过滤出 g.fields），chips 也没有意义，不渲染 -->
+                  <div v-if="g.key === 'video' && g.fields.some((fld) => ENCODE_PRESET_GOVERNED_KEYS.includes(fld.key))" class="flex flex-wrap items-center gap-2 border-b border-line-soft px-3 py-2.5">
+                    <button
+                      v-for="p in encodePresets" :key="p.key" type="button"
+                      class="rounded-chrome border px-2.5 py-1 text-xs transition-colors"
+                      :class="activeEncodePreset === p.key ? 'border-primary bg-primary-soft text-primary' : 'border-line text-muted hover:border-primary'"
+                      @click="applyEncodePreset(p)"
+                    >{{ p.label }}</button>
+                    <span
+                      class="rounded-chrome border px-2.5 py-1 text-xs"
+                      :class="activeEncodePreset === 'custom' ? 'border-primary bg-primary-soft text-primary' : 'border-line text-placeholder'"
+                    >{{ t('device.config.presetCustom') }}</span>
+                  </div>
+
                   <div class="grid grid-cols-1 gap-x-8 gap-y-3 p-3 md:grid-cols-2">
-                    <div v-for="f in g.fields" :key="f.key" class="flex items-center gap-3">
+                    <div v-for="f in (g.key === 'video' ? g.fields.filter((fld) => !ADVANCED_VIDEO_KEYS.includes(fld.key)) : g.fields)" :key="f.key" class="flex items-center gap-3">
                       <label class="w-24 shrink-0 text-right text-sm text-muted">{{ t(f.labelKey) }}</label>
                       <UiSwitch
                         v-if="f.type === 'bool'" size="sm"
@@ -771,6 +849,41 @@ onMounted(load)
                       <span v-else-if="f.type === 'int'" class="text-xs text-placeholder">{{ boundText(f.key) }}</span>
                     </div>
                   </div>
+
+                  <!-- 高级参数：gop/rc 改动频率低，折叠掉以降低「编码策略」页签的单屏字段密度；
+                       两项都不在 supported 里时不留一个空的可展开区块 -->
+                  <details v-if="g.key === 'video' && g.fields.some((fld) => ADVANCED_VIDEO_KEYS.includes(fld.key))" class="border-t border-line-soft px-3 py-2">
+                    <summary class="cursor-pointer text-xs text-muted">{{ t('device.config.advanced') }}</summary>
+                    <div class="grid grid-cols-1 gap-x-8 gap-y-3 pt-3 md:grid-cols-2">
+                      <div v-for="f in g.fields.filter((fld) => ADVANCED_VIDEO_KEYS.includes(fld.key))" :key="f.key" class="flex items-center gap-3">
+                        <label class="w-24 shrink-0 text-right text-sm text-muted">{{ t(f.labelKey) }}</label>
+                        <UiSwitch
+                          v-if="f.type === 'bool'" size="sm"
+                          :model-value="Boolean(cfg.data[f.key])" :aria-label="t(f.labelKey)"
+                          @update:model-value="cfg.data[f.key] = $event"
+                        />
+                        <UiSelect
+                          v-else-if="f.type === 'enum'"
+                          :model-value="String(cfg.data[f.key] ?? '')" :options="f.options" size="sm" width="w-32"
+                          @update:model-value="cfg.data[f.key] = $event"
+                        />
+                        <UiInput
+                          v-else-if="f.type === 'int'" type="number" size="sm" width="w-24"
+                          :invalid="invalidKeysByTab[cfgTab]?.includes(f.key)"
+                          :model-value="String(cfgNum(f.key))"
+                          @update:model-value="setCfgNum(f.key, $event)"
+                        />
+                        <UiInput
+                          v-else size="sm" width="w-48"
+                          :model-value="String(cfg.data[f.key] ?? '')"
+                          @update:model-value="cfg.data[f.key] = $event"
+                        />
+                        <span v-if="cfg.denied.includes(f.key)" class="text-xs text-danger">{{ t('device.config.rejected') }}</span>
+                        <span v-else-if="invalidKeysByTab[cfgTab]?.includes(f.key)" class="text-xs text-danger">{{ t('device.config.outOfRange', { range: boundText(f.key) }) }}</span>
+                        <span v-else-if="f.type === 'int'" class="text-xs text-placeholder">{{ boundText(f.key) }}</span>
+                      </div>
+                    </div>
+                  </details>
                 </section>
 
                 <!-- ③ 设备维护：定时重启计划（MGR-08）。立即重启只保留页头工具栏那一个入口，这里不再重复放一个 -->
