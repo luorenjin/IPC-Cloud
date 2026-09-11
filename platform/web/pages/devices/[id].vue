@@ -20,9 +20,10 @@ function hasCap(prefix: string) {
   return caps.value.some((c) => c.startsWith(prefix))
 }
 
-// 重启能力判定必须与后端 supportsReboot 同构，否则会出现「按钮可点但接口 403」：
-// rtsp 无重启通道；idp 在声明了能力清单时必须显式声明 reboot；其余来源默认允许。
-// 后端改动时此处需同步（AGENTS.md 双向契约一致性）。
+// 注意：后端 handleRebootDevice 目前对 idp 来源不做能力清单校验（有适配器就转发 cmd.reboot），
+// 这里的 idp 分支判断是前端单独收紧的保守展示，不是与后端对称的双向契约；
+// 真正的硬拒绝只有 rtsp（适配器 Reboot() 直接返回 EForbid）。后端若日后补上 idp 侧能力校验，
+// 需要同步检查这里的判断是否还合理（AGENTS.md 双向契约一致性）。
 const canReboot = computed(() => {
   const src = dev.value?.source
   if (!src) return false
@@ -435,10 +436,12 @@ watch(tab, (v) => {
   if (!Object.keys(cfg.data).length) loadCfg()
   if (!preview.src) loadPreview()
 })
-// 定时重启只在切到「设备维护」子页签时才拉：它跟 cfg.get 是两次设备往返，没必要都预热
+// 定时重启只在切到「设备维护」子页签时才拉：它跟 cfg.get 是两次设备往返，没必要都预热；
+// immediate:true 是必须的——cfgTab 初始值可能直接来自 URL（?tab=maintain 深链），
+// 不加 immediate 的话「切换」这个触发条件从未发生，深链落地就会看到空白的定时重启区块。
 watch(cfgTab, (v) => {
   if (v === 'maintain' && !rebootPlan.loaded) loadRebootPlan()
-})
+}, { immediate: true })
 async function saveCfg() {
   // 越界项拦在本地，但只认当前页签：其它页签遗留的坏值不在这里堵门，交给设备端 rejected 兜底即可（问题④）
   const badInTab = invalidKeysByTab.value[cfgTab.value] || []
