@@ -1,5 +1,7 @@
 package idp
 
+import "math"
+
 // 模拟设备的本地配置。
 //
 // ⚠️ 这是与平台 side 的**双向契约**：键名、类型、取值范围三项必须与固件
@@ -16,6 +18,8 @@ const (
 	cfgInt cfgType = iota
 	cfgBool
 	cfgStr
+	// cfgJSON 对应固件的 CFG_T_JSON（子树以 JSON 文本存取），当前只有移动侦测区域在用
+	cfgJSON
 )
 
 type cfgRule struct {
@@ -56,6 +60,8 @@ var cfgRules = map[string]cfgRule{
 	// 移动侦测
 	"alarm.motion.enable":      {t: cfgBool},
 	"alarm.motion.sensitivity": {t: cfgInt, min: 0, max: 100},
+	// 区域：元组数组 [[x,y,w,h], …]，归一化 0–1（对齐接入规范事件 payload 的先例）
+	"alarm.motion.regions": {t: cfgJSON},
 
 	// 时间同步
 	"time.ntp.enable": {t: cfgBool},
@@ -104,6 +110,8 @@ func cfgDefaults() map[string]any {
 
 		"alarm.motion.enable":      true,
 		"alarm.motion.sensitivity": 50,
+		// 出厂无侦测区域：空数组而不是 null，前端拿到就能直接当地址列表用
+		"alarm.motion.regions": []any{},
 
 		"time.ntp.enable": true,
 		"time.ntp.server": "pool.ntp.org",
@@ -199,7 +207,7 @@ func coerceCfg(rule cfgRule, v any) (any, bool) {
 			return nil, false
 		}
 		return s, true
-	default: // cfgInt
+	case cfgInt:
 		f, ok := v.(float64)
 		if !ok {
 			return nil, false
@@ -212,5 +220,42 @@ func coerceCfg(rule cfgRule, v any) (any, bool) {
 			return nil, false
 		}
 		return n, true
+	case cfgJSON:
+		return coerceRegions(v)
+	default:
+		return nil, false
 	}
+}
+
+// cfgRegionsMax 与 firmware/profiles/*.json 的 ivs.max_regions 对齐（hal_ivs.h 的硬上限是 8，
+// 而两个 profile 都只给 4）——超限直接拒绝，不做截断：静默丢掉用户画的框比报错更难排查。
+const cfgRegionsMax = 4
+
+// coerceRegions 校验移动侦测区域：元组数组 [[x,y,w,h], …]，归一化 0–1，最多 cfgRegionsMax 个。
+// 与固件“类型不符直接拒绝、不做就地转换”的语义一致：任一区域不合法就整个键拒绝，
+// 不存一个“部分生效”的区域集合。
+func coerceRegions(v any) (any, bool) {
+	arr, ok := v.([]any)
+	if !ok || len(arr) > cfgRegionsMax {
+		return nil, false
+	}
+	out := make([]any, 0, len(arr))
+	for _, item := range arr {
+		rect, ok := item.([]any)
+		if !ok || len(rect) != 4 {
+			return nil, false
+		}
+		one := make([]any, 0, 4)
+		for _, c := range rect {
+			f, ok := c.(float64)
+			if !ok || f < 0 || f > 1 {
+				return nil, false
+			}
+			// 保留 3 位小数：界面拖拽出来的坐标就是这个精度，多余位数只会让回读值与
+			// 界面显示对不上，看上去像“保存把值改了”
+			one = append(one, math.Round(f*1000)/1000)
+		}
+		out = append(out, one)
+	}
+	return out, true
 }

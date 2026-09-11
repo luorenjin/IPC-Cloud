@@ -530,8 +530,8 @@ var cfgKeys = []string{
 	"osd.channelName.enable", "osd.time.enable",
 	// 录像
 	"record.enabled", "record.mode", "record.retention_days", "record.channel",
-	// 移动侦测
-	"alarm.motion.enable", "alarm.motion.sensitivity",
+	// 移动侦测（regions 对应固件的 CFG_T_JSON，值是 [[x,y,w,h], …] 归一化元组）
+	"alarm.motion.enable", "alarm.motion.sensitivity", "alarm.motion.regions",
 	// 时间同步
 	"time.ntp.enable", "time.ntp.server", "time.timezone",
 	// 网络（reboot_required；静态地址四件套 + DHCP 开关，编辑交互见 [id].vue 的
