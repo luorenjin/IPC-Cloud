@@ -297,6 +297,17 @@ export default {
   // ---- Motion detection ----
   'device.config.motionEnable': 'Enable detection',
   'device.config.motionSens': 'Sensitivity',
+  // ---- Motion detection zones (alarm.motion.regions; normalized [[x,y,w,h],…] tuples) ----
+  'device.config.group.regions': 'Detection zones',
+  'device.config.regionsHint': 'Drag on the snapshot to draw zones — up to {n}; only motion inside them is reported.',
+  'device.config.regionN': 'Zone {n}',
+  'device.config.regionAria': 'Zone {n}: x {x}, y {y}, width {w}, height {h}. Use arrow keys to nudge and Delete to remove.',
+  'device.config.regionAdd': 'Add zone',
+  'device.config.regionMax': 'Up to {n} zones',
+  'device.config.regionDelete': 'Remove zone {n}',
+  'device.config.regionRemove': 'Remove',
+  'device.config.regionEmpty': 'No zones yet — the whole frame is monitored',
+  'device.config.regionPosterHint': 'The background is a frame captured from the device, for positioning only.',
   // ---- Reasons for disabled dependent fields (downstream fields grey out when the master switch is off) ----
   'device.config.dependsMotion': 'Enable detection first',
   'device.config.dependsRecord': 'Enable recording first',

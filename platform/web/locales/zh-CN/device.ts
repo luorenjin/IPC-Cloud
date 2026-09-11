@@ -296,6 +296,17 @@ export default {
   // ---- 移动侦测 ----
   'device.config.motionEnable': '启用侦测',
   'device.config.motionSens': '侦测灵敏度',
+  // ---- 移动侦测区域（alarm.motion.regions；元组数组 [[x,y,w,h],…] 归一化 0–1）----
+  'device.config.group.regions': '侦测区域',
+  'device.config.regionsHint': '在快照上拖拽画框，最多 {n} 个；只对框内的移动上报事件。',
+  'device.config.regionN': '区域 {n}',
+  'device.config.regionAria': '区域 {n}：横向 {x}，纵向 {y}，宽 {w}，高 {h}。用方向键微调，Delete 删除。',
+  'device.config.regionAdd': '添加区域',
+  'device.config.regionMax': '最多 {n} 个区域',
+  'device.config.regionDelete': '删除区域 {n}',
+  'device.config.regionRemove': '删除',
+  'device.config.regionEmpty': '尚未框选区域，默认对全画面侦测',
+  'device.config.regionPosterHint': '底图是设备抓拍的一帧，仅用于框选参照。',
   // ---- 依赖字段的禁用原因（总开关关闭时下游字段灰显，必须说明原因而不是让用户以为页面坏了）----
   'device.config.dependsMotion': '需先启用侦测',
   'device.config.dependsRecord': '需先启用录像',

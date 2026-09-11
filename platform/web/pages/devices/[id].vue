@@ -2,6 +2,7 @@
 // 设备详情（MGR-03）：概览 / 通道 / 配置 / 诊断 / 日志（PRD 五 Tab）
 import ConfigFieldRow, { type CfgField } from '~/components/device/ConfigFieldRow.vue'
 import NetworkSettings from '~/components/device/NetworkSettings.vue'
+import MotionRegionEditor from '~/components/device/MotionRegionEditor.vue'
 import { onBeforeRouteLeave } from 'vue-router'
 
 const route = useRoute()
@@ -594,6 +595,19 @@ const presetHasGop = computed(() => governedKeys.value.includes('video.0.main.go
 /** 「编码格式」是主网格里唯一的单值语义字段：让它独占一行，其余四项刚好两两成行，不留孤格 */
 const VIDEO_FULL_ROW_KEYS = ['video.0.main.codec']
 
+/** 与 firmware/profiles/*.json 的 ivs.max_regions 对齐；设备侧超限会整键拒绝，不截断 */
+const REGION_MAX = 4
+/** 设备是否支持区域框选（supported 现为平台白名单 ∩ 设备回包，旧固件/其它型号可能没有这个键） */
+const regionsSupported = computed(() => !cfg.supported.length || cfg.supported.includes('alarm.motion.regions'))
+/**
+ * 区域值直接读写 cfg.data：它随「保存并下发」一起提交——这个键不是 reboot_required，
+ * 也不涉及失联风险，不需要像网络字段那样配一套独立保存与强确认。
+ */
+const regionModel = computed<number[][]>({
+  get: () => (Array.isArray(cfg.data['alarm.motion.regions']) ? cfg.data['alarm.motion.regions'] : []),
+  set: (v) => { cfg.data['alarm.motion.regions'] = v }
+})
+
 // net.* 走独立的 NetworkSettings 区块而非通用字段渲染：这五个键改错会让设备从平台上失联，
 // 且固件规则表里全是 reboot_required，「保存」与「生效」还隔着一次重启，
 // 需要独立保存按钮 + 危险确认（见 components/device/NetworkSettings.vue）。
@@ -672,6 +686,11 @@ watch(tab, (v) => {
   // 设备不在线时 cfg.get 会等到超时，所以不在进详情页时就预拉，只在切到这个 Tab 时才发
   if (!Object.keys(cfg.data).length) loadCfg()
   if (!preview.src) loadPreview()
+})
+// 区域框选要有底图才谈得上“框”：进「移动侦测」页签时按需取一帧，
+// 与画面信息页共用同一份抓帧状态（不重复抓、也不会因为切页签丢掉已抓到的图）
+watch(cfgTab, (v) => {
+  if (v === 'alarm' && !preview.src) loadPreview()
 })
 // 定时重启计划的响应式状态必须先于下面的 watch 声明：watch 带 immediate:true，
 // 若 cfgTab 初始值直接来自 ?tab=maintain 深链，回调会在 <script setup> 顶层同步执行流里
@@ -1338,6 +1357,24 @@ onMounted(load)
                       />
                     </div>
                   </details>
+                </section>
+
+                <!-- 移动侦测区域：底图取自设备抓拍（与画面信息页共用同一次抓帧状态）；
+                     该键不是 reboot_required，随下方通用「保存并下发」一并提交 -->
+                <section v-if="cfgTab === 'alarm' && regionsSupported" class="rounded-signal border border-line">
+                  <header class="flex items-center justify-between border-b border-line-soft px-3 py-2">
+                    <span class="text-sm font-medium text-ink">{{ t('device.config.group.regions') }}</span>
+                    <UiButton size="sm" :disabled="preview.loading" @click="loadPreview">
+                      <Icon name="refresh" :size="13" :class="preview.loading ? 'ipc-spin' : ''" />{{ t('device.config.refreshPreview') }}
+                    </UiButton>
+                  </header>
+                  <div class="p-3">
+                    <p class="mb-3 text-xs text-placeholder">{{ t('device.config.regionsHint', { n: REGION_MAX }) }}</p>
+                    <MotionRegionEditor
+                      v-model="regionModel" :poster-src="preview.src"
+                      :max-regions="REGION_MAX" :disabled="cfgSaving"
+                    />
+                  </div>
                 </section>
 
                 <!-- 网络：独立保存 + 危险确认（理由见 NetworkSettings 顶部注释），不并入通用「保存并下发」 -->
