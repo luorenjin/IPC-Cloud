@@ -62,59 +62,15 @@ func handleListDevices(c *gin.Context) {
 	var devs []models.Device
 	q.Order("created_at DESC").Offset((page - 1) * size).Limit(size).Find(&devs)
 	items := make([]gin.H, 0, len(devs))
-	// 通道指标一次分组查询覆盖本页所有设备，不给每台设备各发一条 COUNT（N+1）。
-	chTotal, chLive := channelStats(devs)
 	for _, d := range devs {
-		it := deviceJSON(d)
-		it["channelCount"] = chTotal[d.ID]
-		it["streamingCount"] = chLive[d.ID]
-		items = append(items, it)
+		items = append(items, deviceJSON(d))
 	}
-	// 类型状态卡片：项目全量口径（不随当前筛选/分页变化）。
-	// 设备页的统计卡与分组树计数都读这里，避免前端只统计当前页导致数字随翻页漂移。
-	var stats struct {
-		All     int64 `json:"all"`
-		Online  int64 `json:"online"`
-		Offline int64 `json:"offline"`
-	}
+	// 类型状态卡片
+	var stats struct{ All, Online, Offline int64 }
 	store.DB.Model(&models.Device{}).Where("project_id = ? AND deleted_at = 0", ctx.ProjectID).Count(&stats.All)
 	store.DB.Model(&models.Device{}).Where("project_id = ? AND deleted_at = 0 AND status = 'online'", ctx.ProjectID).Count(&stats.Online)
 	stats.Offline = stats.All - stats.Online
 	ok(c, gin.H{"total": total, "items": items, "stats": stats})
-}
-
-// channelStats 返回 deviceID → (通道总数, 推流中通道数)。
-// 设备列表的「通道数」与「流状态」两列读它：channels 表没有随设备预载的关系，
-// 不在服务端一次聚合，前端就只能逐台再打 /devices/:id/channels。
-// 设备无通道时也会写入 0，让前端拿到数字而不是 null。
-// 只统计本页设备，与列表分页口径一致。
-func channelStats(devs []models.Device) (total, streaming map[string]int) {
-	total = make(map[string]int, len(devs))
-	streaming = make(map[string]int, len(devs))
-	if len(devs) == 0 {
-		return total, streaming
-	}
-	ids := make([]string, 0, len(devs))
-	for _, d := range devs {
-		ids = append(ids, d.ID)
-		total[d.ID] = 0
-		streaming[d.ID] = 0
-	}
-	var rows []struct {
-		DeviceID  string
-		N         int
-		Streaming int
-	}
-	store.DB.Model(&models.Channel{}).
-		Select("device_id, count(*) AS n, count(*) FILTER (WHERE stream_state = 'streaming') AS streaming").
-		Where("device_id IN ?", ids).
-		Group("device_id").
-		Scan(&rows)
-	for _, r := range rows {
-		total[r.DeviceID] = r.N
-		streaming[r.DeviceID] = r.Streaming
-	}
-	return total, streaming
 }
 
 func deviceJSON(d models.Device) gin.H {
@@ -332,127 +288,6 @@ func handleRebootDevice(c *gin.Context) {
 		return
 	}
 	ok(c, nil)
-}
-
-// handleGetRebootPlan MGR-08 定时重启：读取计划。
-// 没配过也返回一份「已关闭」的空计划，前端不必把 404 当成错误处理。
-func handleGetRebootPlan(c *gin.Context) {
-	id := c.Param("id")
-	var d models.Device
-	if store.DB.First(&d, "id = ? AND deleted_at = 0", id).Error != nil {
-		fail(c, errs.ENotFound)
-		return
-	}
-	var p models.RebootPlan
-	if store.DB.First(&p, "device_id = ?", id).Error != nil {
-		ok(c, gin.H{"enabled": false, "schedule": emptyRebootSchedule(), "lastFiredKey": ""})
-		return
-	}
-	ok(c, gin.H{"enabled": p.Enabled, "schedule": p.Schedule, "lastFiredKey": p.LastFiredKey})
-}
-
-// handleSetRebootPlan MGR-08 定时重启：保存计划（设备与计划一对一，upsert）。
-func handleSetRebootPlan(c *gin.Context) {
-	id := c.Param("id")
-	var d models.Device
-	if store.DB.First(&d, "id = ? AND deleted_at = 0", id).Error != nil {
-		fail(c, errs.ENotFound)
-		return
-	}
-	var req struct {
-		Enabled  bool         `json:"enabled"`
-		Schedule models.JSONB `json:"schedule"`
-	}
-	if err := c.ShouldBindJSON(&req); err != nil {
-		fail(c, errs.EBadRequest)
-		return
-	}
-	// 不支持重启的来源（RTSP）不允许**启用**定时任务——否则到点必然失败，
-	// 每天在日志里刷一条 fail，用户会以为设备坏了。只是关掉计划时不该拦。
-	if req.Enabled && !supportsReboot(&d) {
-		fail(c, errs.EForbid.WithMsg("该设备不支持远程重启，无法启用定时任务"))
-		return
-	}
-	sch, err := normalizeRebootSchedule(req.Schedule)
-	if err != nil {
-		fail(c, errs.EBadRequest.WithMsg(err.Error()))
-		return
-	}
-	now := models.NowMilli()
-	var existing models.RebootPlan
-	if store.DB.First(&existing, "device_id = ?", id).Error == nil {
-		err = store.DB.Model(&models.RebootPlan{}).Where("id = ?", existing.ID).Updates(map[string]any{
-			"enabled": req.Enabled, "schedule": sch, "updated_at": now,
-			// 改了时间/星期就清掉触发水位：否则把时间改到"当前这一分钟"会被旧水位挡住不触发
-			"last_fired_key": "",
-		}).Error
-	} else {
-		err = store.DB.Create(&models.RebootPlan{
-			ID: "rb_" + models.NewID(), DeviceID: id,
-			Enabled: req.Enabled, Schedule: sch, CreatedAt: now, UpdatedAt: now,
-		}).Error
-	}
-	if err != nil {
-		fail(c, errs.EServerInternal)
-		return
-	}
-	ok(c, gin.H{"enabled": req.Enabled, "schedule": sch})
-}
-
-func emptyRebootSchedule() models.JSONB {
-	return models.JSONB{"days": []any{}, "time": "03:00"}
-}
-
-// supportsReboot 设备是否具备远程重启能力（PRD MGR-08「无能力置灰」）。
-// RTSP 源没有重启通道（adapter 直接返回 EForbid）；IDP 以固件上报的能力集为准；
-// GB28181/ONVIF 分别走 TeleBoot / SystemReboot，默认支持。
-func supportsReboot(d *models.Device) bool {
-	if d.Source == "rtsp" {
-		return false
-	}
-	if d.Source == "idp" && len(d.Capabilities) > 0 {
-		return d.HasCapability("reboot")
-	}
-	return true
-}
-
-// normalizeRebootSchedule 校验并归一化 {"days":[1..7],"time":"HH:MM"}。
-// days 为 ISO 星期（1=周一…7=周日），**空列表表示每天**，与录像计划 scheduleMatches 的约定一致。
-func normalizeRebootSchedule(in models.JSONB) (models.JSONB, error) {
-	hm, _ := in["time"].(string)
-	norm, ok := parseHHMM(hm)
-	if !ok {
-		return nil, fmt.Errorf("重启时间需为 HH:MM（00:00–23:59）")
-	}
-	days := []any{}
-	if raw, ok := in["days"].([]any); ok {
-		for _, v := range raw {
-			f, ok := v.(float64)
-			if !ok || f != float64(int(f)) {
-				return nil, fmt.Errorf("星期取值需为整数 1–7")
-			}
-			if n := int(f); n >= 1 && n <= 7 {
-				days = append(days, float64(n))
-			} else {
-				return nil, fmt.Errorf("星期取值需在 1–7（周一至周日）之间")
-			}
-		}
-	}
-	return models.JSONB{"days": days, "time": norm}, nil
-}
-
-// parseHHMM 校验 HH:MM 并归一化为两位格式。
-func parseHHMM(s string) (string, bool) {
-	parts := strings.Split(s, ":")
-	if len(parts) != 2 || len(parts[0]) != 2 || len(parts[1]) != 2 {
-		return "", false
-	}
-	h, e1 := strconv.Atoi(parts[0])
-	m, e2 := strconv.Atoi(parts[1])
-	if e1 != nil || e2 != nil || h < 0 || h > 23 || m < 0 || m > 59 {
-		return "", false
-	}
-	return fmt.Sprintf("%02d:%02d", h, m), true
 }
 
 // handleDeviceChannels MGR-05。
@@ -957,8 +792,8 @@ func handleOnvifAdd(c *gin.Context) {
 		ID: "ch_" + models.NewID(), DeviceID: dev.ID, ProjectID: ctx.ProjectID,
 		Idx: 1, Name: name, Enabled: true, StreamState: "idle",
 		Capabilities: dev.Capabilities,
-		Meta:         models.JSONB{"rtspMain": profileURI(info, 0), "rtspSub": profileURI(info, 1)},
-		CreatedAt:    models.NowMilli(), UpdatedAt: models.NowMilli(),
+		Meta: models.JSONB{"rtspMain": profileURI(info, 0), "rtspSub": profileURI(info, 1)},
+		CreatedAt: models.NowMilli(), UpdatedAt: models.NowMilli(),
 	}
 	store.DB.Create(&ch)
 	devsvc.ApplyDefaultRecordPlan(ch.ID, ctx.ProjectID) // ADD-09
