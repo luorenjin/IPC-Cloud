@@ -41,11 +41,12 @@ type Device struct {
 	// OnLog 可选日志钩子
 	OnLog func(format string, args ...any)
 
-	cli      mqtt.Client
-	mu       sync.Mutex
-	pushes   map[string]*pushSession
-	nextMsg  int64
-	bound    bool
+	cli     mqtt.Client
+	mu      sync.Mutex
+	pushes  map[string]*pushSession
+	nextMsg int64
+	bound   bool
+	cfg     map[string]any // 本地配置（见 config.go，键名/范围与固件规则表对齐）
 }
 
 // pushSession 一次推流会话。
@@ -247,11 +248,19 @@ func (d *Device) onMessage(_ mqtt.Client, msg mqtt.Message) {
 		d.stopPush("rec:" + sid)
 		d.ack(env, 0, "", map[string]any{})
 	case "cfg.get":
-		d.ack(env, 0, "", map[string]any{"values": map[string]any{
-			"osd.text": "SIM-IPC", "video.main.fps": 25, "video.main.bitrate": 800,
-		}})
+		// keys 为空也要回全量：平台按 cfgKeys 下发，设备只回自己拥有的键（同固件按 pattern 匹配）。
+		keys := []string{}
+		if raw, ok := data["keys"].([]any); ok {
+			for _, k := range raw {
+				if s, ok := k.(string); ok {
+					keys = append(keys, s)
+				}
+			}
+		}
+		d.ack(env, 0, "", map[string]any{"values": d.cfgGet(keys)})
 	case "cfg.set":
-		d.ack(env, 0, "", map[string]any{"rejected": []string{}})
+		values, _ := data["values"].(map[string]any)
+		d.ack(env, 0, "", map[string]any{"rejected": d.cfgSet(values)})
 	default:
 		d.ack(env, 400, "unknown type", nil)
 	}
