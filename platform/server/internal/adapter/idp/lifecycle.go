@@ -98,6 +98,14 @@ func (a *Adapter) handleHello(deviceID string, env Envelope) {
 	var caps []string
 	_ = json.Unmarshal(capsRaw, &caps)
 
+	// 默认密码是否已修改（接入规范 §5.5.2 hello.localUserChanged）。
+	// 用 comma-ok 读：字段缺失（非 IDP 来源或未实现该字段的固件）绝不能当成 false，
+	// 否则会在平台上凭空报一条「仍在用出厂默认密码」，把正常设备也说成有风险。
+	meta := models.JSONB{}
+	if pwdChanged, has := d["localUserChanged"].(bool); has {
+		meta["localUserChanged"] = pwdChanged
+	}
+
 	var dev models.Device
 	err := store.DB.First(&dev, "id = ?", deviceID).Error
 	if err != nil {
@@ -107,6 +115,7 @@ func (a *Adapter) handleHello(deviceID string, env Envelope) {
 			Identity:     models.JSONB{"deviceId": deviceID},
 			Status:       "offline",
 			Capabilities: models.StringSlice(caps),
+			Meta:         meta,
 			CreatedAt:    models.NowMilli(), UpdatedAt: models.NowMilli(),
 		}
 		if err := store.DB.Create(&dev).Error; err != nil {
@@ -116,6 +125,13 @@ func (a *Adapter) handleHello(deviceID string, env Envelope) {
 	} else {
 		dev.Model, dev.Vendor, dev.Fw, dev.Hw = model, vendor, fw, hw
 		dev.Capabilities = models.StringSlice(caps)
+		// 与报告的 metrics 共存：只覆盖 hello 带来的那几个键，不整个重置 meta
+		if dev.Meta == nil {
+			dev.Meta = models.JSONB{}
+		}
+		for k, v := range meta {
+			dev.Meta[k] = v
+		}
 		dev.UpdatedAt = models.NowMilli()
 		store.DB.Save(&dev)
 	}

@@ -1329,6 +1329,18 @@ onMounted(load)
                   </div>
                 </section>
 
+                <!-- 默认密码未改：接入规范 §590「首次绑定或本地登录必须强制修改；localUserChanged=false
+                     的设备 UI 标黄提示」。独立成块而不挂在「本地账户」分组里——分组按 supported 过滤，
+                     设备若没上报 localUser.name 会连提示一起消失，恰恰是最需要提示的场景。
+                     平台侧目前没有远程改密能力，所以只说清状态与去哪改，不放一个点不动的输入框 -->
+                <section
+                  v-if="cfgTab === 'maintain' && dev?.meta?.localUserChanged === false"
+                  class="flex items-start gap-2 rounded-signal border border-warning/30 bg-warning-soft px-3 py-2 text-xs text-warning"
+                >
+                  <Icon name="alert-triangle" :size="13" class="mt-0.5 shrink-0" />
+                  <span>{{ t('device.config.defaultPwdHint') }}</span>
+                </section>
+
                 <!-- ② 其余配置分组：键名与固件对齐，控件按类型渲染 -->
                 <section v-for="g in visibleCfgGroups" :key="g.key" class="rounded-signal border border-line">
                   <header class="border-b border-line-soft px-3 py-2 text-sm font-medium text-ink">{{ t(g.titleKey) }}</header>

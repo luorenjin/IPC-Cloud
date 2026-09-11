@@ -342,6 +342,7 @@ export default {
   // ---- Local settings (Maintenance tab) ----
   'device.config.localUser': 'Account name',
   'device.config.led': 'Enable indicator',
+  'device.config.defaultPwdHint': 'The device is still using its factory default password. Change it from the device web console (remote password change is not supported yet), so it is not exposed to password scanning.',
   // ---- Maintenance (MGR-08): reboot-now now lives only in the header toolbar; this section keeps just the schedule ----
   'device.config.scheduledReboot': 'Scheduled reboot',
   'device.config.planOn': 'Enabled',

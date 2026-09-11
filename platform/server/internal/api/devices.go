@@ -96,7 +96,8 @@ func deviceJSON(d models.Device) gin.H {
 func safeMeta(m models.JSONB) models.JSONB {
 	out := models.JSONB{}
 	for k, v := range m {
-		if k == "metrics" || k == "gbStream" || k == "gbStreamSub" || k == "gbStreamKeyMain" || strings.HasPrefix(k, "rtsp") {
+		// localUserChanged 是设备安全状态的唯一来源（接入规范 §5.5.2），非敏感，需要下发给页面
+		if k == "metrics" || k == "localUserChanged" || k == "gbStream" || k == "gbStreamSub" || k == "gbStreamKeyMain" || strings.HasPrefix(k, "rtsp") {
 			out[k] = v
 		}
 	}

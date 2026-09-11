@@ -38,6 +38,9 @@ type Device struct {
 	PlatformAddr string
 	// SnapshotJPEG 快照图片内容（assets/frame.jpg）
 	SnapshotJPEG []byte
+	// PwdChanged 对应 hello.localUserChanged（接入规范 §5.5.2）：设备本地默认密码是否已修改。
+	// 平台只在它为 false 时提示「仍在用出厂默认密码」；模拟器没有真实改密入口，只能由开关给定
+	PwdChanged bool
 	// OnLog 可选日志钩子
 	OnLog func(format string, args ...any)
 
@@ -162,6 +165,9 @@ func (d *Device) hello() {
 			"record.device.query", "record.device.play", "record.platform",
 			"reboot", "ptz",
 		},
+		// 默认密码是否已修改：false 时平台在「本地账户」区块标黄提示。
+		// 自研固件首次绑定/首次登录必须强制修改（接入规范 §590），所以这个字段要跟着 hello 一起来
+		"localUserChanged": d.PwdChanged,
 	}
 	d.publishUp("status", envOf("status.hello", d.newMsgID(), data))
 	// 平台对 hello 幂等处理（已绑定则直接刷新通道/在线态），视为已注册，

@@ -338,9 +338,12 @@ export default {
   'device.config.netSaveConfirmDetail': '重启前平台可能短暂无法连接该设备，请先确认新参数在该网段内仍能访问到平台。',
   'device.config.netSaveConfirmOk': '确认下发',
   'device.config.netSaved': '网络设置已下发，需重启设备后生效',
-  // ---- 本地设置（设备维护页签） ----
+  // ---- 本地账户（设备维护页签） ----
   'device.config.localUser': '账户名',
   'device.config.led': '启用指示灯',
+  // 接入规范 §590：默认密码未改的设备要在 UI 上标黄提示。平台暂无远程改密能力，
+  // 文案必须把“去哪里改”说清，否则用户会在这里反复找保存按钮
+  'device.config.defaultPwdHint': '设备仍在使用出厂默认密码。请登录设备自身的 Web 控制台修改（平台暂不支持远程改密），改完再接入可避免被弱口令扫描。',
   // ---- 设备维护（MGR-08）：立即重启按钮已收敛到页头工具栏，这里只保留定时重启计划 ----
   'device.config.scheduledReboot': '定时重启',
   'device.config.planOn': '已启用',
