@@ -1,6 +1,7 @@
 <script setup lang="ts">
 // 设备详情（MGR-03）：概览 / 通道 / 配置 / 诊断 / 日志（PRD 五 Tab）
 import ConfigFieldRow, { type CfgField } from '~/components/device/ConfigFieldRow.vue'
+import NetworkSettings from '~/components/device/NetworkSettings.vue'
 import { onBeforeRouteLeave } from 'vue-router'
 
 const route = useRoute()
@@ -294,6 +295,8 @@ const cfg = reactive({
   loading: false,
   phase: 'idle' as 'idle' | 'sending' | 'rereading',
   snapshot: '{}',
+  /** 与 snapshot 同源的基准值对象：分区块判断“本区块有没有未保存修改”时要按键取值 */
+  snapshotData: {} as Record<string, any>,
   data: {} as any,
   denied: [] as string[],
   supported: [] as string[],
@@ -307,6 +310,23 @@ const cfgSaving = computed(() => cfg.phase !== 'idle')
  * 用户把值改回原样也会自然回到“不脏”，不需要额外处理。
  */
 const isCfgDirty = computed(() => JSON.stringify(cfg.data) !== cfg.snapshot)
+/**
+ * 更新基准值。所有改动基准的地方都必须走这里，
+ * 保证 snapshot（字符串，用于整体脏值比较）与 snapshotData（对象，用于分区块比较）永远一致。
+ */
+function setCfgBaseline(data: Record<string, any>) {
+  cfg.snapshotData = { ...data }
+  cfg.snapshot = JSON.stringify(cfg.snapshotData)
+}
+/**
+ * 下发成功后刷新基准，但只写回这次真正参与下发的键：
+ * 网络键走独立保存与强确认，若在这里一并写回基准，用户会以为网络修改也已经生效。
+ */
+function resetBaselineAfterPush(pushedKeys: string[]) {
+  const snap: Record<string, any> = { ...cfg.snapshotData }
+  for (const k of pushedKeys) snap[k] = cfg.data[k]
+  setCfgBaseline(snap)
+}
 /** 自动回读定时器：离开页面要清掉，否则会在已卸载的组件上跑 loadCfg */
 let rereadTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -574,16 +594,29 @@ const presetHasGop = computed(() => governedKeys.value.includes('video.0.main.go
 /** 「编码格式」是主网格里唯一的单值语义字段：让它独占一行，其余四项刚好两两成行，不留孤格 */
 const VIDEO_FULL_ROW_KEYS = ['video.0.main.codec']
 
-// net.dhcp/net.ip：已进白名单（cfgKeys 可读可写），但本任务只做只读展示——
-// 现有 CfgField 类型没有只读变体，且这两项固件规则表标记为 reboot_required，改动
-// 有让设备/云端失联的风险，专属的强确认交互（DHCP 开关/IP 输入框）留给后续任务，
-// 这里不经过 CfgField/cfgGroups 通用渲染，单独走 time 页签内的手写只读区块。
-const NETWORK_READONLY_FIELDS = [
-  { key: 'net.dhcp', labelKey: 'device.config.dhcp' },
-  { key: 'net.ip', labelKey: 'device.config.ip' }
-]
-const visibleNetworkFields = computed(() => NETWORK_READONLY_FIELDS
-  .filter((f) => !cfg.supported.length || cfg.supported.includes(f.key)))
+// net.* 走独立的 NetworkSettings 区块而非通用字段渲染：这五个键改错会让设备从平台上失联，
+// 且固件规则表里全是 reboot_required，「保存」与「生效」还隔着一次重启，
+// 需要独立保存按钮 + 危险确认（见 components/device/NetworkSettings.vue）。
+//
+// 这个清单只在这里定义一次，其它地方不要再各自过滤网络键（包括 saveCfg 的提交范围）。
+const NET_KEYS = ['net.dhcp', 'net.ip', 'net.mask', 'net.gw', 'net.dns']
+/** 设备实际支持的网络键（supported 是平台白名单 ∩ 设备回包，见 api/devices.go） */
+const visibleNetKeys = computed(() => NET_KEYS
+  .filter((k) => !cfg.supported.length || cfg.supported.includes(k)))
+/** 通用「保存并下发」实际提交的键值：排除网络键，它们只走 saveNetwork() */
+function nonNetData(): Record<string, any> {
+  const out: Record<string, any> = {}
+  for (const [k, v] of Object.entries(cfg.data)) if (!NET_KEYS.includes(k)) out[k] = v
+  return out
+}
+/**
+ * 非网络键是否有未保存修改。
+ * 按钮的可用性与提示只看「它自己能提交的那部分」，与“越界只拦当前页签”同一原则——
+ * 否则只改了网络设置也会点亮「保存并下发」，用户点了却发现什么都没下发。
+ * 离开拦截仍用 isCfgDirty（看全部），那里关心的是“走了会不会丢东西”。
+ */
+const isNonNetDirty = computed(() => Object.keys(cfg.data).some(
+  (k) => !NET_KEYS.includes(k) && JSON.stringify(cfg.data[k]) !== JSON.stringify(cfg.snapshotData[k])))
 
 // 只渲染设备确实拥有的键（supported 为空时不过滤，兼容旧后端）
 const visibleCfgGroups = computed(() => cfgGroups
@@ -628,9 +661,9 @@ async function loadCfg() {
     toastApiError(e, t('device.msg.configLoadFailed'))
     cfg.data = {}
   } finally {
-    // 无论成败都要落快照：失败时把它对齐到“当前实际显示的内容”，
+    // 无论成败都要落基准：失败时把它对齐到“当前实际显示的内容”，
     // 否则一个从未加载成功的面板会一直显示“有未保存的修改”
-    cfg.snapshot = JSON.stringify(cfg.data)
+    setCfgBaseline(cfg.data)
     cfg.loading = false
   }
 }
@@ -658,14 +691,14 @@ async function saveCfg() {
   // 越界项拦在本地，但只认当前页签：其它页签遗留的坏值不在这里堵门，交给设备端 rejected 兜底即可（问题④）
   const badInTab = invalidKeysByTab.value[cfgTab.value] || []
   if (badInTab.length) return toast.warning(t('device.msg.configOutOfRange', { n: badInTab.length }))
-  // 记录“刚下发给设备的这份值”：它既是新的脏值基准（改动已交付），
-  // 也用来在回读前判断用户是否又改了东西（改了就不回读，否则会把新改动冲掉）
-  const sentSnapshot = JSON.stringify(cfg.data)
+  // 记录“刚下发给设备的这份值”：它既用来在回读前判断用户是否又改了东西，
+  // 也作为新的脏值基准（改动已交付）
+  const values = nonNetData()
   cfg.phase = 'sending'
   try {
-    const res: any = await api.put(`/devices/${devId}/config`, { values: cfg.data })
+    const res: any = await api.put(`/devices/${devId}/config`, { values })
     cfg.denied = res?.rejected || []
-    cfg.snapshot = sentSnapshot
+    resetBaselineAfterPush(Object.keys(values))
     toast.success(cfg.denied.length ? t('device.msg.configPartlyRejected') : t('device.msg.configSent'))
     // 设备侧异步生效，回读一次才能显示设备上真实的值。这段等待必须可见：
     // 旧实现是静默的 setTimeout，表单会在几秒后自己变一遍，看上去像页面出了问题。
@@ -679,6 +712,31 @@ async function saveCfg() {
   } catch (e: any) {
     toastApiError(e, t('common.saveFailed'))
     // 只有失败路径需要在这里复位：成功路径要停在 rereading 直到回读完成
+    cfg.phase = 'idle'
+  }
+}
+
+/** 网络字段回写：只改页面状态，真正的下发走 saveNetwork() 的独立流程 */
+function onNetChange(key: string, value: any) {
+  cfg.data[key] = value
+}
+
+/**
+ * 网络设置独立下发。不做 5 秒自动回读：这五个键在固件规则表里都是 reboot_required，
+ * 设备重启前回读只会拿回旧值，反而让用户以为没生效。
+ */
+async function saveNetwork() {
+  const values: Record<string, any> = {}
+  for (const k of NET_KEYS) if (k in cfg.data) values[k] = cfg.data[k]
+  cfg.phase = 'sending'
+  try {
+    const res: any = await api.put(`/devices/${devId}/config`, { values })
+    cfg.denied = res?.rejected || []
+    resetBaselineAfterPush(Object.keys(values))
+    toast.success(cfg.denied.length ? t('device.msg.configPartlyRejected') : t('device.config.netSaved'))
+  } catch (e: any) {
+    toastApiError(e, t('common.saveFailed'))
+  } finally {
     cfg.phase = 'idle'
   }
 }
@@ -1282,20 +1340,17 @@ onMounted(load)
                   </details>
                 </section>
 
-                <!-- 网络（只读）：net.dhcp/net.ip 已进白名单可读可写，但本任务不开放编辑交互，
-                     见上方 visibleNetworkFields 的注释——改网络参数有让设备/云端失联的风险，
-                     强确认交互留给后续任务，这里只展示当前值 + 需重启徽标 + 说明文案 -->
-                <section v-if="cfgTab === 'time' && visibleNetworkFields.length" class="rounded-signal border border-line">
-                  <header class="border-b border-line-soft px-3 py-2 text-sm font-medium text-ink">{{ t('device.config.group.network') }}</header>
-                  <div class="space-y-3 p-3">
-                    <p class="text-xs text-placeholder">{{ t('device.config.networkHint') }}</p>
-                    <div v-for="f in visibleNetworkFields" :key="f.key" class="flex items-center gap-3">
-                      <label class="w-24 shrink-0 text-right text-sm text-muted">{{ t(f.labelKey) }}</label>
-                      <span class="text-sm text-ink">{{ f.key === 'net.dhcp' ? (cfg.data[f.key] ? t('common.enabled') : t('common.disabled')) : String(cfg.data[f.key] ?? '—') }}</span>
-                      <UiTag v-if="cfg.rebootRequired.includes(f.key)" color="warning" plain>⚡ {{ t('device.config.rebootRequiredBadge') }}</UiTag>
-                    </div>
-                  </div>
-                </section>
+                <!-- 网络：独立保存 + 危险确认（理由见 NetworkSettings 顶部注释），不并入通用「保存并下发」 -->
+                <NetworkSettings
+                  v-if="cfgTab === 'time' && visibleNetKeys.length"
+                  :keys="visibleNetKeys"
+                  :data="cfg.data"
+                  :baseline="cfg.snapshotData"
+                  :reboot-required="cfg.rebootRequired"
+                  :saving="cfgSaving"
+                  @change="onNetChange"
+                  @save="saveNetwork"
+                />
 
                 <!-- ③ 设备维护：定时重启计划（MGR-08）。立即重启只保留页头工具栏那一个入口，这里不再重复放一个 -->
                 <section v-if="cfgTab === 'maintain'" class="rounded-signal border border-line">
@@ -1355,7 +1410,7 @@ onMounted(load)
                 <div v-if="cfgTab !== 'maintain' || visibleCfgGroups.length > 0" class="flex flex-wrap items-center gap-2">
                   <UiButton
                     variant="primary" :loading="cfgSaving"
-                    :disabled="cfgSaving || !isCfgDirty || (invalidKeysByTab[cfgTab]?.length ?? 0) > 0"
+                    :disabled="cfgSaving || !isNonNetDirty || (invalidKeysByTab[cfgTab]?.length ?? 0) > 0"
                     @click="saveCfg"
                   >{{ t('device.config.submit') }}</UiButton>
                   <UiButton :disabled="cfgSaving" @click="reloadCfg">{{ t('device.config.reload') }}</UiButton>
@@ -1363,7 +1418,7 @@ onMounted(load)
                   <span v-else-if="invalidKeysByTab[cfgTab]?.length" class="text-xs text-danger">{{ t('device.msg.configOutOfRange', { n: invalidKeysByTab[cfgTab].length }) }}</span>
                   <span v-else-if="cfg.denied.length" class="text-xs text-danger">{{ t('device.config.rejectedCount', { n: cfg.denied.length }) }}</span>
                   <!-- 没有任何反馈时按钮是灰的，用户会以为是权限/设备问题；明确告知“没改过” -->
-                  <span v-else-if="isCfgDirty" class="text-xs text-placeholder">{{ t('device.config.unsaved') }}</span>
+                  <span v-else-if="isNonNetDirty" class="text-xs text-placeholder">{{ t('device.config.unsaved') }}</span>
                 </div>
 
                 <!-- 恢复出厂设置排在保存栏之后并用危险配色：破坏性操作不该紧贴常规保存按钮，
