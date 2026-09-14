@@ -62,9 +62,16 @@ func handleListDevices(c *gin.Context) {
 	q.Count(&total)
 	var devs []models.Device
 	q.Order("created_at DESC").Offset((page - 1) * size).Limit(size).Find(&devs)
+	// 当页设备的通道聚合：列表「流状态」列按 推流中/总 渲染（口径与详情页「码流状态 x/y 路」一致），
+	// 可选的「通道数」列读 channelCount。**一条分组查询**，不要逐台打 /devices/:id/channels。
+	// 无通道的设备取到零值并照样写入（=0），前端才不会拿到 null 去猜。
+	cnt := channelStats(devs)
 	items := make([]gin.H, 0, len(devs))
 	for _, d := range devs {
-		items = append(items, deviceJSON(d))
+		it := deviceJSON(d)
+		it["channelCount"] = cnt[d.ID].total
+		it["streamingCount"] = cnt[d.ID].streaming
+		items = append(items, it)
 	}
 	// 类型状态卡片（项目全量口径，与筛选/分页无关）。
 	// 键名必须显式小写：匿名结构体没有 json tag 时，编码器直接输出 Go 字段名
@@ -79,6 +86,44 @@ func handleListDevices(c *gin.Context) {
 	store.DB.Model(&models.Device{}).Where("project_id = ? AND deleted_at = 0 AND status = 'online'", ctx.ProjectID).Count(&stats.Online)
 	stats.Offline = stats.All - stats.Online
 	ok(c, gin.H{"total": total, "items": items, "stats": stats})
+}
+
+// channelStat 单台设备的通道计数。
+type channelStat struct {
+	total     int64
+	streaming int64
+}
+
+// channelStats 一次分组查询算出当页各设备的通道数与推流中通道数。
+//
+// 为什么必须聚合而不是让前端逐台打 /devices/:id/channels：列表一页 20 台就是 20 次往返，
+// 且分页/筛选一变就要重打一遍。口径与详情页「码流状态 x/y 路」一致——都取 channels.stream_state。
+// Postgres 的 FILTER 子句让「总数」和「推流中」在一次扫描里同时得到。
+// 返回的 map 只含**有通道**的设备；调用方用零值兜底（无通道 = 0/0），不要在这里补齐，
+// 补了反而要遍历全部当页设备。
+func channelStats(devs []models.Device) map[string]channelStat {
+	out := map[string]channelStat{}
+	if len(devs) == 0 {
+		return out
+	}
+	ids := make([]string, 0, len(devs))
+	for _, d := range devs {
+		ids = append(ids, d.ID)
+	}
+	var rows []struct {
+		DeviceID  string `gorm:"column:device_id"`
+		Total     int64  `gorm:"column:total"`
+		Streaming int64  `gorm:"column:streaming"`
+	}
+	store.DB.Model(&models.Channel{}).
+		Select("device_id, count(*) AS total, count(*) FILTER (WHERE stream_state = 'streaming') AS streaming").
+		Where("device_id IN ?", ids).
+		Group("device_id").
+		Scan(&rows)
+	for _, r := range rows {
+		out[r.DeviceID] = channelStat{total: r.Total, streaming: r.Streaming}
+	}
+	return out
 }
 
 func deviceJSON(d models.Device) gin.H {
@@ -487,6 +532,14 @@ func handleDeviceChannels(c *gin.Context) {
 	ok(c, gin.H{"items": chs})
 }
 
+// handleUpdateChannel 通道更新（MGR-05）：改名 / 启用开关。
+//
+// 改名语义（「平台改名优先」）：
+//   - 传 name → 落库并置 name_overridden=true，此后设备 hello/国标目录重查都不再覆盖它；
+//   - 传 resetName=true → 恢复设备上报的通道名（取自 meta["deviceName"]）并清位；
+//     设备从未上报过名字时保持原名（清位后下次上报会自动跟随设备）。
+//
+// 两个字段同时传没有意义，resetName 优先（语义更明确，避免"改了又恢复"的歧义）。
 func handleUpdateChannel(c *gin.Context) {
 	id := c.Param("id")
 	ch0, okc := channelInProject(c, id)
@@ -494,16 +547,34 @@ func handleUpdateChannel(c *gin.Context) {
 		return
 	}
 	var req struct {
-		Name    *string `json:"name"`
-		Enabled *bool   `json:"enabled"`
+		Name      *string `json:"name"`
+		Enabled   *bool   `json:"enabled"`
+		ResetName *bool   `json:"resetName"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		fail(c, errs.EBadRequest)
 		return
 	}
 	updates := map[string]any{"updated_at": models.NowMilli()}
-	if req.Name != nil {
-		updates["name"] = *req.Name
+	if req.ResetName != nil && *req.ResetName {
+		updates["name_overridden"] = false
+		if dn, _ := ch0.Meta[devsvc.DeviceNameKey].(string); dn != "" {
+			updates["name"] = dn
+		}
+	} else if req.Name != nil {
+		name := strings.TrimSpace(*req.Name)
+		if name == "" {
+			fail(c, errs.EBadRequest.WithMsg("通道名不能为空"))
+			return
+		}
+		if len([]rune(name)) > 128 {
+			fail(c, errs.EBadRequest.WithMsg("通道名过长（最多 128 字）"))
+			return
+		}
+		// 改回设备名 = 撤销改名：不置位，否则设备后续改名就再也同步不进来了
+		dn, _ := ch0.Meta[devsvc.DeviceNameKey].(string)
+		updates["name"] = name
+		updates["name_overridden"] = (dn == "" || name != dn)
 	}
 	if req.Enabled != nil {
 		updates["enabled"] = *req.Enabled
@@ -1070,7 +1141,7 @@ func handleGbConfirm(c *gin.Context) {
 		ID: "ch_" + models.NewID(), DeviceID: dev.ID, ProjectID: ctx.ProjectID,
 		Idx: 1, Name: dev.Name, Enabled: true, StreamState: "idle",
 		Capabilities: models.StringSlice([]string{"live.main", "live.sub", "snapshot", "record.platform", "reboot"}),
-		Meta:         models.JSONB{"gbChannelId": p.GbID, "gbStream": p.GbID + "_main", "gbStreamSub": p.GbID + "_sub"},
+		Meta:         models.JSONB{"gbChannelId": p.GbID, "gbStream": p.GbID + "_main", "gbStreamSub": p.GbID + "_sub", devsvc.DeviceNameKey: dev.Name},
 		CreatedAt:    models.NowMilli(), UpdatedAt: models.NowMilli(),
 	}
 	store.DB.Create(&ch)
@@ -1193,7 +1264,7 @@ func handleOnvifAdd(c *gin.Context) {
 		ID: "ch_" + models.NewID(), DeviceID: dev.ID, ProjectID: ctx.ProjectID,
 		Idx: 1, Name: name, Enabled: true, StreamState: "idle",
 		Capabilities: dev.Capabilities,
-		Meta:         models.JSONB{"rtspMain": profileURI(info, 0), "rtspSub": profileURI(info, 1)},
+		Meta:         models.JSONB{"rtspMain": profileURI(info, 0), "rtspSub": profileURI(info, 1), devsvc.DeviceNameKey: name},
 		CreatedAt:    models.NowMilli(), UpdatedAt: models.NowMilli(),
 	}
 	store.DB.Create(&ch)
@@ -1244,10 +1315,16 @@ func handleRtspAdd(c *gin.Context) {
 		dev.Meta = models.JSONB{"rtspSub": req.SubURL}
 	}
 	store.DB.Create(&dev)
+	// 通道 Meta 单独建一份（原来是 `Meta: dev.Meta` 直接共享同一个 map），
+	// 因为要给通道额外写 meta["deviceName"]——共享的话会把通道专属键混进设备 meta。
+	chMeta := models.JSONB{devsvc.DeviceNameKey: name}
+	if sub, ok := dev.Meta["rtspSub"]; ok {
+		chMeta["rtspSub"] = sub
+	}
 	ch := models.Channel{
 		ID: "ch_" + models.NewID(), DeviceID: dev.ID, ProjectID: ctx.ProjectID,
 		Idx: 1, Name: name, Enabled: true, StreamState: "idle",
-		Capabilities: dev.Capabilities, Meta: dev.Meta,
+		Capabilities: dev.Capabilities, Meta: chMeta,
 		CreatedAt: models.NowMilli(), UpdatedAt: models.NowMilli(),
 	}
 	store.DB.Create(&ch)

@@ -11,6 +11,8 @@ const props = withDefaults(defineProps<{
 }>(), { width: 'max-w-lg', closable: true })
 
 const emit = defineEmits<{ 'update:open': [v: boolean] }>()
+// Esc 关闭：Reka 自带链路在本项目不生效，统一走 composables/useEscClose.ts 的全局栈
+useEscClose(computed(() => props.open), () => emit('update:open', false))
 </script>
 
 <template>

@@ -52,7 +52,38 @@ type HelloChannel struct {
 	Profiles []map[string]any `json:"profiles"`
 }
 
+// DeviceNameKey Channel.Meta 里保存的「设备上报通道名」。
+//
+// 平台允许改名（MGR-05）之后，`name` 就不再等于设备名了，而「恢复设备名称」需要原始值——
+// 设备名一旦被覆盖就找不回来，所以每次设备上报都把它原样记一份在这里。
+// meta 走 safeMeta 白名单（不在此表内不会被下发到接口），因此这不会泄漏到列表响应。
+const DeviceNameKey = "deviceName"
+
+// ApplyDeviceChannelName 消费一次「设备上报的通道名」。
+//
+// 语义（与前端改名弹窗一一对应）：
+//   - meta[deviceName] **永远**按最新上报刷新——它是恢复设备名称的唯一依据；
+//   - 展示用的 name 只在**平台没改过**（NameOverridden=false）时跟随设备上报更新。
+//     平台改过名的通道，设备再怎么重报也不会把名字冲掉。
+//
+// 返回是否真的改了 name（调用方可据此决定要不要 Save）。
+func ApplyDeviceChannelName(ch *models.Channel, reported string) bool {
+	if reported == "" {
+		return false
+	}
+	if ch.Meta == nil {
+		ch.Meta = models.JSONB{}
+	}
+	ch.Meta[DeviceNameKey] = reported
+	if ch.NameOverridden || ch.Name == reported {
+		return false
+	}
+	ch.Name = reported
+	return true
+}
+
 // UpsertChannels 按 hello 的 channels 覆盖通道与能力。
+// 名称走 ApplyDeviceChannelName：未改名的通道跟随设备，改过名的保留平台名。
 func UpsertChannels(deviceID, projectID string, caps []string, channels []HelloChannel) {
 	for _, hc := range channels {
 		var ch models.Channel
@@ -67,11 +98,13 @@ func UpsertChannels(deviceID, projectID string, caps []string, channels []HelloC
 				Profiles: profs, Capabilities: models.StringSlice(caps),
 				CreatedAt: models.NowMilli(), UpdatedAt: models.NowMilli(),
 			}
+			ApplyDeviceChannelName(&ch, hc.Name)
 			store.DB.Create(&ch)
 			ApplyDefaultRecordPlan(ch.ID, projectID) // ADD-09
 			ApplyDefaultAlarmRule(ch.ID, projectID)  // ADD-09
 		} else {
-			ch.Name = hc.Name
+			// 设备上报名记进 meta（恢复用），未改名的通道才跟随设备更新展示名
+			ApplyDeviceChannelName(&ch, hc.Name)
 			ch.Profiles = profs
 			ch.Capabilities = models.StringSlice(caps)
 			ch.UpdatedAt = models.NowMilli()

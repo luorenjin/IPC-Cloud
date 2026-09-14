@@ -54,7 +54,7 @@ async function doLogin() {
           <input
             v-model="username"
             type="text"
-            class="w-full bg-transparent text-sm text-ink outline-none placeholder:text-placeholder"
+            class="ipc-focus-none w-full bg-transparent text-sm text-ink outline-none placeholder:text-placeholder"
             :placeholder="t('account.login.usernamePlaceholder')"
             autocomplete="username"
           />
@@ -66,7 +66,7 @@ async function doLogin() {
           <input
             v-model="password"
             :type="showPwd ? 'text' : 'password'"
-            class="w-full bg-transparent text-sm text-ink outline-none placeholder:text-placeholder"
+            class="ipc-focus-none w-full bg-transparent text-sm text-ink outline-none placeholder:text-placeholder"
             :placeholder="t('account.login.passwordPlaceholder')"
             autocomplete="current-password"
           />

@@ -3,6 +3,7 @@
 const api = useApi()
 const route = useRoute()
 const toast = useToast()
+const confirmBox = useConfirm()
 const { t } = useI18n()
 
 // 类型中文映射见 utils/enums.ts（全站唯一来源）
@@ -12,9 +13,9 @@ const fmt = (ts: any) => new Date(Number(ts)).toLocaleString('zh-CN', { hour12: 
 // 走词条键，随语言切换；alarmKindName 只是中文兜底，不直接渲染
 const kindName = (k: string) => t(alarmKindKey(k))
 const levelInfo = (l: string) => alarmLevelInfo(l)
-// 行首色条：级别→背景色（延续告警红=高危 / 警告黄=中危 / 信息灰=低危三级语义）
-const LEVEL_BAR: Record<string, string> = { error: 'bg-danger', warn: 'bg-warning', info: 'bg-info' }
-const levelBarClass = (l: string) => LEVEL_BAR[l] || 'bg-placeholder'
+// 行首导轨的色/光晕统一由 utils/enums.ts 的 alarmRailStyle() 给出。
+// 此前这里就地再写了一份级别→色映射（bg-danger/bg-warning/bg-info），与首页告警流各自维护，
+// 已收敛：改级别配色只需动 --color-level-* 一处。
 
 // ---------- 列表状态 ----------
 const tab = ref<'all' | 'device' | 'platform'>('all')
@@ -25,6 +26,10 @@ const total = ref(0)
 const unread = useState('unreadAlarms', () => 0)
 const items = ref<any[]>([])
 const loading = ref(false)
+// 勾选的行主键（仅当前页）：用于「删除所选」，筛选/翻页时清空
+const selection = ref<string[]>([])
+// 当前筛选下的已读条数（跨全部页，服务端统计）：决定「删除已读」是否可用与待删条数
+const readTotal = ref(0)
 
 // 工具栏筛选：搜索（设备/类型，前端过滤）+ Popover（时间范围/级别/未读，级别与未读走服务端）
 const keyword = ref('')
@@ -52,17 +57,16 @@ async function loadBase() {
 async function load() {
   loading.value = true
   try {
-    const params: any = { page: page.value, pageSize: pageSize.value }
-    if (levelFilter.value) params.level = levelFilter.value
+    const params: any = { page: page.value, pageSize: pageSize.value, ...serverFilterParams() }
     if (onlyUnread.value) params.read = 'false' // 服务端: read=false → 未读
-    // tab 过滤必须交给服务端（scope）。前端只裁当前页会让 total/分页仍按全量算，
-    // 结果是页码数虚高，翻到后面全是空页。
-    if (tab.value === 'device' || tab.value === 'platform') params.scope = tab.value
     if (pendingFocus.value) params.focus = pendingFocus.value
     const res: any = await api.get('/alarms', params)
     items.value = res.items || []
     total.value = res.total || 0
     unread.value = res.unread || 0
+    // 已读条数（当前筛选、跨全部页）：去掉它前端就只能拿当前页瞎猜，
+    // 「删除已读」会变成盲盒按钮。
+    readTotal.value = res.readTotal || 0
     // 深链定位：跳到目标所在页后再拉一次；pendingFocus 只用于定位，highlightId 负责高亮
     if (pendingFocus.value && res.focusPage && res.focusPage !== page.value) {
       page.value = res.focusPage
@@ -76,6 +80,19 @@ async function load() {
   } finally {
     loading.value = false
   }
+}
+
+// 服务端筛选参数：列表、已读计数、删除三处必须用同一份。
+// tab（scope）与时间范围（fromTs）都下沉到服务端——只裁当前页会让 total/分页仍按全量算
+// （页码虚高、翻到后面全是空页），而且「删除已读」的范围无法与屏幕上的口径对齐。
+function serverFilterParams() {
+  const params: any = {}
+  if (tab.value === 'device' || tab.value === 'platform') params.scope = tab.value
+  if (levelFilter.value) params.level = levelFilter.value
+  if (rangeHours.value && rangeHours.value !== '0') {
+    params.fromTs = Date.now() - Number(rangeHours.value) * 3600e3
+  }
+  return params
 }
 
 // 深链定位：/alarms?focus=<id>（总览页「最近告警」点击）——跳到该条所在页并高亮
@@ -100,7 +117,7 @@ watch(messageCenterTick, async () => {
   document.getElementById('ipc-main')?.scrollTo({ top: 0, behavior: 'smooth' })
 })
 
-// 搜索关键字 + 时间范围：对当前页数据做前端过滤
+// 搜索关键字：对当前页数据做前端过滤（只做"找一条"的辅助，不参与总数/删除范围）
 const shownItems = computed(() => {
   let list = items.value
   const q = keyword.value.trim().toLowerCase()
@@ -114,16 +131,17 @@ const shownItems = computed(() => {
       return hay.includes(q)
     })
   }
-  if (rangeHours.value && rangeHours.value !== '0') {
-    const from = Date.now() - Number(rangeHours.value) * 3600e3
-    list = list.filter((r) => Number(r.ts) >= from)
-  }
   return list
 })
 
-watch(tab, () => { page.value = 1; load() })
-watch(levelFilter, () => { page.value = 1; load() })
-watch(onlyUnread, () => { page.value = 1; load() })
+// 筛选变化一律回到第 1 页并清空勾选：勾选是"对着当前这屏做的选择"，
+// 翻页/换筛选后行已不可见，留着会让「删除所选」删掉用户看不见的记录。
+function onFilterChange() { page.value = 1; selection.value = []; load() }
+function onPageChange() { selection.value = []; load() }
+watch(tab, onFilterChange)
+watch(levelFilter, onFilterChange)
+watch(onlyUnread, onFilterChange)
+watch(rangeHours, onFilterChange)
 
 function resetFilters() {
   keyword.value = ''
@@ -131,6 +149,7 @@ function resetFilters() {
   onlyUnread.value = false
   rangeHours.value = '0'
   page.value = 1
+  selection.value = []
   load()
 }
 
@@ -160,9 +179,83 @@ async function readAll() {
     unread.value = 0
     items.value.forEach((i) => (i.read = true))
     toast.success(t('alarm.msg.readAllOk'))
+    // 重拉一次：全部已读会改变 readTotal（否则「删除已读」的可用性停留在旧值，
+    // 刚标完已读反而删不了）
+    await load()
   } catch (e: any) {
     toastApiError(e, t('alarm.msg.actionFailed'))
   }
+}
+
+// ---------- 删除消息（ALM-06 清理已读） ----------
+// 两个入口共用一个端点 DELETE /alarms：ids = 勾选项（上限 200 条）；
+// allRead = 当前筛选下的全部已读（跨页）。删未读也是允许的：勾选是显式意图，
+// 确认框会先把"其中含 N 条未读"摆出来，而不是背地里跳过。
+
+/** 勾选框的可访问名称：告警行没有 name 字段，默认会回落到主键（al_xxx）读屏毫无意义 */
+const alarmRowLabel = (r: any) => `${kindName(r.kind)} ${fmt(r.ts)}`
+
+/** 当前筛选的中文描述，用于确认框——写清楚会删掉什么，别让"一键清理"变成盲盒 */
+function deleteScopeText() {
+  const tabText = { all: t('alarm.list.tabAll'), device: t('alarm.list.tabDevice'), platform: t('alarm.list.tabPlatform') }[tab.value]
+  const rangeText = { '0': t('alarm.list.rangeAll'), '1': t('alarm.list.range1h'), '24': t('alarm.list.range24h'), '168': t('alarm.list.range7d') }[rangeHours.value]
+  const bits = [tabText, rangeText || t('alarm.list.rangeAll')]
+  if (levelFilter.value) bits.push(t(levelInfo(levelFilter.value).labelKey))
+  return bits.join(t('alarm.list.sep'))
+}
+
+async function doDelete(body: Record<string, any>) {
+  try {
+    const res: any = await api.request('/alarms', {
+      method: 'DELETE',
+      body: { ...body, ...serverFilterParams() }
+    })
+    selection.value = []
+    const removed = res?.filesRemoved ?? 0
+    toast.success(removed > 0
+      ? t('alarm.msg.deleteOkWithFiles', { n: res?.deleted ?? 0, m: removed })
+      : t('alarm.msg.deleteOk', { n: res?.deleted ?? 0 }))
+    await load()
+    // 删完当前页可能空了（页码越界）：退回上一页，避免用户盯着空列表以为操作失败
+    if (!items.value.length && page.value > 1) {
+      page.value -= 1
+      await load()
+    }
+  } catch (e: any) {
+    toastApiError(e, t('alarm.msg.deleteFailed'))
+  }
+}
+
+async function deleteSelected() {
+  if (!selection.value.length) return
+  const unreadSel = items.value.filter((r) => selection.value.includes(r.id) && !r.read).length
+  const ok = await confirmBox.ask({
+    title: t('alarm.confirm.deleteSelectedTitle'),
+    message: t('alarm.confirm.deleteSelectedMsg', { n: selection.value.length }),
+    detail: (unreadSel
+      ? t('alarm.confirm.deleteSelectedUnread', { n: unreadSel })
+      : t('alarm.confirm.deleteSelectedDetail')) + t('alarm.confirm.deleteSnapshotNote'),
+    danger: true,
+    confirmText: t('common.delete')
+  })
+  if (!ok) return
+  await doDelete({ ids: [...selection.value] })
+}
+
+async function deleteAllRead() {
+  if (!readTotal.value) return
+  const kw = keyword.value.trim()
+  const ok = await confirmBox.ask({
+    title: t('alarm.confirm.deleteReadTitle'),
+    message: t('alarm.confirm.deleteReadMsg', { n: readTotal.value }),
+    detail: t('alarm.confirm.deleteReadDetail', { scope: deleteScopeText() }) +
+      (kw ? t('alarm.confirm.deleteReadKeywordNote') : '') +
+      t('alarm.confirm.deleteSnapshotNote'),
+    danger: true,
+    confirmText: t('common.delete')
+  })
+  if (!ok) return
+  await doDelete({ allRead: true })
 }
 
 // ---------- 详情抽屉（A16） ----------
@@ -207,6 +300,18 @@ function ruleKindsText(r: any) {
 
 // 实时告警提醒（ALM-07，WebSocket）
 useWs((ev: any) => {
+  // ALM-08 抓拍是落库后异步补的：alarm.new 到达时快照还不存在（设备抓图要一次往返），
+  // 抓图完成后后端再推 snapshot.ready。这里就地给对应行补图，不重新拉列表——
+  // 重新拉取会让正在浏览的页码/滚动位置跳动。
+  if (ev.type === 'snapshot.ready') {
+    const id = ev.data?.alarmId
+    const url = ev.data?.snapshotUrl
+    if (!id || !url) return
+    const row = items.value.find((i: any) => i.id === id)
+    if (row) row.snapshotUrl = url
+    if (detail.value?.id === id) detail.value.snapshotUrl = url // 抽屉正好开着这条
+    return
+  }
   if (ev.type !== 'alarm.new') return
   const a = ev.alarm || ev.data || {}
   toast.warning({
@@ -274,6 +379,16 @@ onMounted(async () => {
               <UiButton size="sm" variant="primary" :disabled="!unread" @click="readAll">
                 <UiIcon name="check" :size="13" />{{ t('alarm.list.readAll') }}
               </UiButton>
+              <!-- 勾选后出现的批量动作：按钮自带条数，不再另占一行提示空间 -->
+              <UiButton v-if="selection.length" size="sm" variant="dangerText" @click="deleteSelected">
+                <UiIcon name="trash" :size="13" />{{ t('alarm.list.deleteSelected', { n: selection.length }) }}
+              </UiButton>
+              <UiButton v-if="selection.length" size="sm" variant="text" @click="selection = []">
+                {{ t('alarm.list.clearSelection') }}
+              </UiButton>
+              <UiButton size="sm" variant="dangerText" :disabled="!readTotal" @click="deleteAllRead">
+                <UiIcon name="trash" :size="13" />{{ t('alarm.list.deleteRead', { n: readTotal }) }}
+              </UiButton>
             </div>
           </div>
 
@@ -294,6 +409,7 @@ onMounted(async () => {
             ]"
             :rows="shownItems" :loading="loading" :row-key="'id'" :empty="t('alarm.list.empty')"
             :highlight="highlightId"
+            selectable v-model:selection="selection" :row-label="alarmRowLabel"
           >
             <template #snapshot="{ row }">
               <button
@@ -306,12 +422,12 @@ onMounted(async () => {
             </template>
             <template #ts="{ row }">{{ fmt(row.ts) }}</template>
             <template #kind="{ row }">{{ kindName(row.kind) }}</template>
-            <!-- 级别 = 色条 + 文字标签，两者编码同一件事（红=高危 / 黄=中危 / 蓝=低危）。
-                 色条是给长列表快速扫视用的，故 aria-hidden；语义由文字标签承载，不单独依赖颜色。
+            <!-- 级别 = 导轨 + 文字标签，两者编码同一件事（红=严重 / 琥珀=警告 / 中性灰=提示）。
+                 导轨是给长列表快速扫视用的，故 aria-hidden；语义由文字标签承载，不单独依赖颜色。
                  此前色条独占一列且表头为空、无 title，既看不出含义又与级别重复。 -->
             <template #level="{ row }">
               <span class="flex items-center gap-1.5">
-                <span class="h-5 w-1 shrink-0 rounded-full" :class="levelBarClass(row.level)" aria-hidden="true" />
+                <span class="h-5 w-1 shrink-0 rounded-full" :style="alarmRailStyle(row.level)" aria-hidden="true" />
                 <UiTag :color="levelInfo(row.level).color as any">{{ t(levelInfo(row.level).labelKey) }}</UiTag>
               </span>
             </template>
@@ -331,7 +447,7 @@ onMounted(async () => {
 
           <UiPagination
             v-model:page="page" v-model:page-size="pageSize" :total="total" :page-sizes="[10, 20, 50]"
-            @update:page="load" @update:page-size="load"
+            @update:page="onPageChange" @update:page-size="onPageChange"
           />
         </div>
       </UiTabs>

@@ -37,7 +37,7 @@ const heights = { sm: 'h-7 text-xs', md: 'h-8 text-sm', lg: 'h-10 text-sm' }
     <slot name="prefix" />
     <input
       :id="id"
-      class="w-full min-w-0 bg-transparent outline-none text-body placeholder:text-placeholder disabled:cursor-not-allowed"
+      class="ipc-focus-none w-full min-w-0 bg-transparent outline-none text-body placeholder:text-placeholder disabled:cursor-not-allowed"
       :type="type" :value="modelValue" :placeholder="placeholder" :disabled="disabled" :readonly="readonly" :maxlength="maxlength" :autocomplete="autocomplete"
       :aria-invalid="invalid || undefined" :aria-describedby="ariaDescribedby"
       @input="emit('update:modelValue', ($event.target as HTMLInputElement).value)"

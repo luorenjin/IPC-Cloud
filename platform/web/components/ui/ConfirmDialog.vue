@@ -10,6 +10,9 @@ const { state, open, settle } = useConfirm()
 const inputValue = ref('')
 const canConfirm = computed(() => !state.value.inputConfirm || inputValue.value.trim() === state.value.inputConfirm)
 
+// Esc = 取消（不是「确认」），与点遮罩一致——AlertDialog 默认不响应 Esc，这里补上
+useEscClose(open, () => settle(false))
+
 watch(open, (v) => { if (!v) inputValue.value = '' })
 </script>
 

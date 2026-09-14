@@ -77,7 +77,22 @@ const srcRows = computed(() => {
 const hasAnyDevice = computed(() => srcRows.value.some((r) => r.count > 0))
 
 // ---------- 实时告警流 ----------
-function levelBar(level: string) { return alarmLevelInfo(level).cssVar }
+// 级别名：导轨本身只给颜色（aria-hidden），读屏依赖这里的文字，不让颜色成为唯一编码
+function levelName(level: string) { return t(alarmLevelInfo(level).labelKey) }
+
+/**
+ * 在线率条的样式。≥90% 正常（绿）→ ≥50% 关注（琥珀）→ 更低即危急（红）。
+ * 无设备时 onlineRate 为 null，此时不画条：
+ * 原先 width 取 ??0、background 取 ??100，同一空值在两处语义不一致（0% 宽度却涂绿）。
+ */
+const onlineBar = computed(() => {
+  const r = onlineRate.value
+  if (r === null) return null
+  return {
+    width: r + '%',
+    background: r >= 90 ? 'var(--color-success)' : r >= 50 ? 'var(--color-warning)' : 'var(--color-danger)'
+  }
+})
 
 // /dashboard 的 recentAlarms 只带 deviceId/channelId，需要名称用于展示。
 // 只查这几条用到的 id，不再为取名字全量拉 /devices + /channels。
@@ -179,11 +194,14 @@ useWs((ev: any) => {
                 class="flex w-full items-center gap-3 px-4 py-2.5 text-left text-xs transition-colors hover:bg-primary-softer"
                 @click="openAlarm(a)"
               >
-                <span class="h-6 w-1 shrink-0 rounded-full" :style="{ background: levelBar(a.level) }" />
-                <span class="w-11 shrink-0 font-mono text-placeholder">{{ fmtHm(a.ts) }}</span>
+                <!-- 级别导轨：色＋（严重档）发光，样式统一出自 utils/enums.ts -->
+                <span class="h-6 w-1 shrink-0 rounded-full" :style="alarmRailStyle(a.level)" aria-hidden="true" />
+                <span class="sr-only">{{ levelName(a.level) }}</span>
+                <!-- 时间与相对时间是值守时的主判据，不能用 placeholder 档（深底上仅 3.8:1，低于 AA 的 4.5:1） -->
+                <span class="w-11 shrink-0 font-mono text-muted">{{ fmtHm(a.ts) }}</span>
                 <span class="w-28 shrink-0 truncate font-medium text-ink">{{ a.src }}</span>
                 <span class="min-w-0 flex-1 truncate text-body">{{ a.msg }}</span>
-                <span class="shrink-0 text-placeholder">{{ ago(a.ts, t) }}</span>
+                <span class="shrink-0 text-muted">{{ ago(a.ts, t) }}</span>
               </button>
             </li>
           </ul>
@@ -199,14 +217,8 @@ useWs((ev: any) => {
               </span>
               <span v-if="offlineCount" class="text-xs text-danger">{{ t('account.dashboard.offlineDevices', { n: offlineCount }) }}</span>
             </div>
-            <div class="mt-2.5 h-1.5 overflow-hidden rounded-full bg-line">
-              <div
-                class="h-full rounded-full transition-all duration-500"
-                :style="{
-                  width: (onlineRate ?? 0) + '%',
-                  background: (onlineRate ?? 100) >= 90 ? 'var(--color-success)' : (onlineRate ?? 0) >= 50 ? 'var(--color-warning)' : 'var(--color-danger)'
-                }"
-              />
+            <div v-if="onlineBar" class="mt-2.5 h-1.5 overflow-hidden rounded-full bg-line">
+              <div class="h-full rounded-full transition-all duration-500" :style="onlineBar" />
             </div>
           </section>
 
@@ -218,7 +230,9 @@ useWs((ev: any) => {
             <div v-else class="space-y-2">
               <div v-for="r in srcRows" :key="r.key" class="flex items-center gap-2.5">
                 <span class="w-14 shrink-0 truncate text-xs text-body" :title="r.label">{{ r.label }}</span>
-                <div class="h-1.5 flex-1 overflow-hidden rounded-full bg-zone">
+                <!-- 轨道色与上方在线率条统一用 bg-line：此前用 bg-zone(#1a2222) 与卡片底(#141b1c)
+                     只差 1.05:1，轨道近乎不可见，色块像是浮空的 -->
+                <div class="h-1.5 flex-1 overflow-hidden rounded-full bg-line">
                   <div class="h-full rounded-full transition-all duration-500" :style="{ width: r.pct + '%', background: r.color }" />
                 </div>
                 <span class="w-6 shrink-0 text-right font-mono text-xs text-ink">{{ r.count }}</span>

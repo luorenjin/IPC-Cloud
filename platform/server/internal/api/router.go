@@ -133,6 +133,9 @@ func Router(hub *wshub.Hub) *gin.Engine {
 		v1.GET("/alarms/:id", AuthMiddleware(), requireProjectID(), requirePerm("view"), handleAlarmDetail)
 		v1.POST("/alarms/:id/read", AuthMiddleware(), requireProjectID(), requirePerm("view"), handleReadAlarm)
 		v1.POST("/alarms/read-all", AuthMiddleware(), requireProjectID(), requirePerm("view"), handleReadAllAlarms)
+		// 删除消息（删除所选 / 一键删除已读）。用 DELETE 而非 POST /alarms/delete：审计中间件
+		// 按 HTTP 方法归动作名，POST 会记成 create，而 "delete" 动作名原本就在角色权限项里。
+		v1.DELETE("/alarms", AuthMiddleware(), requireProjectID(), requirePerm("delete"), handleDeleteAlarms)
 
 		// 录像设置
 		v1.GET("/record-templates", AuthMiddleware(), requireProjectID(), requirePerm("view"), handleListRecordTemplates)

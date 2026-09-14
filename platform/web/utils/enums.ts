@@ -99,14 +99,37 @@ export const ALARM_KIND_OPTIONS = ['motion', 'humanoid', 'intrusion', 'linecross
   .map((v) => ({ value: v, labelKey: `enum.alarmKind.${v}` }))
 
 /** 告警级别 */
-export const ALARM_LEVEL_MAP: Record<string, { label: string; labelKey: string; color: TagColor; cssVar: string }> = {
-  error: { label: '严重', labelKey: 'enum.alarmLevel.error', color: 'danger', cssVar: 'var(--color-danger)' },
-  warn: { label: '警告', labelKey: 'enum.alarmLevel.warn', color: 'warning', cssVar: 'var(--color-warning)' },
-  info: { label: '提示', labelKey: 'enum.alarmLevel.info', color: 'info', cssVar: 'var(--color-info)' }
+export interface AlarmLevelMeta {
+  /** 中文兜底，界面渲染请用 t(labelKey) */
+  label: string
+  labelKey: string
+  /** UiTag color */
+  color: TagColor
+  /** 级别导轨底色（CSS 变量）。色值见 main.css 的 --color-level-*（与来源色/中性灰解耦） */
+  cssVar: string
+  /** 导轨外发光；只有最高档发光——「发光=最高警戒」是全站既有语言，其余档留空 */
+  glow: string
+}
+
+export const ALARM_LEVEL_MAP: Record<string, AlarmLevelMeta> = {
+  error: { label: '严重', labelKey: 'enum.alarmLevel.error', color: 'danger', cssVar: 'var(--color-level-error)', glow: '0 0 6px var(--color-level-error)' },
+  warn: { label: '警告', labelKey: 'enum.alarmLevel.warn', color: 'warning', cssVar: 'var(--color-level-warn)', glow: '' },
+  info: { label: '提示', labelKey: 'enum.alarmLevel.info', color: 'info', cssVar: 'var(--color-level-info)', glow: '' }
 }
 
 export function alarmLevelInfo(l?: string) {
   return ALARM_LEVEL_MAP[l || ''] || ALARM_LEVEL_MAP.info
+}
+
+/**
+ * 级别导轨（告警行首的竖色块）的内联样式：色 + 光晕，全站唯一来源。
+ * 首页实时告警流与消息中心列表共用，避免两处各写一份级别→色/类的映射后漂移。
+ * 导轨是扫视用的辅助编码，语义必须另有文字标签承载（列表页用 UiTag、首页用 sr-only），
+ * 不允许只靠颜色表达级别（红/琥珀对红绿色觉障碍者不可分）。
+ */
+export function alarmRailStyle(l?: string) {
+  const m = alarmLevelInfo(l)
+  return { background: m.cssVar, boxShadow: m.glow || 'none' }
 }
 
 // ---------- 状态 ----------

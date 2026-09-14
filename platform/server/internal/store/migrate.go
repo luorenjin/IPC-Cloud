@@ -1,10 +1,58 @@
 package store
 
 import (
+	"fmt"
 	"log"
 
 	"github.com/jetscam/ipccloud/server/internal/models"
 )
+
+// MigrateMilliTimestamps 把存量 created_at/updated_at 从秒统一回填为毫秒。
+//
+// 背景：CreatedAt/UpdatedAt 只写 json tag 时，GORM 对 int64 的 autoCreateTime/autoUpdateTime
+// **默认按秒**写入，而本仓代码到处显式赋 models.NowMilli()（毫秒）——两条路径混进同一列，
+// 同一列里 10 位与 13 位两种值并存（实测 devices.updated_at 全秒、channels.updated_at 秒/毫秒各半）。
+// 写入本身不报错，但任何「按 updated_at 算状态持续时长」的推导都会差三个数量级。
+// 模型现已补上 :milli 标签（见 models 包注释），存量行仍需回填。
+//
+// 判据：秒时间戳现在约 1.79e9，毫秒约 1.79e12；而 1e11 秒 ≈ 公元 5138 年，
+// 所以 value < 1e11 只可能是秒（0 与 NULL 已排除）。据此乘 1000 天然幂等：
+// 回填后的值必然 ≥ 1e11，重复启动不会二次乘。
+//
+// 表/列名取自 information_schema 而不是硬编码清单：本仓存在 `record_indices` 这类由
+// GORM 命名策略推导出的表名（不是 record_indexes），硬编码清单漏一项就会静默漏掉整张表。
+func MigrateMilliTimestamps() {
+	type tsCol struct {
+		Tbl string `gorm:"column:tbl"`
+		Col string `gorm:"column:colname"`
+	}
+	var cols []tsCol
+	if err := DB.Raw(`SELECT table_name AS tbl, column_name AS colname
+	                  FROM information_schema.columns
+	                  WHERE table_schema = 'public'
+	                    AND column_name IN ('created_at', 'updated_at')
+	                    AND data_type = 'bigint'`).Scan(&cols).Error; err != nil {
+		log.Printf("[migrate] 读取时间戳列失败，跳过毫秒回填：%v", err)
+		return
+	}
+	var total int64
+	for _, c := range cols {
+		res := DB.Exec(fmt.Sprintf(
+			`UPDATE %q SET %q = %q * 1000 WHERE %q > 0 AND %q < 100000000000`,
+			c.Tbl, c.Col, c.Col, c.Col, c.Col))
+		if res.Error != nil {
+			log.Printf("[migrate] 回填 %s.%s 失败：%v", c.Tbl, c.Col, res.Error)
+			continue
+		}
+		if res.RowsAffected > 0 {
+			log.Printf("[migrate] 回填 %s.%s %d 行（秒 → 毫秒）", c.Tbl, c.Col, res.RowsAffected)
+			total += res.RowsAffected
+		}
+	}
+	if total > 0 {
+		log.Printf("[migrate] 时间戳毫秒回填完成，共 %d 行", total)
+	}
+}
 
 // MigrateDefaultAlarmRules 为存量通道补建默认告警规则。
 //

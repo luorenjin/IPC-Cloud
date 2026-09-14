@@ -38,6 +38,7 @@ func Open(cfg *config.Config) *gorm.DB {
 		log.Fatalf("auto migrate: %v", err)
 	}
 	backfillAuditTenant()
+	MigrateMilliTimestamps()
 	return db
 }
 

@@ -30,11 +30,16 @@ function hasCap(prefix: string) {
 // 能力标签：按接入规范 §3.4 的顺序排列并中文化（未收录的标识原样显示，见 utils/enums.ts）。
 // 原来把后端原始键直接铺在中文界面上（record.device.query 等），既看不懂，
 // 也因为后端数组顺序不稳定而看不清「这台设备比那台少了什么」。
-const capItems = computed(() => sortCapabilities(caps.value).map((raw) => ({
-  raw,
-  labelKey: capabilityKey(raw),
-  known: !!CAPABILITY_MAP[raw]
-})))
+// 抽成函数是因为设备级（概览）与通道级（通道 Tab 的「能力集」列）要完全一致——
+// 两处各写一遍的话，排序或未收录标识的处理迟早会分叉。
+function capItemsOf(list: any) {
+  return sortCapabilities(Array.isArray(list) ? list : []).map((raw) => ({
+    raw,
+    labelKey: capabilityKey(raw),
+    known: !!CAPABILITY_MAP[raw]
+  }))
+}
+const capItems = computed(() => capItemsOf(caps.value))
 
 // 注意：后端 handleRebootDevice 目前对 idp 来源不做能力清单校验（有适配器就转发 cmd.reboot），
 // 这里的 idp 分支判断是前端单独收紧的保守展示，不是与后端对称的双向契约；
@@ -65,7 +70,8 @@ const temp = (v: any) => fmtTemp(v)
 //    避免出现一整块全是 — 的空壳；块内空值仍占位，保持列对齐。
 const coreRows = computed(() => {
   const d = dev.value || {}
-  const last = d.lastSeenAt || d.lastOnline
+  // 后端 deviceJSON 只发 lastSeenAt（`lastOnline` 历史上从未存在，去掉这个死兜底）
+  const last = d.lastSeenAt
   return [
     { key: 'id', label: t('device.detail.deviceId'), value: d.id },
     { key: 'model', label: t('device.detail.model'), value: d.model },
@@ -153,7 +159,8 @@ const uptimeSeg = computed(() => {
       ? { color: st.color, titleKey: 'device.detail.uptime', value: fmtDuration(up), sub: statusText }
       : { color: st.color, titleKey: 'device.detail.uptime', value: EMPTY, sub: t('device.detail.uptimeUnknown') }
   }
-  const last = d.lastSeenAt || d.lastOnline
+  // 后端 deviceJSON 只发 lastSeenAt（`lastOnline` 历史上从未存在，去掉这个死兜底）
+  const last = d.lastSeenAt
   return { color: st.color, titleKey: 'device.detail.lastOnline', value: last ? ago(last, t) : EMPTY, sub: statusText }
 })
 const streamSeg = computed(() => {
@@ -250,6 +257,18 @@ onUnmounted(() => {
 })
 
 // ================= 通道操作 =================
+// 通道预览/回放：直接复用设备列表页的 DevicePreviewModal（LIVE-01/02 + REC-01~03，
+// 弹窗内部自带 预览/回放 两个 Tab）。设备列表的操作列一直有「预览」，详情页反而没有，
+// 从「通道」Tab 往下走的自然动作缺失——这里补上，两个入口共用同一个组件，
+// 拉流、抓拍、时间轴逻辑不会出现第二份实现。
+// 通道对象是现成的（GET /devices/:id 同包返回 channels），不需要再打 /channels。
+const previewModal = reactive({ show: false, channel: null as any, tab: 'preview' as 'preview' | 'playback' })
+function openPreview(ch: any, tab: 'preview' | 'playback' = 'preview') {
+  previewModal.channel = ch
+  previewModal.tab = tab
+  previewModal.show = true
+}
+
 async function toggleCh(ch: any, val: any) {
   try {
     await api.put(`/channels/${ch.id}`, { enabled: !!val })
@@ -259,22 +278,87 @@ async function toggleCh(ch: any, val: any) {
     toastApiError(e, t('device.msg.setFailed'))
   }
 }
+// 刷新封面与抓图都是一次设备往返（抓图→上传→回写 cover_url），期间把按钮锁住避免连点，
+// 否则一次点击会排出多次往返，且后返回的响应会覆盖前一次的结果。
+const opBusy = ref('')
 async function refreshCover(ch: any) {
+  if (opBusy.value) return
+  opBusy.value = `${ch.id}:cover`
   try {
-    await api.post(`/channels/${ch.id}/cover`)
-    toast.success(t('device.msg.coverRefreshSubmitted'))
+    const res: any = await api.post(`/channels/${ch.id}/cover`)
+    // 后端（engine.RefreshCover → Snapshot）是同步抓图并回写 channels.cover_url 后返回新 url，
+    // 必须写回行数据：旧实现只弹「任务已提交」，缩略图要刷新整页才变，
+    // 用户看不出这次刷新到底有没有生效。
+    if (res?.url) ch.coverUrl = res.url
+    toast.success(t('device.msg.coverRefreshed'))
   } catch (e: any) {
     toastApiError(e, t('device.msg.opFailed'))
+  } finally {
+    opBusy.value = ''
   }
 }
 const snapDlg = reactive({ show: false, src: '' })
 async function takeSnap(ch: any) {
+  if (opBusy.value) return
+  opBusy.value = `${ch.id}:snap`
   try {
     const res: any = await api.post(`/channels/${ch.id}/snapshot`)
     snapDlg.src = res.url || res.snapshot || res.dataUrl || (typeof res === 'string' ? res : '')
     snapDlg.show = true
   } catch (e: any) {
     toastApiError(e, t('device.msg.snapFailed'))
+  } finally {
+    opBusy.value = ''
+  }
+}
+
+// 通道改名（MGR-05）。语义是「平台改名优先」：后端置 name_overridden 后，设备 hello /
+// 国标目录重查都不会再覆盖它（见 devsvc.ApplyDeviceChannelName）；「恢复设备名称」取
+// 设备每次上报都会刷新的 meta["deviceName"]。所以设备名要单独显示出来——
+// 用户得知道自己改的名字和"设备自己叫什么"分别是什么，否则「恢复」是个盲盒按钮。
+const renameDlg = reactive({
+  show: false,
+  id: '',
+  name: '',
+  deviceName: '',
+  overridden: false,
+  saving: false
+})
+function openRename(ch: any) {
+  renameDlg.id = ch.id
+  renameDlg.name = ch.name || ''
+  renameDlg.deviceName = ch.meta?.deviceName || ''
+  renameDlg.overridden = !!ch.nameOverridden
+  renameDlg.show = true
+}
+async function saveRename() {
+  const name = renameDlg.name.trim()
+  if (!name) {
+    toast.warning(t('device.channel.nameRequired'))
+    return
+  }
+  await applyChannelUpdate({ name })
+}
+async function resetRename() {
+  await applyChannelUpdate({ resetName: true })
+}
+/** 改名/恢复共用的提交：就地合并后端返回的整条通道，不重拉设备详情 */
+async function applyChannelUpdate(body: Record<string, unknown>) {
+  if (renameDlg.saving) return
+  renameDlg.saving = true
+  try {
+    const res: any = await api.put(`/channels/${renameDlg.id}`, body)
+    const c = channels.value.find((x: any) => x.id === renameDlg.id)
+    if (c) {
+      if (res?.name) c.name = res.name
+      c.nameOverridden = !!res?.nameOverridden
+    }
+    renameDlg.show = false
+    toast.success(t('device.msg.updatedOk'))
+  } catch (e: any) {
+    toastApiError(e, t('device.msg.setFailed'))
+  } finally {
+    renameDlg.saving = false
   }
 }
 
@@ -1089,12 +1173,22 @@ async function load() {
   }
 }
 
-/* 实时状态（E8）：只关心当前这台设备的事件 */
+/* 实时状态（E8）：只关心当前这台设备的事件。
+   channel.stream 由后端 devsvc.SetChannelStream 发布（起播/停播/ZLM Hook 均会发）。
+   必须消费它：概览「码流状态 x/y 路」与「通道」Tab 的流状态都直接读 channels[].streamState，
+   而 refreshMetrics 只合并 metrics/status/lastSeenAt（刻意不覆盖 channels，避免打断其它字段），
+   不订阅的话 x/y 会一直停留在进页面那一刻的快照——刚起播却显示 0/1、停播后仍显示推流中。 */
 useWs((ev: any) => {
   if (!dev.value || ev.deviceId !== dev.value.id) return
   if (ev.type === 'device.online' || ev.type === 'device.offline') {
     dev.value.status = ev.type === 'device.online' ? 'online' : 'offline'
     dev.value.lastSeenAt = ev.ts || Date.now()
+    return
+  }
+  if (ev.type === 'channel.stream') {
+    const c = channels.value.find((x: any) => x.id === ev.channelId)
+    const state = ev.data?.state
+    if (c && state) c.streamState = state
   }
 })
 
@@ -1275,23 +1369,64 @@ onMounted(load)
               { key: 'no', label: t('device.channel.no'), width: '90px', align: 'center' },
               { key: 'enabled', label: t('device.channel.enabled'), width: '90px', align: 'center' },
               { key: 'stream', label: t('device.channel.streamStatus'), width: '100px' },
+              { key: 'caps', label: t('device.detail.caps'), width: '90px', align: 'center' },
               { key: 'cover', label: t('device.channel.cover'), width: '120px' },
-              { key: 'ops', label: t('common.action'), width: '180px', ellipsis: false }
+              { key: 'ops', label: t('common.action'), width: '250px', ellipsis: false }
             ]"
             :rows="channels" :empty="t('device.channel.empty')"
           >
-            <template #no="{ row }">{{ row.channelNo ?? row.num ?? row.channel ?? '—' }}</template>
+            <!-- 通道号取 models.Channel.idx（1 起：IDP 来自 hello.channels[].ch，国标按目录顺序编号）。
+                 旧实现读 channelNo/num/channel —— 后端从未发过这三个键，该列因此恒为 —。 -->
+            <template #no="{ row }">{{ row.idx ?? '—' }}</template>
+            <!-- 通道名可点开改名（MGR-05）。做成按钮而不是再加一个「改名」动作按钮：
+                 操作列已有 4 个按钮，再加会挤爆列宽；设备列表把设备名做成链接也是同一取舍。 -->
+            <template #name="{ row }">
+              <button
+                type="button"
+                class="ipc-focus-ring group/n -mx-1 inline-flex max-w-full items-center gap-1 rounded-chrome px-1 text-left outline-none transition-colors hover:text-primary"
+                :title="t('device.channel.renameTip')"
+                @click="openRename(row)"
+              >
+                <span class="truncate">{{ row.name || EMPTY }}</span>
+                <Icon name="edit" :size="12" class="shrink-0 text-placeholder opacity-0 transition-opacity group-hover/n:opacity-100 group-focus-visible/n:opacity-100" />
+              </button>
+            </template>
             <template #enabled="{ row }">
               <UiSwitch :model-value="!!row.enabled" size="sm" :aria-label="t('device.channel.enableAria', { name: row.name || row.id })" @update:model-value="toggleCh(row, $event)" />
             </template>
             <template #stream="{ row }"><UiTag :color="streamInfo(row).color as any">{{ t(streamInfo(row).labelKey) }}</UiTag></template>
+            <!-- 能力集（PRD MGR-05）：表格里只放「几项」，点开才铺完整标签。
+                 参考设备概览的能力集写法（中文名 + 原始值 tooltip），但这里不能内联铺开——
+                 多通道设备的行高会被标签抬成一片，表格就不成表格了。 -->
+            <template #caps="{ row }">
+              <UiPopover v-if="(row.capabilities || []).length" side="bottom" align="center" width="w-72">
+                <template #trigger>
+                  <button
+                    type="button"
+                    class="ipc-focus-ring inline-flex items-center gap-1 rounded-chrome border border-line px-2 py-0.5 text-xs text-muted outline-none transition-colors hover:border-primary hover:text-primary"
+                  >
+                    {{ t('device.channel.capsCount', { n: row.capabilities.length }) }}<Icon name="chevron-down" :size="12" />
+                  </button>
+                </template>
+                <p class="mb-2 text-xs text-placeholder">{{ t('device.channel.capsTitle', { name: row.name }) }}</p>
+                <div class="flex flex-wrap gap-1.5">
+                  <UiTooltip v-for="c in capItemsOf(row.capabilities)" :key="c.raw" :label="c.known ? t('device.detail.capRaw', { cap: c.raw }) : t('device.detail.capUnknown')">
+                    <UiTag :color="c.known ? 'primary' : 'default'" plain>{{ t(c.labelKey) }}</UiTag>
+                  </UiTooltip>
+                </div>
+              </UiPopover>
+              <span v-else class="text-xs text-placeholder">{{ t('device.channel.capsEmpty') }}</span>
+            </template>
             <template #cover="{ row }">
               <img v-if="row.coverUrl" :src="row.coverUrl" class="h-8 w-14 rounded-signal object-cover" alt="">
               <span v-else class="text-xs text-placeholder">—</span>
             </template>
             <template #ops="{ row }">
-              <UiButton variant="text" size="sm" @click="refreshCover(row)">{{ t('device.channel.refreshCover') }}</UiButton>
-              <UiButton variant="text" size="sm" @click="takeSnap(row)">{{ t('device.channel.snapshot') }}</UiButton>
+              <!-- 预览/回放放在最前：这是通道行最常用的动作，管理类动作（封面/抓图）在后 -->
+              <UiButton variant="text" size="sm" @click="openPreview(row, 'preview')">{{ t('live.preview.tabPreview') }}</UiButton>
+              <UiButton variant="text" size="sm" @click="openPreview(row, 'playback')">{{ t('live.preview.tabPlayback') }}</UiButton>
+              <UiButton variant="text" size="sm" :disabled="!!opBusy" @click="refreshCover(row)">{{ t('device.channel.refreshCover') }}</UiButton>
+              <UiButton variant="text" size="sm" :disabled="!!opBusy" @click="takeSnap(row)">{{ t('device.channel.snapshot') }}</UiButton>
             </template>
           </UiTable>
         </div>
@@ -1667,6 +1802,33 @@ onMounted(load)
     <UiDialog v-model:open="snapDlg.show" :title="t('device.channel.snapTitle')" width="max-w-xl">
       <img v-if="snapDlg.src" :src="snapDlg.src" class="block w-full rounded-signal" :alt="t('device.channel.snapAlt')">
       <UiEmptyState v-else :text="t('device.channel.snapEmpty')" />
+    </UiDialog>
+
+    <!-- 通道预览 / 回放（与设备列表页共用同一弹窗组件） -->
+    <DevicePreviewModal
+      v-model="previewModal.show"
+      :device="dev"
+      :channel="previewModal.channel"
+      :initial-tab="previewModal.tab"
+    />
+
+    <!-- 通道改名（MGR-05）：「平台改名优先」，改名后设备重报不覆盖，可恢复设备名称 -->
+    <UiDialog v-model:open="renameDlg.show" :title="t('device.channel.renameTitle')" width="max-w-md">
+      <div class="space-y-3">
+        <label class="block text-xs text-muted">{{ t('device.channel.nameLabel') }}</label>
+        <UiInput v-model="renameDlg.name" :maxlength="128" @keyup.enter="saveRename" />
+        <!-- 把"设备自己叫什么"如实说出来：不然「恢复设备名称」是个盲盒按钮 -->
+        <p class="text-xs text-placeholder">
+          {{ renameDlg.deviceName ? t('device.channel.deviceNameHint', { name: renameDlg.deviceName }) : t('device.channel.deviceNameUnknown') }}
+        </p>
+        <UiButton v-if="renameDlg.overridden" variant="dangerOutline" size="sm" :disabled="renameDlg.saving" @click="resetRename">
+          {{ t('device.channel.resetName') }}
+        </UiButton>
+      </div>
+      <template #footer>
+        <UiButton @click="renameDlg.show = false">{{ t('common.cancel') }}</UiButton>
+        <UiButton variant="primary" :loading="renameDlg.saving" @click="saveRename">{{ t('common.save') }}</UiButton>
+      </template>
     </UiDialog>
 
     <!-- 编辑设备 -->

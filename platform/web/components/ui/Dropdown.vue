@@ -8,6 +8,8 @@ import {
 const props = withDefaults(defineProps<{ items: { label: string; value: string; danger?: boolean; disabled?: boolean; divided?: boolean }[]; align?: 'start' | 'end' }>(), { align: 'end' })
 const emit = defineEmits<{ select: [v: string] }>()
 const open = ref(false)
+// Esc 关闭：见 composables/useEscClose.ts
+useEscClose(open, () => { open.value = false })
 </script>
 
 <template>

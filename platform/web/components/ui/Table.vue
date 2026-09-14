@@ -23,14 +23,17 @@ const props = withDefaults(defineProps<{
   dense?: boolean
   /** 行的可读名称字段，用于复选框的可访问名称（读屏会念"选择 摄像头A"） */
   rowLabelKey?: string
+  /** 自定义行可读名称（优先于 rowLabelKey）：行里没有现成的名称字段时用它拼一个（如"移动侦测 09:21"） */
+  rowLabel?: (row: any) => string
   /** 需要高亮的行主键（深链定位用），命中行加高亮底色；null/空串表示不高亮 */
   highlight?: string | number | null
 }>(), { rowKey: 'id', loading: false, selectable: false, empty: '', dense: false, rowLabelKey: 'name', highlight: null })
 
 const emit = defineEmits<{ 'update:selection': [v: any[]] }>()
 
-/** 行名称：优先 rowLabelKey 指定字段，缺失时退回主键，保证复选框始终有名称 */
+/** 行名称：优先自定义函数，其次 rowLabelKey 指定字段，缺失时退回主键，保证复选框始终有名称 */
 function rowLabel(row: any): string {
+  if (props.rowLabel) return props.rowLabel(row)
   return String(row?.[props.rowLabelKey] ?? row?.[props.rowKey] ?? t('table.thisRow'))
 }
 

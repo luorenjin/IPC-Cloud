@@ -401,7 +401,7 @@ function onUserMenu(v: string) {
           <div class="flex h-8 w-64 items-center gap-1.5 rounded border border-line bg-canvas px-2.5 focus-within:border-primary focus-within:bg-surface">
             <Icon name="search" :size="14" class="text-placeholder" />
             <input
-              v-model="search" class="w-full bg-transparent text-sm outline-none placeholder:text-placeholder"
+              v-model="search" class="ipc-focus-none w-full bg-transparent text-sm outline-none placeholder:text-placeholder"
               :placeholder="t('nav.searchPlaceholder')" @focus="searchResults.length && (searchOpen = true)"
             />
           </div>

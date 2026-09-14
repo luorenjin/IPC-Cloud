@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jetscam/ipccloud/server/internal/adapter"
@@ -293,12 +294,19 @@ func (e *Engine) Snapshot(channelID string) (string, error) {
 		}
 		return url, nil
 	}
-	// ZLM 抓图（对正在播放的流）
+	// 其余来源：经节点 ffmpeg 直连"设备"拉流地址抽帧（config.ini 的 snap 模板）。
 	node, _ := e.Scheduler.Pick(channelID, "main")
 	if node == nil {
 		return "", errs.ENodeOffline
 	}
 	url := pullURL(&dev, &ch, "main")
+	if url == "" {
+		// gb28181 只把 RTP 推进节点，没有可供 ffmpeg 直连的拉流地址；
+		// 也不能让节点去抓自己的流——实测 getSnap 传节点自身地址（127.0.0.1 的
+		// rtmp/http-flv/rtsp 与容器别名一律）都只会拿到 config.ini 的 defaultSnap 占位图。
+		// 此前把空 url 直接交给 getSnap，回来的是 ZLM 的参数缺失错误 JSON。
+		return "", errs.EForbid.WithMsg("该来源暂不支持平台抓图")
+	}
 	zlm := media.ForNode(node)
 	b, err := zlm.GetSnap(url, 6)
 	if err != nil {
@@ -328,7 +336,10 @@ func (e *Engine) SubscribeEvents() {
 			}
 		case strings.HasPrefix(ev.Type, "alarm.") && ev.Type != "alarm.new":
 			// 适配器归一化后的设备告警（motion/tamper/io/humanoid…），按策略落库；
-			// alarm.new 是落库后的通知事件，不得再次消费（会递归放大）
+			// alarm.new 是落库后的通知事件，不得再次消费（会递归放大）。
+			// 约定：alarm.<kind> 前缀专用作设备告警的身份令牌，它等价于"这是一条要落库的告警"。
+			// 平台自发的通知（如 snapshot.ready）必须另起命名空间——用 alarm. 前缀会被这里
+			// 当成新 kind 再落一条库（曾实际发生过：补图通知变成了 kind=snapshot 的告警）。
 			e.platformEvent(ev, strings.TrimPrefix(ev.Type, "alarm."))
 		case ev.Type == "ota.progress":
 			e.taskProgress(ev)
@@ -349,7 +360,48 @@ func (e *Engine) platformEvent(ev bus.Event, kind string) {
 	if isDeviceSideKind(kind) && !channelRuleAllows(ev.ProjectID, ev.ChannelID, kind) {
 		return
 	}
-	createAlarmEvent(ev.ProjectID, ev.DeviceID, ev.ChannelID, kind, "warn", ev.Data, "")
+	// ALM-08 告警联动快照：优先用协议直传的图 URL（设备上报事件时已自行截图并上传，
+	// 如 IDP 的 event.snapshot_done），没有则由平台在落库后补抓，见 captureAlarmSnapshot。
+	direct, _ := ev.Data["snapshotUrl"].(string)
+	id := createAlarmEvent(ev.ProjectID, ev.DeviceID, ev.ChannelID, kind, "warn", ev.Data, direct)
+	// 平台侧事件（设备离线/节点离线等）与无通道的告警没有画面可抓，不补图。
+	if id != "" && direct == "" && isDeviceSideKind(kind) && ev.ChannelID != "" {
+		go e.captureAlarmSnapshot(id, ev.ProjectID, ev.DeviceID, ev.ChannelID)
+	}
+}
+
+// alarmSnapFlight 同通道抓拍单飞：多通道同时告警时避免并发打设备。
+var alarmSnapFlight sync.Map
+
+// captureAlarmSnapshot 为已落库的告警补抓拍（ALM-08）。
+//
+// 异步原因：抓拍是一次设备往返（IDP 走 MQTT 命令回执 + 设备 HTTP 上传；其它来源走节点
+// ffmpeg 拉流抽帧，超时 6s）。事件总线只有 4 个 worker，同步抓图会在告警密集时堵住总线，
+// 连带拖慢设备上下线等实时事件。
+// 先落库再补图的原因：设备事件要尽快可见（ALM-07 实时提醒），抓拍是附属产物；
+// 拿不到就留空——不填占位图、不填历史封面，避免把"不是那一刻的画面"当成告警快照。
+func (e *Engine) captureAlarmSnapshot(alarmID, projectID, deviceID, channelID string) {
+	if _, loaded := alarmSnapFlight.LoadOrStore(channelID, struct{}{}); loaded {
+		return
+	}
+	defer func() {
+		alarmSnapFlight.Delete(channelID)
+		if r := recover(); r != nil {
+			log.Printf("[alarm] 抓拍异常 channel=%s: %v", channelID, r)
+		}
+	}()
+	url, err := e.Snapshot(channelID)
+	if err != nil || url == "" {
+		log.Printf("[alarm] 未取到抓拍 channel=%s: %v", channelID, err)
+		return
+	}
+	store.DB.Model(&models.AlarmEvent{}).Where("id = ?", alarmID).Update("snapshot_url", url)
+	// 通知前端就地补图：告警推送时这张图还不存在。
+	// 事件名故意不用 alarm.* 前缀：alarm.<kind> 是适配器归一化设备告警的落库令牌
+	// （见 SubscribeEvents），平台自发的通知用该前缀会被当成一种新告警 kind 再落一条库。
+	bus.Default.Publish(bus.Event{Type: "snapshot.ready", ProjectID: projectID,
+		DeviceID: deviceID, ChannelID: channelID,
+		Data: map[string]any{"alarmId": alarmID, "snapshotUrl": url}})
 }
 
 // taskProgress 把设备上报的 ota.progress 归集为任务中心的一条任务（P-18）。

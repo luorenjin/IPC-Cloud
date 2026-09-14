@@ -42,6 +42,20 @@
   --color-danger-soft: #33130f;
   --color-info: #7c8a8d;
 
+  /* 告警级别三档导轨（ALM-01/04）——刻意不复用上面的 --color-info：
+     它不是告警专用色，同时还是 RTSP 来源色与「未知来源」的落回色（PRD §9.1 规定 RTSP=灰），
+     也被离线状态标签借用。低危告警若也取它，则「提示级」与「中性/未知」在界面上同色，
+     4px 导轨会退化成一条分隔线，色块等于没有传递任何信息。
+     分级不堆色相，而靠「色相 + 亮度 + 光」三个维度：
+       error = 红 + 外发光（沿用 system/nodes 状态点「发光=最高警戒」的既有语言）
+       warn  = 琥珀（实心、无光，克制）
+       info  = 中性可见灰（明显高于分隔线，但不带警戒色相） */
+  --color-level-error: var(--color-danger);
+  --color-level-warn: var(--color-warning);
+  /* 6.6:1 @ --color-surface；原借用 --color-info #7c8a8d（4.9:1）且与 placeholder 过近，
+     改暗为可见又不动 --color-info 的 RTSP 语义 */
+  --color-level-info: #8ea3a6;
+
   /* 第三方协议专用色系（ONVIF），独立于警戒色避免语义混淆 */
   --color-accent-onvif: #a78bfa;
   --color-accent-onvif-soft: #241f3a;
@@ -190,6 +204,21 @@ body {
 .ipc-focus-inset:focus-visible {
   outline: none;
   box-shadow: inset 0 0 0 2px var(--color-primary);
+}
+
+/*
+ * 外层已表达焦点的输入控件（Input.vue / 登录页 / 顶栏搜索）：禁用控件自身的兜底焦点环。
+ *
+ * 这些控件都是"外层容器画描边 + 内层 input 透明无边框"的结构，而上面的 :where()
+ * 兜底规则同样命中内层 input（text 类输入在任何聚焦方式下都匹配 :focus-visible），
+ * 于是在外层描边之内又画出 1px 画布色间隙 + 3px 信号色实环——"框中有框"。
+ * 内层控件继承了外层的 6px 圆角，但只有 16px 高，圆角弧线在细高比例下发散、
+ * 与外框不同心，边角看起来是碎的（这就是"内框边角离散"的成因）。
+ * 焦点可见性由外层容器的 focus-within / focused 态统一承担。
+ */
+.ipc-focus-none:focus-visible {
+  outline: none;
+  box-shadow: none;
 }
 
 /* 跳转到主内容：键盘用户不必每次都 Tab 过整个侧栏 */

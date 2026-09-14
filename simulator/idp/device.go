@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"strings"
 	"sync"
@@ -51,6 +52,8 @@ type Device struct {
 	nextMsg int64
 	bound   bool
 	cfg     map[string]any // 本地配置（见 config.go，键名/范围与固件规则表对齐）
+	// startedAt 设备开机时刻，status.report.uptime 的基准（Start 时置位）。
+	startedAt time.Time
 	// pwdHash 改密后的口令哈希（只存哈希，不存明文）；pwdChanged 是当前是否已改过默认口令
 	pwdHash    string
 	pwdChanged bool
@@ -64,6 +67,8 @@ type pushSession struct {
 // Start 连接 broker 并开始生命周期。
 func (d *Device) Start() error {
 	d.pushes = map[string]*pushSession{}
+	// 设备开机时刻：uptime 基准（重启模拟器＝重启设备，uptime 归零）
+	d.startedAt = time.Now()
 	// 运行期改密状态从启动参数接过来（默认 true=已改密），之后由 cfg.set / cfg.reset 改写
 	d.mu.Lock()
 	d.pwdChanged = d.PwdChanged
@@ -187,16 +192,31 @@ func (d *Device) hello() {
 	d.logf("hello sent")
 }
 
-// reportLoop 周期状态上报。
+// reportLoop 周期状态上报（§5.5.2 status.report）。
+//
+// 指标必须是「活」的：早先这里是四个写死的常量（uptime 恒 3600、cpu/mem/temp 恒定），
+// 于是平台详情页「在线时长」永远显示 01:00:00（用户报的死值），运行指标也不随后续上报变化，
+// 连 30s 刷新链路都看不出来。
+//
+//	uptime —— 设备侧真实运行秒数（随上报自然增长；模拟器重启＝设备重启，故归零）
+//	cpu/mem/temp —— 固定相位正弦的小幅波动，确定性、可复现（不引入随机数，避免同一份
+//	                配置两次跑出不同上报值），数值范围对应一台普通 IPC 的空载波动。
 func (d *Device) reportLoop() {
 	t := time.NewTicker(30 * time.Second)
 	defer t.Stop()
 	for range t.C {
+		up := time.Since(d.startedAt).Seconds()
 		d.publishUp("status", envOf("status.report", d.newMsgID(), map[string]any{
-			"cpu": 12.5, "mem": 41.2, "temp": 38.5, "uptime": 3600,
+			"cpu":    round1(12.5 + 4.0*math.Sin(up/37.0)),
+			"mem":    round1(41.2 + 1.5*math.Sin(up/53.0)),
+			"temp":   round1(38.5 + 1.2*math.Sin(up/41.0)),
+			"uptime": int64(up),
 		}))
 	}
 }
+
+// round1 保留一位小数（与平台侧 fmtPercent/fmtTemp 的展示精度一致）。
+func round1(v float64) float64 { return math.Round(v*10) / 10 }
 
 func (d *Device) newMsgID() string {
 	d.mu.Lock()

@@ -18,6 +18,9 @@ const props = withDefaults(defineProps<{
 
 const emit = defineEmits<{ 'update:modelValue': [v: any] }>()
 const open = ref(false)
+// Esc 关闭：见 composables/useEscClose.ts。必须走全局栈——打开下拉时焦点并不在弹层里
+// （Reka 把焦点留在触发元素上），所以给 SelectContent 挂 @keydown.esc 是收不到事件的。
+useEscClose(open, () => { open.value = false })
 const heights = { sm: 'h-7 text-xs', md: 'h-8 text-sm' }
 
 // Reka SelectItem 不允许空字符串 value：用哨兵值映射（PRD 中"全部/未分组"等选项 value 为 ''）

@@ -16,7 +16,9 @@ type Scheduler struct{}
 
 func NewScheduler() *Scheduler { return &Scheduler{} }
 
-func stickyKey(channelID, profile string) string { return fmt.Sprintf("channel:%s:%s:node", channelID, profile) }
+func stickyKey(channelID, profile string) string {
+	return fmt.Sprintf("channel:%s:%s:node", channelID, profile)
+}
 
 // Pick 为通道选择节点：优先粘性，否则选健康节点中 streams/maxStreams/weight 最小者。
 func (s *Scheduler) Pick(channelID, profile string) (*models.MediaNode, error) {
@@ -81,6 +83,17 @@ func (s *Scheduler) SetSticky(channelID, profile, nodeID string) {
 // ClearSticky 清除粘性映射。
 func (s *Scheduler) ClearSticky(channelID, profile string) {
 	_ = store.KVImpl.Del(context.Background(), stickyKey(channelID, profile))
+}
+
+// StickyNode 读粘性映射（无映射或读取失败返回空串）。
+// 用途：状态对账时判断「该通道本该在哪台节点出流」，从而区分
+// 「节点不可达、状态未知，不能动」与「节点可达但流确实没了，应复位」。
+func (s *Scheduler) StickyNode(channelID, profile string) string {
+	sid, err := store.KVImpl.Get(context.Background(), stickyKey(channelID, profile))
+	if err != nil {
+		return ""
+	}
+	return sid
 }
 
 // NodeOffline 清理节点全部映射。

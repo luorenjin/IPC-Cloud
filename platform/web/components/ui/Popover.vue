@@ -22,11 +22,10 @@ const rootOpen = computed<boolean>({
     emit('update:open', v)
   }
 })
-// Esc 由模板上的 @keydown.esc 显式关闭，不依赖 Reka 内部链路：
-// Reka 的 DismissableLayer 用 onKeyStroke('Escape') +「当前层是否栈顶」判定来派发
-// dismiss，非模态 Popover 下实测该链路不生效（焦点已在弹层内、点外部可关，唯独 Esc
-// 无反应）。WAI-ARIA APG 要求浮层支持 Esc 关闭，故在此兜底。
-// 局限：仅覆盖焦点落在弹层内的场景；焦点在触发器上时 Esc 不会关闭。
+// Esc 关闭改走 composables/useEscClose.ts 的全局栈（原来是模板上的 @keydown.esc）。
+// 换成全局栈多解决两件事：焦点在**触发器**上时 Esc 也能关（旧实现只覆盖焦点在弹层内的场景），
+// 以及「弹窗里开下拉」时 Esc 只关最上面那层而不是把弹窗一起关掉。
+useEscClose(rootOpen, () => { rootOpen.value = false })
 </script>
 
 <template>
@@ -37,7 +36,6 @@ const rootOpen = computed<boolean>({
         :side="side" :align="align" :side-offset="6"
         class="z-50 rounded-chrome border border-line bg-surface-2 p-3 shadow-pop ipc-anim-pop-in outline-none"
         :class="width"
-        @keydown.esc="rootOpen = false"
       >
         <PopoverArrow v-if="false" />
         <slot />
