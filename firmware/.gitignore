@@ -7,3 +7,4 @@ mock_state/
 .vs/
 .vscode/
 *.user
+docker/out/
