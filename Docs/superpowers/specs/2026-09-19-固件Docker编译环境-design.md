@@ -31,7 +31,7 @@
 - **累积补丁**：`国科SDK/patch/GKIPCLinuxV100R001C00SPC031.zip`（双层嵌套 zip，解开后含 `patch_install.sh`，LF 换行、标准 POSIX shell）。SPC031 的 `README.md` 自述"累积补丁版本，已合入 SPC030CP001、SPC030CP002"，所以**只需打这一个补丁**，不必按 PDF 里旧版本的说明逐个打 CP001→CP002。
 - **交叉工具链**：内置于 SDK 包 `tools/toolchains/arm-gcc6.3-linux-uclibceabi/`，宿主侧二进制（`host_bin/arm-linux-uclibceabi-gcc`）是 **x86-64 ELF 动态链接可执行文件**，不需要 32 位兼容库。
 - **多芯片支持**：SPC030 的 `configs/` 下有 `gk7202v300/ gk7205v200/ gk7205v300/ gk7605v100/` 四套配置，与硬件团队锁定的候选范围一一对应，本次四套全部纳入验证范围（见 §1 目标）。
-- **构建入口**：`build/env.sh`（环境变量）、`build/root.mk`（主 Makefile，非符号链接，是普通文件——与 PDF 描述的"`Makefile -> build/root.mk` 软链接"略有出入，实测顶层就是普通 `Makefile` 文件）。
+- **构建入口**：`build/env.sh`（环境变量）；顶层 `Makefile -> build/root.mk` **确实是符号链接**（`tar tvf` 校验为 `lrwxrwxrwx`），与 PDF 描述一致——此前一次探查误判为"普通文件"，已用 `tar tvf` 复核纠正。这进一步印证 §4.1 的命名卷决策：若直接在 Windows/NTFS 路径解包，这个顶层入口链接本身就会解不出来。
 - **本机 Docker**：Docker Desktop（WSL2 后端），容器内实测 20 核 / 7.7GB 内存可用，`ubuntu:18.04` 镜像的 apt 源（archive.ubuntu.com）**仍然可用**，`make gcc bison flex fakeroot gettext` 全部装得上，`glibc 2.27` 精确匹配 SDK 工具链下限要求。
 - **磁盘**：D 盘剩余 90GB；源码卷 ~2GB，单款芯片编译产物数 GB，四款全部编译累计预计十余 GB（具体以实测为准），仍在可用空间内——若吃紧可在切换 `CHIP` 前用 `sdk-clean` 清理上一款的中间产物。
 
@@ -95,7 +95,7 @@ SPC031 是自述的"累积补丁"（合入 CP001+CP002+2021/8-10 兼容性器件
 
 ## 5. 错误处理与边界情况
 
-- **未挂载 SDK 包**：`sdk-init` 若在 `/sdk-src` 找不到 tar.gz，报错退出并提示需要在 `docker run`/`docker compose` 命令中传入正确的宿主路径（SDK 路径含中文与全角空格字符，Dockerfile/Makefile 中所有路径处理需按此实测路径校验，不能假设 ASCII 路径）。
+- **未挂载 SDK 包**：`sdk-init` 若在 `/sdk-src` 找不到 tar.gz，报错退出并提示需要在 `docker run`/`docker compose` 命令中传入正确的宿主路径（SDK 实际路径含中文字符 `D:/JetsCam/Source/国科微/...`，Makefile 传路径给 `docker run -v` 时需原样传递、不做 ASCII 转写或裁剪）。
 - **重复 init**：卷内已有 `Makefile` 视为已初始化，`sdk-init` 默认跳过并打印提示；`FORCE=1 make sdk-init` 先清空卷再重新解包+打补丁。
 - **编译失败**：`make build` 保留 GOKE 原生的失败退出码与输出，不做额外包装掩盖错误；`firmware/docker/README`（实现阶段补充）记录常见失败（如 `make menuconfig` 需要 `-it` 交互式 TTY，非交互式 `docker compose run` 默认不带）。
 
