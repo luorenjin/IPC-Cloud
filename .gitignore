@@ -22,6 +22,9 @@ firmware/build-msvc/
 # State
 mock_state/
 
+# Superpowers SDD workspace (per-plan scratch: ledger, briefs, reports)
+.superpowers/
+
 # Go
 *.exe
 *.test
