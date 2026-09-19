@@ -1,8 +1,8 @@
 FROM ubuntu:18.04
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        make gcc bison flex fakeroot gettext bc libncurses5-dev \
-        tar gzip unzip file rsync python3 gosu ca-certificates && \
+        make gcc bison flex fakeroot gettext bc libncurses5-dev u-boot-tools gperf \
+        tar gzip unzip file rsync python3 gosu ca-certificates liblzo2-2 && \
     rm -rf /var/lib/apt/lists/*
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY scripts/sdk-init.sh /usr/local/bin/sdk-init.sh
