@@ -89,6 +89,20 @@ func getCtx(c *gin.Context) *Ctx {
 	return v.(*Ctx)
 }
 
+// hasPerm 判断上下文角色是否具备某动作权限（供处理器内做细粒度分支，不中断请求）。
+func hasPerm(ctx *Ctx, action string) bool {
+	if ctx == nil || ctx.Role == nil {
+		return false
+	}
+	acts, _ := ctx.Role.Perms["actions"].([]any)
+	for _, a := range acts {
+		if s, _ := a.(string); s == "*" || s == action {
+			return true
+		}
+	}
+	return false
+}
+
 // requirePerm 校验动作权限（ACC-05）。super "*".
 func requirePerm(action string) gin.HandlerFunc {
 	return func(c *gin.Context) {

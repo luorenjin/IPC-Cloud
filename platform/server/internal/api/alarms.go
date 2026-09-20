@@ -99,9 +99,9 @@ func handleListAlarmRules(c *gin.Context) {
 func handleCreateAlarmRule(c *gin.Context) {
 	ctx := getCtx(c)
 	var req struct {
-		ChannelIDs []string    `json:"channelIds" binding:"required"`
-		Kinds      []string    `json:"kinds" binding:"required"`
-		TemplateID string      `json:"templateId"`
+		ChannelIDs []string `json:"channelIds" binding:"required"`
+		Kinds      []string `json:"kinds" binding:"required"`
+		TemplateID string   `json:"templateId"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		fail(c, errs.EBadRequest)

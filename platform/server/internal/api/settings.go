@@ -8,10 +8,12 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 
 	"github.com/jetscam/ipccloud/server/internal/errs"
 	"github.com/jetscam/ipccloud/server/internal/models"
 	"github.com/jetscam/ipccloud/server/internal/store"
+	"github.com/jetscam/ipccloud/server/internal/task"
 )
 
 // ---------- 全局设置 SET-01 ----------
@@ -58,11 +60,11 @@ func handleIdpConfig(c *gin.Context) {
 	var idpCount int64
 	store.DB.Model(&models.Device{}).Where("source = 'idp'").Count(&idpCount)
 	ok(c, gin.H{
-		"broker":    appCfg.MQTTBroker,
-		"tls":       appCfg.MQTTTLS,
-		"caStatus":  "active",
-		"idpCount":  idpCount,
-		"crl":       []any{},
+		"broker":   appCfg.MQTTBroker,
+		"tls":      appCfg.MQTTTLS,
+		"caStatus": "active",
+		"idpCount": idpCount,
+		"crl":      []any{},
 	})
 }
 
@@ -157,21 +159,119 @@ func handleExportAuditLogs(c *gin.Context) {
 	}
 }
 
-// ---------- 任务中心 ----------
+// ---------- 任务中心 P-18 ----------
+
+// taskScope 任务查询的隔离范围：限定当前项目；无 config 权限者仅可见自己创建的任务。
+func taskScope(c *gin.Context) *gorm.DB {
+	ctx := getCtx(c)
+	q := store.DB.Model(&models.Task{}).Where("project_id = ?", ctx.ProjectID)
+	if !hasPerm(ctx, "config") {
+		q = q.Where("created_by = ?", ctx.UserID)
+	}
+	return q
+}
+
+// findTask 按归属取任务，越权或不存在统一返回 404（不泄露其他项目任务是否存在）。
+func findTask(c *gin.Context) (*models.Task, bool) {
+	var t models.Task
+	if err := taskScope(c).Where("id = ?", c.Param("id")).First(&t).Error; err != nil {
+		fail(c, errs.ENotFound.WithMsg("任务不存在"))
+		return nil, false
+	}
+	return &t, true
+}
 
 func handleGetTask(c *gin.Context) {
-	var t models.Task
-	if err := store.DB.First(&t, "id = ?", c.Param("id")).Error; err != nil {
-		fail(c, errs.ENotFound)
+	t, okk := findTask(c)
+	if !okk {
 		return
 	}
 	ok(c, t)
 }
 
+// handleListTasks 任务列表：支持 status（可传 running 聚合进行中）、type、关键字与分页。
 func handleListTasks(c *gin.Context) {
+	page, size := pageParams(c)
+	q := taskScope(c)
+	switch st := c.Query("status"); st {
+	case "":
+	case "running":
+		q = q.Where("status IN ?", []string{"pending", "running"})
+	case "finished":
+		q = q.Where("status IN ?", []string{"success", "partial"})
+	default:
+		q = q.Where("status = ?", st)
+	}
+	if ty := c.Query("type"); ty != "" {
+		q = q.Where("type = ?", ty)
+	}
+	if kw := strings.TrimSpace(c.Query("keyword")); kw != "" {
+		like := "%" + kw + "%"
+		q = q.Where("title ILIKE ? OR id ILIKE ?", like, like)
+	}
+	var total int64
+	q.Count(&total)
 	var items []models.Task
-	store.DB.Order("created_at DESC").Limit(100).Find(&items)
-	ok(c, gin.H{"items": items})
+	q.Order("created_at DESC").Offset((page - 1) * size).Limit(size).Find(&items)
+	// 顶栏红点用：当前项目进行中的任务数
+	var running int64
+	taskScope(c).Where("status IN ?", []string{"pending", "running"}).Count(&running)
+	ok(c, gin.H{"total": total, "items": items, "running": running})
+}
+
+// handleDeleteTask 删除单条任务；进行中的任务需先取消。
+func handleDeleteTask(c *gin.Context) {
+	t, okk := findTask(c)
+	if !okk {
+		return
+	}
+	if !task.IsFinal(t.Status) {
+		fail(c, errs.EBadRequest.WithMsg("任务进行中，请先取消后再删除"))
+		return
+	}
+	store.DB.Delete(&models.Task{}, "id = ?", t.ID)
+	ok(c, gin.H{"id": t.ID})
+}
+
+// handleClearTasks 批量清理任务（P-18）：仅清理终态任务，进行中的不受影响。
+// scope: finished(已完成/部分成功) | failed(失败/已取消) | all(全部终态)；beforeTs 可限定仅清理更早的任务。
+func handleClearTasks(c *gin.Context) {
+	var req struct {
+		Scope    string   `json:"scope"`
+		BeforeTs int64    `json:"beforeTs"`
+		IDs      []string `json:"ids"`
+	}
+	_ = c.ShouldBindJSON(&req)
+	q := taskScope(c)
+	if len(req.IDs) > 0 {
+		q = q.Where("id IN ?", req.IDs)
+	}
+	switch req.Scope {
+	case "finished":
+		q = q.Where("status IN ?", []string{"success", "partial"})
+	case "failed":
+		q = q.Where("status IN ?", []string{"failed", "canceled"})
+	default: // all：仍只清终态，避免误删进行中的任务
+		q = q.Where("status IN ?", []string{"success", "partial", "failed", "canceled"})
+	}
+	if req.BeforeTs > 0 {
+		q = q.Where("created_at < ?", req.BeforeTs)
+	}
+	res := q.Delete(&models.Task{})
+	ok(c, gin.H{"deleted": res.RowsAffected})
+}
+
+// handleCancelTask 取消进行中的任务。
+func handleCancelTask(c *gin.Context) {
+	t, okk := findTask(c)
+	if !okk {
+		return
+	}
+	if !taskMgr.Cancel(t.ID, "已被用户取消") {
+		fail(c, errs.EBadRequest.WithMsg("任务已结束，无法取消"))
+		return
+	}
+	ok(c, gin.H{"id": t.ID, "status": "canceled"})
 }
 
 // ---------- 仪表盘 DASH-01 ----------

@@ -1,0 +1,18 @@
+# 避免把宿主机（Windows）的依赖与构建产物复制进 Linux 镜像，
+# 否则会覆盖容器内 npm install 的结果，导致 .bin 下的 shim 指向 node.exe 而构建失败。
+node_modules
+.output
+.nuxt
+.nitro
+.cache
+dist
+
+# 开发环境产物与本地配置
+.env
+.env.*
+*.log
+.DS_Store
+.git
+.gitignore
+Dockerfile
+.dockerignore

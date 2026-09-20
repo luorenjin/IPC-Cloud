@@ -155,8 +155,12 @@ func Router(hub *wshub.Hub) *gin.Engine {
 		v1.POST("/idp/crl", AuthMiddleware(), requirePerm("config"), handleIdpCRLAdd)
 		v1.GET("/audit-logs", AuthMiddleware(), requireProjectID(), requirePerm("view"), handleListAuditLogs)
 		v1.GET("/audit-logs/export", AuthMiddleware(), requireProjectID(), requirePerm("view"), handleExportAuditLogs)
-		v1.GET("/tasks", AuthMiddleware(), handleListTasks)
-		v1.GET("/tasks/:id", AuthMiddleware(), handleGetTask)
+		// 任务中心 P-18
+		v1.GET("/tasks", AuthMiddleware(), requireProjectID(), requirePerm("view"), handleListTasks)
+		v1.GET("/tasks/:id", AuthMiddleware(), requireProjectID(), requirePerm("view"), handleGetTask)
+		v1.DELETE("/tasks/:id", AuthMiddleware(), requireProjectID(), requirePerm("view"), handleDeleteTask)
+		v1.POST("/tasks/clear", AuthMiddleware(), requireProjectID(), requirePerm("view"), handleClearTasks)
+		v1.POST("/tasks/:id/cancel", AuthMiddleware(), requireProjectID(), requirePerm("view"), handleCancelTask)
 		v1.GET("/dashboard", AuthMiddleware(), requireProjectID(), requirePerm("view"), handleDashboard)
 		v1.GET("/projects/:id/gb28181/params", AuthMiddleware(), requireProjectID(), requirePerm("view"), handleGbParams)
 	}

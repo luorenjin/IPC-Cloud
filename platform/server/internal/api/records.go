@@ -240,23 +240,28 @@ func handleRecordDownload(c *gin.Context) {
 	var node models.MediaNode
 	store.DB.Where("status = ?", "online").Order("weight DESC").First(&node)
 	files := make([]gin.H, 0, len(recs))
+	var totalSize int64
 	for _, r := range recs {
 		rel := strings.TrimPrefix(r.Path, "/")
 		url := "/media/" + rel // 前端同源代理路径
 		if node.ID != "" {
 			url = fmt.Sprintf("http://%s:%d/%s", node.PublicHost, node.HTTPPort, rel)
 		}
+		totalSize += r.Size
 		files = append(files, gin.H{"start": r.StartTs, "end": r.EndTs, "size": r.Size, "url": url})
 	}
-	t := models.Task{ID: "tk_" + models.NewID(), Type: "download", Status: "success", Progress: 100,
+	detail := fmt.Sprintf("%d 个文件，共 %s", len(files), humanSize(totalSize))
+	t := models.Task{ID: "tk_" + models.NewID(), ProjectID: ctx.ProjectID, Type: "download",
+		Title: "录像片段下载", Detail: detail, Status: "success", Progress: 100,
 		Result: models.JSONB{"projectId": ctx.ProjectID, "channelId": chID, "files": files,
-			"count": len(files), "note": "MVP：按段返回 MP4 文件，合并下载后续提供"},
+			"count": len(files), "size": totalSize, "note": "MVP：按段返回 MP4 文件，合并下载后续提供"},
 		CreatedBy: ctx.UserID, CreatedAt: models.NowMilli(), UpdatedAt: models.NowMilli()}
 	store.DB.Create(&t)
 	bus.Default.Publish(bus.Event{Type: "task.progress", ProjectID: ctx.ProjectID,
-		Data: map[string]any{"taskId": t.ID, "status": "success", "progress": 100,
-			"title": "录像片段下载", "detail": fmt.Sprintf("%d 个文件", len(files))}})
-	ok(c, gin.H{"taskId": t.ID, "files": files})
+		Data: map[string]any{"taskId": t.ID, "type": t.Type, "status": t.Status, "progress": 100,
+			"title": t.Title, "detail": t.Detail, "result": t.Result,
+			"createdAt": t.CreatedAt, "updatedAt": t.UpdatedAt}})
+	ok(c, gin.H{"taskId": t.ID, "files": files, "count": len(files), "size": totalSize})
 }
 
 // handleStorageOverview REC-07 存储概览。

@@ -135,15 +135,15 @@ type Tenant struct {
 }
 
 type Project struct {
-	ID        string         `gorm:"primaryKey;size:40" json:"id"`
-	TenantID  string         `gorm:"size:40" json:"tenantId"`
-	Name      string         `gorm:"size:128" json:"name"`
-	TZ        string         `gorm:"size:64;default:Asia/Shanghai" json:"tz"`
-	Settings  JSONB          `gorm:"type:jsonb" json:"settings"`
-	Enabled   bool           `gorm:"default:true" json:"enabled"`
-	CreatedAt int64          `json:"createdAt"`
-	UpdatedAt int64          `json:"updatedAt"`
-	SetupDone bool           `gorm:"default:false" json:"setupDone"` // ACC-02 首次向导是否完成
+	ID        string `gorm:"primaryKey;size:40" json:"id"`
+	TenantID  string `gorm:"size:40" json:"tenantId"`
+	Name      string `gorm:"size:128" json:"name"`
+	TZ        string `gorm:"size:64;default:Asia/Shanghai" json:"tz"`
+	Settings  JSONB  `gorm:"type:jsonb" json:"settings"`
+	Enabled   bool   `gorm:"default:true" json:"enabled"`
+	CreatedAt int64  `json:"createdAt"`
+	UpdatedAt int64  `json:"updatedAt"`
+	SetupDone bool   `gorm:"default:false" json:"setupDone"` // ACC-02 首次向导是否完成
 }
 
 type DeviceGroup struct {
@@ -157,14 +157,14 @@ type DeviceGroup struct {
 
 // Role 权限矩阵 + 资源范围（PRD ACC-05）。
 type Role struct {
-	ID        string  `gorm:"primaryKey;size:40" json:"id"`
-	ProjectID string  `gorm:"index;size:40" json:"projectId"`
-	Name      string  `gorm:"size:64" json:"name"`
-	Builtin   bool    `gorm:"default:false" json:"builtin"` // 超级管理员不可删改
-	Perms     JSONB   `gorm:"type:jsonb" json:"perms"`      // {"menus":[],"actions":[]}
-	Scope     JSONB   `gorm:"type:jsonb" json:"scope"`      // {"groups":[],"channels":[]} 空=全部
-	CreatedAt int64   `json:"createdAt"`
-	UpdatedAt int64   `json:"updatedAt"`
+	ID        string `gorm:"primaryKey;size:40" json:"id"`
+	ProjectID string `gorm:"index;size:40" json:"projectId"`
+	Name      string `gorm:"size:64" json:"name"`
+	Builtin   bool   `gorm:"default:false" json:"builtin"` // 超级管理员不可删改
+	Perms     JSONB  `gorm:"type:jsonb" json:"perms"`      // {"menus":[],"actions":[]}
+	Scope     JSONB  `gorm:"type:jsonb" json:"scope"`      // {"groups":[],"channels":[]} 空=全部
+	CreatedAt int64  `json:"createdAt"`
+	UpdatedAt int64  `json:"updatedAt"`
 }
 
 type User struct {
@@ -256,10 +256,10 @@ type MediaNode struct {
 	RTPRange      string `gorm:"size:64;default:30000-30100" json:"rtpRange"`
 	MaxStreams    int    `gorm:"default:200" json:"maxStreams"`
 	Streams       int    `gorm:"default:0" json:"streams"`
-	Playing       int    `gorm:"default:0" json:"playing"`   // SYS-01 当前播放路数
-	BwIn          int64  `gorm:"default:0" json:"bwIn"`      // SYS-01 入带宽 B/s
-	BwOut         int64  `gorm:"default:0" json:"bwOut"`     // SYS-01 出带宽 B/s
-	Version       string `gorm:"size:128" json:"version"`    // SYS-01 ZLM 版本（Server 头）
+	Playing       int    `gorm:"default:0" json:"playing"`      // SYS-01 当前播放路数
+	BwIn          int64  `gorm:"default:0" json:"bwIn"`         // SYS-01 入带宽 B/s
+	BwOut         int64  `gorm:"default:0" json:"bwOut"`        // SYS-01 出带宽 B/s
+	Version       string `gorm:"size:128" json:"version"`       // SYS-01 ZLM 版本（Server 头）
 	Disabled      bool   `gorm:"default:false" json:"disabled"` // 禁用（不参与调度）
 	Weight        int    `gorm:"default:100" json:"weight"`
 	Status        string `gorm:"size:16;default:offline" json:"status"`
@@ -365,10 +365,14 @@ type AuditLog struct {
 	Ts        int64  `gorm:"index" json:"ts"`
 }
 
+// Task 任务中心记录（P-18）。ProjectID 为项目隔离依据，Title/Detail 供前端直接展示。
 type Task struct {
 	ID        string `gorm:"primaryKey;size:48" json:"id"`
+	ProjectID string `gorm:"index;size:40" json:"projectId"`
 	Type      string `gorm:"size:32;index" json:"type"`
-	Status    string `gorm:"size:16" json:"status"` // running/success/partial/failed
+	Title     string `gorm:"size:128" json:"title"`
+	Detail    string `gorm:"size:255" json:"detail"`
+	Status    string `gorm:"size:16;index" json:"status"` // pending/running/success/partial/failed/canceled
 	Progress  int    `json:"progress"`
 	Result    JSONB  `gorm:"type:jsonb" json:"result"`
 	CreatedBy string `gorm:"size:40" json:"createdBy"`
@@ -420,7 +424,7 @@ type Setting struct {
 }
 
 // TableName 统一小写复数（GORM 默认，显式声明避免复数歧义）。
-func (Tenant) TableName() string { return "tenants" }
-func (IdpPreadd) TableName() string { return "idp_preadd" }
+func (Tenant) TableName() string      { return "tenants" }
+func (IdpPreadd) TableName() string   { return "idp_preadd" }
 func (GbWhitelist) TableName() string { return "gb_whitelist" }
-func (GbPending) TableName() string { return "gb_pending" }
+func (GbPending) TableName() string   { return "gb_pending" }

@@ -4,7 +4,7 @@ const api = useApi()
 const route = useRoute()
 const toast = useToast()
 const confirmBox = useConfirm()
-const { upsert: upsertTask, open: taskOpen } = useTasks()
+const { upsert: upsertTask, dropLocal: dropLocalTasks, open: taskOpen } = useTasks()
 
 const DAY = 86400000
 const fmt = (ts: any) => new Date(Number(ts)).toLocaleString('zh-CN', { hour12: false })
@@ -157,15 +157,28 @@ function onTlUp() {
 async function downloadRange(a: number, b: number) {
   const ok = await confirmBox.ask({ title: '下载录像片段', message: `将 ${fmt(a)} ~ ${fmt(b)} 的录像加入下载任务？`, confirmText: '加入任务' })
   if (!ok) return
-  const tid = 'dl_' + Date.now()
-  upsertTask({ id: tid, type: 'download', title: `下载 ${curChannelName.value} ${Math.round((b - a) / 60000)} 分钟片段`, status: 'running', progress: 0 })
+  // 先用临时 ID 占位反馈，服务端返回真实 taskId 后替换，避免本地留下无法管理的僵尸条目
+  const tmpId = 'dl_' + Date.now()
+  const title = `下载 ${curChannelName.value} ${Math.round((b - a) / 60000)} 分钟片段`
+  upsertTask({ id: tmpId, type: 'download', title, status: 'running', progress: 0 })
   taskOpen.value = true
   try {
     const res: any = await api.post(`/channels/${channelId.value}/records/download`, { start: Math.round(a), end: Math.round(b), source: source.value })
-    upsertTask({ id: tid, status: 'success', progress: 100, detail: res?.file ? '文件已生成' : '任务已提交' })
-    toast.success('下载任务已创建')
+    dropLocalTasks([tmpId])
+    const files = res?.files || []
+    upsertTask({
+      id: res?.taskId || tmpId,
+      type: 'download',
+      title,
+      status: 'success',
+      progress: 100,
+      detail: `${files.length} 个文件`,
+      result: { files },
+      createdAt: Date.now()
+    })
+    toast.success(`下载任务已创建，共 ${files.length} 个文件`)
   } catch (e: any) {
-    upsertTask({ id: tid, status: 'failed', detail: e?.msg || '创建失败' })
+    upsertTask({ id: tmpId, status: 'failed', detail: e?.msg || '创建失败' })
     toastApiError(e, '下载失败')
   }
 }

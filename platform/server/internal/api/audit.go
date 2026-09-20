@@ -13,24 +13,25 @@ import (
 
 // 资源类型映射（路径首段 → 对象类型）。
 var auditResType = map[string]string{
-	"devices":         "device",
-	"channels":        "channel",
-	"roles":           "role",
-	"users":           "user",
-	"groups":          "group",
-	"projects":        "project",
-	"media-nodes":     "node",
-	"alarm-rules":     "alarm_rule",
-	"alarm-policies":  "alarm_policy",
-	"alarm-templates": "alarm_template",
-	"record-plans":    "record_plan",
+	"devices":          "device",
+	"channels":         "channel",
+	"roles":            "role",
+	"users":            "user",
+	"groups":           "group",
+	"projects":         "project",
+	"media-nodes":      "node",
+	"alarm-rules":      "alarm_rule",
+	"alarm-policies":   "alarm_policy",
+	"alarm-templates":  "alarm_template",
+	"record-plans":     "record_plan",
 	"record-templates": "record_template",
-	"alarms":          "alarm",
-	"settings":        "setting",
-	"idp":             "idp",
-	"auth":            "session",
-	"playback":        "playback",
-	"upload":          "upload",
+	"alarms":           "alarm",
+	"tasks":            "task",
+	"settings":         "setting",
+	"idp":              "idp",
+	"auth":             "session",
+	"playback":         "playback",
+	"upload":           "upload",
 }
 
 // 动作动词段（出现在路径中即作为动作名）。
@@ -41,6 +42,7 @@ var auditVerbs = map[string]bool{
 	"ptz": true, "presets": true, "goto": true, "playback": true, "download": true,
 	"selfcheck": true, "kick": true, "read": true, "read-all": true, "reset-password": true,
 	"move-devices": true, "batch": true, "config": true, "crl": true, "password": true,
+	"clear": true, "cancel": true, "retry": true,
 }
 
 // auditSkip 这些写端点属于设备侧/系统内部/高频刷新，不计入用户操作日志。

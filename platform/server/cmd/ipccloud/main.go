@@ -23,6 +23,7 @@ import (
 	"github.com/jetscam/ipccloud/server/internal/crypto"
 	"github.com/jetscam/ipccloud/server/internal/engine"
 	"github.com/jetscam/ipccloud/server/internal/store"
+	"github.com/jetscam/ipccloud/server/internal/task"
 	"github.com/jetscam/ipccloud/server/internal/wshub"
 )
 
@@ -47,6 +48,9 @@ func main() {
 	eng.SubscribeEvents()
 	eng.StartRecordRunner()
 	eng.StartNodeStatsRunner()
+
+	// 任务中心生命周期治理（P-18）：回收僵尸任务 + 清理过期任务
+	task.StartGC()
 
 	// 适配器
 	ctx, cancel := context.WithCancel(context.Background())

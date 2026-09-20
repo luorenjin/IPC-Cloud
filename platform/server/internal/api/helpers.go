@@ -3,6 +3,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/jetscam/ipccloud/server/internal/adapter/onvif"
@@ -15,19 +16,39 @@ import (
 	"github.com/jetscam/ipccloud/server/internal/errs"
 	"github.com/jetscam/ipccloud/server/internal/media"
 	"github.com/jetscam/ipccloud/server/internal/models"
+	"github.com/jetscam/ipccloud/server/internal/task"
 )
 
 var appCfg *config.Config
 
+// taskMgr 任务中心管理器（P-18），接在默认事件总线上，进度经 WS 推送到前端。
+var taskMgr = task.New(bus.Default)
+
 // InitAPI 注入全局配置。
 func InitAPI(cfg *config.Config) { appCfg = cfg }
+
+// humanSize 字节数转可读文本（任务详情展示用）。
+func humanSize(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for v := n / unit; v >= unit && exp < 3; v /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %s", float64(n)/float64(div), []string{"KB", "MB", "GB", "TB"}[exp])
+}
 
 func cfg_SIPServerID() string { return appCfg.SIPServerID }
 func cfg_SIPDomain() string   { return appCfg.SIPDomain }
 func cfg_SIPPort() int        { return appCfg.SIPPort }
 
-func crypto_HMAC(code string) string { return crypto.HMACSHA256Hex(appCfg.JWTSecret+":vc", strings.ToUpper(code)) }
-func crypto_Enc(s string) string     { return crypto.Enc(s) }
+func crypto_HMAC(code string) string {
+	return crypto.HMACSHA256Hex(appCfg.JWTSecret+":vc", strings.ToUpper(code))
+}
+func crypto_Enc(s string) string { return crypto.Enc(s) }
 
 // toAppErr 将任意错误转为 *errs.AppError（识别 "EXXXX " 前缀）。
 func toAppErr(err error) *errs.AppError {

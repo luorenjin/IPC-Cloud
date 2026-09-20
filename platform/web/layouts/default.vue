@@ -5,7 +5,17 @@ const { user, projects, currentProject, switchProject, loadMe, logout } = useAut
 const { t, locale, setLocale } = useI18n()
 const route = useRoute()
 const router = useRouter()
-const { tasks, open: taskOpen, running: runningTasks, upsert } = useTasks()
+const {
+  tasks, open: taskOpen, loading: taskLoading, running: runningTasks,
+  upsert, load: loadTasks, remove: removeTask, clear: clearTasks, cancel: cancelTask
+} = useTasks()
+const confirm = useConfirm()
+const toast = useToast()
+
+// 抽屉内状态筛选：全部 / 进行中 / 失败
+const taskFilter = ref<'' | 'running' | 'failed'>('')
+// 展开查看下载产物的任务 id
+const taskExpanded = ref('')
 
 const unread = useState('unreadAlarms', () => 0)
 const pendingCount = useState('gbPending', () => 0)
@@ -18,7 +28,64 @@ onMounted(async () => {
   await loadMe()
   if (!user.value) return navigateTo('/login')
   refreshBadges()
+  // 任务以服务端为准：登录后先同步一次，刷新页面不再丢失
+  loadTasks().catch(() => {})
 })
+
+// 打开抽屉时按当前筛选重新拉取，保证看到的是最新数据
+watch(taskOpen, (v) => { if (v) reloadTasks() })
+watch(taskFilter, () => { if (taskOpen.value) reloadTasks() })
+
+async function reloadTasks() {
+  try {
+    await loadTasks(taskFilter.value ? { status: taskFilter.value } : {})
+  } catch {}
+}
+
+// 清理任务：finished 清已完成 / all 清全部终态（进行中的不受影响）
+async function onClearTasks(scope: 'finished' | 'all') {
+  const okd = await confirm.ask({
+    title: scope === 'finished' ? '清除已完成任务' : '清除全部任务',
+    message: scope === 'finished'
+      ? '将删除所有已完成与部分成功的任务记录。'
+      : '将删除所有已结束的任务记录（进行中的任务不受影响）。',
+    confirmText: '确认清除',
+    danger: true
+  })
+  if (!okd) return
+  try {
+    const n = await clearTasks(scope)
+    toast.success(n > 0 ? `已清除 ${n} 条任务` : '没有可清除的任务')
+  } catch (e: any) {
+    toast.error(e?.msg || '清除失败')
+  }
+}
+
+// 删除单条任务
+async function onRemoveTask(tk: any) {
+  const okd = await confirm.ask({
+    title: '删除任务',
+    message: `确认删除任务「${tk.title || tk.id}」？`,
+    danger: true
+  })
+  if (!okd) return
+  try {
+    await removeTask(tk.id)
+    toast.success('已删除')
+  } catch (e: any) {
+    toast.error(e?.msg || '删除失败')
+  }
+}
+
+// 取消进行中的任务
+async function onCancelTask(tk: any) {
+  try {
+    await cancelTask(tk.id)
+    toast.success('已取消')
+  } catch (e: any) {
+    toast.error(e?.msg || '取消失败')
+  }
+}
 
 async function refreshBadges() {
   const api = useApi()
@@ -43,7 +110,21 @@ useWs((ev: any) => {
   if (ev.type === 'gb.pending') refreshBadges()
   if (ev.type === 'task.progress') {
     const d = ev.data || {}
-    if (d.id) upsert({ id: d.id, type: d.type || 'task', title: d.title || d.id, status: d.status, progress: d.progress ?? 0, detail: d.detail })
+    // 后端统一以 taskId 下发，兼容历史 id 字段
+    const id = d.taskId || d.id
+    if (id) {
+      upsert({
+        id,
+        type: d.type || 'generic',
+        title: d.title || id,
+        status: d.status,
+        progress: d.progress ?? 0,
+        detail: d.detail,
+        result: d.result,
+        createdAt: d.createdAt || Date.now(),
+        updatedAt: d.updatedAt
+      })
+    }
   }
 })
 
@@ -100,7 +181,8 @@ const menu = computed(() => [
       { label: t('nav.roles'), path: '/system/roles' },
       { label: t('nav.nodes'), path: '/system/nodes' },
       { label: t('nav.settings'), path: '/system/settings' },
-      { label: t('nav.audit'), path: '/system/audit' }
+      { label: t('nav.audit'), path: '/system/audit' },
+      { label: t('nav.tasks'), path: '/system/tasks', badge: runningTasks() }
     ]
   }
 ])
@@ -259,21 +341,79 @@ function onUserMenu(v: string) {
 
     <!-- 任务中心抽屉（P-18） -->
     <UiDrawer v-model:open="taskOpen" :title="t('nav.tasks')">
-      <div v-if="!tasks.length" class="p-5"><UiEmptyState text="暂无任务" /></div>
+      <!-- 状态筛选 + 刷新 -->
+      <div class="flex items-center justify-between gap-2 border-b border-line-soft px-5 py-2">
+        <div class="flex gap-1">
+          <button
+            v-for="f in [{ v: '', l: '全部' }, { v: 'running', l: '进行中' }, { v: 'failed', l: '失败' }]"
+            :key="f.v"
+            class="rounded-md px-2 py-1 text-xs transition"
+            :class="taskFilter === f.v ? 'bg-primary-soft text-primary' : 'text-muted hover:text-ink'"
+            @click="taskFilter = f.v as any"
+          >{{ f.l }}</button>
+        </div>
+        <button class="text-muted transition hover:text-primary" title="刷新" @click="reloadTasks">
+          <Icon name="refresh" :size="15" />
+        </button>
+      </div>
+
+      <div v-if="taskLoading && !tasks.length" class="p-5 text-center text-sm text-placeholder">加载中…</div>
+      <div v-else-if="!tasks.length" class="p-5"><UiEmptyState text="暂无任务" /></div>
       <ul v-else class="divide-y divide-line-soft">
-        <li v-for="tk in tasks" :key="tk.id" class="px-5 py-3">
+        <li v-for="tk in tasks" :key="tk.id" class="group px-5 py-3">
           <div class="flex items-center justify-between gap-2">
-            <span class="truncate text-sm text-ink">{{ tk.title }}</span>
-            <UiTag :color="tk.status === 'success' ? 'success' : tk.status === 'failed' ? 'danger' : tk.status === 'partial' ? 'warning' : 'primary'">
-              {{ tk.status === 'running' ? '进行中' : tk.status === 'pending' ? '排队中' : tk.status === 'success' ? '完成' : tk.status === 'failed' ? '失败' : '部分成功' }}
-            </UiTag>
+            <span class="truncate text-sm text-ink">{{ tk.title || tk.id }}</span>
+            <div class="flex shrink-0 items-center gap-1">
+              <!-- 操作区：进行中可取消，已结束可删除 -->
+              <button
+                v-if="!isTaskFinal(tk.status)"
+                class="opacity-0 transition group-hover:opacity-100 text-muted hover:text-warning"
+                title="取消任务"
+                @click="onCancelTask(tk)"
+              ><Icon name="x" :size="14" /></button>
+              <button
+                v-else
+                class="opacity-0 transition group-hover:opacity-100 text-muted hover:text-danger"
+                title="删除任务"
+                @click="onRemoveTask(tk)"
+              ><Icon name="trash" :size="14" /></button>
+              <UiTag :color="taskTagColor(tk.status)">{{ taskStatusText(tk.status) }}</UiTag>
+            </div>
           </div>
           <div class="mt-2 h-1 overflow-hidden rounded-full bg-line">
             <div class="h-full rounded-full bg-primary transition-all" :style="{ width: (tk.progress || 0) + '%' }" />
           </div>
-          <p v-if="tk.detail" class="mt-1 text-xs text-placeholder">{{ tk.detail }}</p>
+          <div class="mt-1 flex items-center justify-between gap-2">
+            <p class="truncate text-xs text-placeholder">{{ tk.detail || taskTypeText(tk.type) }}</p>
+            <!-- 下载类任务：展开取产物链接 -->
+            <button
+              v-if="tk.type === 'download' && (tk.result?.files || []).length"
+              class="shrink-0 text-xs text-primary hover:underline"
+              @click="taskExpanded = taskExpanded === tk.id ? '' : tk.id"
+            >{{ taskExpanded === tk.id ? '收起' : `文件 ${tk.result.files.length}` }}</button>
+          </div>
+          <ul v-if="taskExpanded === tk.id" class="mt-2 space-y-1 rounded-md bg-zone p-2">
+            <li v-for="(f, i) in tk.result?.files || []" :key="i" class="flex items-center justify-between gap-2 text-xs">
+              <span class="truncate text-muted">片段 {{ i + 1 }}</span>
+              <a :href="f.url" target="_blank" download class="flex shrink-0 items-center gap-1 text-primary hover:underline">
+                <Icon name="download" :size="12" />下载
+              </a>
+            </li>
+          </ul>
         </li>
       </ul>
+
+      <template #footer>
+        <div class="flex items-center justify-between gap-2">
+          <div class="flex gap-2">
+            <UiButton size="sm" @click="onClearTasks('finished')">清除已完成</UiButton>
+            <UiButton size="sm" variant="danger" @click="onClearTasks('all')">全部清除</UiButton>
+          </div>
+          <button class="text-xs text-primary hover:underline" @click="taskOpen = false; router.push('/system/tasks')">
+            查看全部 →
+          </button>
+        </div>
+      </template>
     </UiDrawer>
   </div>
 </template>
