@@ -1,0 +1,20 @@
+{
+  // server/** 的服务端类型上下文（Nuxt 官方约定：指向 .nuxt 生成的服务端 tsconfig）。
+  //
+  // 背景：本仓 platform/web 之前没有任何 tsconfig，编辑器只能把 server/**/*.ts 当成
+  // "孤立文件"用默认库推断，于是 `defineNitroPlugin`（Nitro 自动导入）与
+  // `import.meta.dev`（nitropack 的 ImportMeta 扩展）双双报"找不到名称"。
+  // 这两条**只影响编辑器/类型提示，不影响运行与构建**（auto-import 由 Nitro 打包时注入，
+  // import.meta.dev 亦在构建期被静态替换）。
+  //
+  // `.nuxt` 由 `nuxt prepare` / `npm run build` / `nuxt dev` 生成（已在 .gitignore 中）。
+  // include 刻意收窄到 server 目录 + Nitro 全局类型声明：基类配置的 include 是 `../**/*`
+  // （整个 web），照搬会把 pages/components 也拉进这个服务端项目，反而用错类型的上下文。
+  "extends": "../.nuxt/tsconfig.server.json",
+  "include": [
+    "./**/*.ts",
+    "../.nuxt/types/nitro.d.ts",
+    "../.nuxt/types/nitro-nuxt.d.ts"
+  ],
+  "exclude": ["../node_modules", "../.output", "../.nuxt/dist"]
+}
