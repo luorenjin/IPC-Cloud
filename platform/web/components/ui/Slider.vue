@@ -23,7 +23,7 @@ const emit = defineEmits<{ 'update:modelValue': [v: number] }>()
       <SliderRange class="absolute h-full rounded-full bg-primary" />
     </SliderTrack>
     <SliderThumb
-      class="block h-3.5 w-3.5 rounded-full border-2 border-primary bg-surface shadow outline-none transition-transform hover:scale-110"
+      class="block h-3.5 w-3.5 rounded-full border-2 border-primary bg-surface shadow outline-none ipc-focus-ring transition-transform hover:scale-110"
     />
   </SliderRoot>
 </template>

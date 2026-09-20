@@ -86,7 +86,8 @@ func AuditMiddleware() gin.HandlerFunc {
 			target = resType + ":" + resID
 		}
 		log := models.AuditLog{
-			ID: "lg_" + models.NewID(), UserID: userID, Username: username, ProjectID: projectID,
+			ID: "lg_" + models.NewID(), UserID: userID, Username: username,
+			TenantID: ctx.TenantID, ProjectID: projectID,
 			Action: action, Target: target, Result: result, IP: c.ClientIP(),
 			Detail: models.JSONB{"method": m, "path": fullPath, "status": status},
 			Ts:     models.NowMilli(),

@@ -1,225 +1,258 @@
 <script setup lang="ts">
-// 项目首页 / 仪表盘：严格对齐图 3（项目标题头 + 辅助快捷链 + 7大应用图标卡片矩阵 + 下方监控看板）
+// 首页「值守总览」（DASH-01/02）。
+//
+// 信息层级：值班员真正要看的是"哪台离线了、刚才报了什么警"，
+// 因此实时告警流占主位；在线率等汇总指标压缩为一行紧凑指标条。
+// 不再重复侧栏导航（原「功能入口」7 面板与侧栏 1:1 重复，纯占面积不给新信息）。
 const api = useApi()
 const router = useRouter()
-const { currentProject, user } = useAuth()
-const dash = ref<any>(null)
+const { currentProject } = useAuth()
+const { t } = useI18n()
 
-// 来源分布
-const srcMeta: Record<string, { label: string; color: string; tag: string }> = {
-  idp: { label: '自有设备', color: 'var(--color-src-idp)', tag: 'idp' },
-  gb28181: { label: '国标', color: 'var(--color-src-gb)', tag: 'gb' },
-  onvif: { label: 'ONVIF', color: 'var(--color-src-onvif)', tag: 'onvif' },
-  rtsp: { label: 'RTSP', color: 'var(--color-src-rtsp)', tag: 'rtsp' }
+// 变量名不用 dash——会遮蔽 utils/format 自动导入的 dash() 空值兜底函数
+const dashboard = ref<any>(null)
+const loading = ref(true)
+const loadErr = ref('')
+
+async function load(silent = false) {
+  if (!silent) loading.value = true
+  loadErr.value = ''
+  try {
+    dashboard.value = await api.get('/dashboard')
+  } catch (e: any) {
+    // 首页整体加载失败要给出可重试的错误态，而不是留一片空白
+    loadErr.value = e?.msg || t('account.msg.dashboardLoadFailed')
+  } finally {
+    loading.value = false
+  }
 }
-const srcRows = computed(() =>
-  Object.keys(srcMeta).map((k) => ({
-    key: k, label: srcMeta[k].label, color: srcMeta[k].color, tag: srcMeta[k].tag,
-    count: dash.value?.bySource?.[k] ?? 0
-  })))
 
+// ---------- 汇总指标（DASH-01 六项） ----------
 const onlineRate = computed(() => {
-  const t = dash.value?.deviceTotal || 0
-  const o = dash.value?.deviceOnline || 0
-  return t ? ((o / t) * 100).toFixed(1) + '%' : '-'
+  const t = dashboard.value?.deviceTotal || 0
+  const o = dashboard.value?.deviceOnline || 0
+  return t ? Math.round((o / t) * 100) : null
+})
+const offlineCount = computed(() => {
+  const t = dashboard.value?.deviceTotal || 0
+  const o = dashboard.value?.deviceOnline || 0
+  return Math.max(0, t - o)
+})
+/** 节点健康：全部在线为正常，否则给出离线台数 */
+const nodeSummary = computed(() => {
+  const list = dashboard.value?.nodes || []
+  if (!list.length) return { text: t('account.dashboard.nodeUnset'), tone: 'muted' }
+  const off = list.filter((n: any) => n.status !== 'online').length
+  return off
+    ? { text: t('account.dashboard.nodeOffline', { off, total: list.length }), tone: 'danger' }
+    : { text: t('account.dashboard.nodeHealthy', { n: list.length }), tone: 'success' }
 })
 
-const alarmRows = computed(() => (dash.value?.recentAlarms || []).slice(0, 8).map((a: any) => ({
+/** 指标条：数值为 null 表示后端未提供，显示 — 而不是编造 0 */
+const metrics = computed(() => [
+  { label: t('account.dashboard.deviceTotal'), value: dashboard.value?.deviceTotal ?? null, path: '/devices' },
+  { label: t('account.dashboard.deviceOnline'), value: dashboard.value?.deviceOnline ?? null, tone: 'success', path: '/devices?status=online' },
+  { label: t('account.dashboard.deviceOffline'), value: dashboard.value ? offlineCount.value : null, tone: offlineCount.value ? 'danger' : undefined, path: '/devices?status=offline' },
+  { label: t('account.dashboard.channelTotal'), value: dashboard.value?.channelTotal ?? null, path: '/live' },
+  { label: t('account.dashboard.playing'), value: dashboard.value?.playing ?? null, tone: 'primary', path: '/live' },
+  { label: t('account.dashboard.alarmToday'), value: dashboard.value?.alarmToday ?? null, tone: dashboard.value?.alarmToday ? 'warning' : undefined, path: '/alarms' }
+])
+
+const TONE_CLASS: Record<string, string> = {
+  success: 'text-success', danger: 'text-danger', warning: 'text-warning',
+  primary: 'text-primary', muted: 'text-muted'
+}
+
+// ---------- 来源分布 ----------
+const srcRows = computed(() => {
+  // 来源展示名/颜色见 utils/enums.ts SOURCE_MAP（PRD §9.1 四色语义固定）
+  const rows = SOURCES.map((k) => ({
+    key: k, label: t(SOURCE_MAP[k].longLabelKey), color: SOURCE_MAP[k].cssVar,
+    count: dashboard.value?.bySource?.[k] ?? 0
+  }))
+  const max = Math.max(1, ...rows.map((r) => r.count))
+  // pct 相对最大类目，仅用于分布条宽度；最小 6% 保证非零占比可见
+  return rows.map((r) => ({ ...r, pct: r.count ? Math.max(6, Math.round((r.count / max) * 100)) : 0 }))
+})
+const hasAnyDevice = computed(() => srcRows.value.some((r) => r.count > 0))
+
+// ---------- 实时告警流 ----------
+// 级别名：导轨本身只给颜色（aria-hidden），读屏依赖这里的文字，不让颜色成为唯一编码
+function levelName(level: string) { return t(alarmLevelInfo(level).labelKey) }
+
+/**
+ * 在线率条的样式。≥90% 正常（绿）→ ≥50% 关注（琥珀）→ 更低即危急（红）。
+ * 无设备时 onlineRate 为 null，此时不画条：
+ * 原先 width 取 ??0、background 取 ??100，同一空值在两处语义不一致（0% 宽度却涂绿）。
+ */
+const onlineBar = computed(() => {
+  const r = onlineRate.value
+  if (r === null) return null
+  return {
+    width: r + '%',
+    background: r >= 90 ? 'var(--color-success)' : r >= 50 ? 'var(--color-warning)' : 'var(--color-danger)'
+  }
+})
+
+// /dashboard 的 recentAlarms 只带 deviceId/channelId，需要名称用于展示。
+// 只查这几条用到的 id，不再为取名字全量拉 /devices + /channels。
+const nameMap = ref<Record<string, string>>({})
+async function loadNames(alarms: any[]) {
+  const chIds = [...new Set(alarms.map((a) => a.channelId).filter(Boolean))]
+  const devIds = [...new Set(alarms.map((a) => a.deviceId).filter((d) => d))]
+  if (!chIds.length && !devIds.length) return
+  try {
+    const reqs: Promise<any>[] = []
+    if (chIds.length) reqs.push(api.get('/channels', { ids: chIds.join(',') }))
+    if (devIds.length) reqs.push(api.get('/devices', { ids: devIds.join(',') }))
+    const res = await Promise.all(reqs)
+    const m: Record<string, string> = { ...nameMap.value }
+    res.forEach((r: any) => (r?.items || []).forEach((it: any) => { if (it?.id && it?.name) m[it.id] = it.name }))
+    nameMap.value = m
+  } catch {
+    // 名称只是锦上添花，取不到就回落显示 ID，不打断告警流本身
+  }
+}
+
+const alarmRows = computed(() => (dashboard.value?.recentAlarms || []).slice(0, 10).map((a: any) => ({
   id: a.id,
   level: a.level || 'info',
-  msg: a.msg || a.content || '告警事件',
-  src: a.sourceName || a.deviceName || '通道',
-  ts: a.ts || a.time || 0
+  kind: t(alarmKindKey(a.kind)),
+  msg: a.data?.error?.msg || a.data?.name || t(alarmKindKey(a.kind)),
+  src: nameMap.value[a.channelId] || nameMap.value[a.deviceId] || a.channelId || a.deviceId || '—',
+  ts: a.ts || 0
 })))
 
-function ago(ts: number) {
-  if (!ts) return '—'
-  const s = Math.floor((Date.now() - ts) / 1000)
-  if (s < 60) return '刚刚'
-  if (s < 3600) return Math.floor(s / 60) + ' 分钟前'
-  if (s < 86400) return Math.floor(s / 3600) + ' 小时前'
-  return Math.floor(s / 86400) + ' 天前'
+watch(() => dashboard.value?.recentAlarms, (list) => { if (list?.length) loadNames(list) })
+
+/** 点击告警跳到消息中心并带上该条 id（DASH-02：最近告警可点击） */
+function openAlarm(a: any) {
+  router.push({ path: '/alarms', query: { focus: a.id } })
 }
 
-async function load() {
-  try { dash.value = await api.get('/dashboard') } catch (e: any) { useToast().error({ title: e.msg || '加载失败' }) }
-}
-onMounted(load)
+onMounted(() => load())
 
+// 实时刷新：静默重载，避免整页闪 Skeleton
 useWs((ev: any) => {
-  if (['alarm.new', 'device.online', 'device.offline'].includes(ev.type)) load()
+  if (['alarm.new', 'device.online', 'device.offline', 'node.status'].includes(ev.type)) load(true)
 })
-
-// 7 大应用矩阵（严格对齐图 3）
-const apps = [
-  {
-    title: '设备管理',
-    desc: '设备接入、分组拓扑、远程配置与诊断',
-    path: '/devices',
-    iconBg: 'bg-gradient-to-br from-[#2b333e] to-[#171b22]',
-    iconColor: 'text-white',
-    icon: 'video'
-  },
-  {
-    title: '组织管理',
-    desc: '企业组织树、分组架构与项目分配',
-    path: '/system/projects',
-    iconBg: 'bg-gradient-to-br from-[#ebf5ff] to-[#d6ebff]',
-    iconColor: 'text-[#1785E6]',
-    icon: 'folder'
-  },
-  {
-    title: '工具箱',
-    desc: '参数调优、证书管理、IDP CRL 吊销与自检',
-    path: '/system/settings',
-    iconBg: 'bg-gradient-to-br from-[#fef3eb] to-[#fde5d2]',
-    iconColor: 'text-[#fa8c16]',
-    icon: 'tool'
-  },
-  {
-    title: '网络管理中心',
-    desc: '流媒体节点负载、带宽吞吐与推拉流调度',
-    path: '/system/nodes',
-    iconBg: 'bg-gradient-to-br from-[#e8f7ff] to-[#cbeeff]',
-    iconColor: 'text-[#0096fa]',
-    icon: 'server'
-  },
-  {
-    title: '安防管理中心',
-    desc: '实时视频预览、分屏监控、云台与录像回放',
-    path: '/live',
-    iconBg: 'bg-gradient-to-br from-[#e8fcf4] to-[#cbf7e3]',
-    iconColor: 'text-[#00b578]',
-    icon: 'shield'
-  },
-  {
-    title: '算法商城',
-    desc: '人形检测、车辆识别、区域入侵模型库',
-    path: '/alarms/rules',
-    iconBg: 'bg-gradient-to-br from-[#fff0f0] to-[#ffdada]',
-    iconColor: 'text-[#f53f3f]',
-    icon: 'grid'
-  },
-  {
-    title: 'AI算法巡检',
-    desc: '智能布防策略、告警统计与巡检事件报表',
-    path: '/alarms',
-    iconBg: 'bg-gradient-to-br from-[#f2f3ff] to-[#e0e3ff]',
-    iconColor: 'text-[#722ed1]',
-    icon: 'activity'
-  }
-]
 </script>
 
 <template>
-  <div class="space-y-6">
-    <!-- 顶部项目看板区（严格对齐图 3） -->
-    <div class="rounded-xl border border-[#e5e6eb] bg-white p-6 shadow-sm">
-      <div class="flex flex-wrap items-start justify-between gap-4">
-        <div>
-          <div class="flex items-center gap-2">
-            <h1 class="text-2xl font-bold text-[#1f2329]">{{ currentProject?.name || '深圳绿享' }}</h1>
-            <Icon name="info" :size="16" class="text-[#86909c] cursor-pointer" />
-          </div>
-          <div class="mt-1 text-xs text-[#86909c]">@鲁班长(深圳)科技有限公司</div>
-          <div class="mt-3 flex items-center gap-4 text-xs">
-            <button
-              class="flex items-center gap-1 font-medium text-[#1785E6] hover:underline"
-              @click="router.push('/devices')"
-            >
-              设备概览 {{ dash?.deviceTotal ?? 2 }} &gt;
-            </button>
-            <span class="text-[#4e5969]">设备总数：<b class="text-[#1f2329]">{{ dash?.deviceTotal ?? 2 }}</b></span>
-            <span class="text-[#4e5969]">在线：<b class="text-[#00b578]">{{ dash?.deviceOnline ?? 2 }}</b></span>
-            <span class="text-[#4e5969]">离线：<b class="text-[#f53f3f]">{{ (dash?.deviceTotal ?? 2) - (dash?.deviceOnline ?? 2) }}</b></span>
-          </div>
-        </div>
-
-        <!-- 右侧辅助功能导航链接（对齐图 3 右上角链接群） -->
-        <div class="flex flex-wrap items-center gap-4 text-xs text-[#4e5969]">
-          <button class="hover:text-[#1785E6]" @click="router.push('/system/roles')">成员管理</button>
-          <span class="text-[#e5e6eb]">|</span>
-          <button class="hover:text-[#1785E6]" @click="router.push('/alarms')">消息</button>
-          <span class="text-[#e5e6eb]">|</span>
-          <button class="hover:text-[#1785E6]" @click="router.push('/system/audit')">操作日志</button>
-          <span class="text-[#e5e6eb]">|</span>
-          <button class="hover:text-[#1785E6]" @click="router.push('/system/settings')">系统设置</button>
-          <span class="text-[#e5e6eb]">|</span>
-          <button class="hover:text-[#1785E6]" @click="router.push('/console')">切换企业与项目 &gt;</button>
-        </div>
+  <div class="space-y-3">
+    <!-- 加载失败：给出原因与重试，而不是空白页。
+         不用 UiErrorCard——那是深色半透明的播放器浮层，用在页面上会显得突兀 -->
+    <div v-if="loadErr" class="flex items-center justify-between gap-3 rounded-signal border border-danger/40 bg-danger-soft px-4 py-3">
+      <div class="flex items-center gap-2 text-sm">
+        <Icon name="alert-circle" :size="16" class="shrink-0 text-danger" />
+        <span class="text-body">{{ loadErr }}</span>
       </div>
+      <UiButton size="sm" @click="load()">{{ t('common.retry') }}</UiButton>
     </div>
 
-    <!-- 我的应用矩阵（严格对齐图 3 中间的 7 个大应用卡片） -->
-    <div>
-      <div class="mb-4 flex items-center justify-between">
-        <span class="text-base font-bold text-[#1f2329]">我的应用 | {{ apps.length }}</span>
-        <button class="text-xs text-[#86909c] hover:text-[#1785E6]">管理我的应用 &gt;</button>
-      </div>
+    <!-- 骨架屏：首屏加载时占位，避免布局跳动 -->
+    <template v-else-if="loading && !dashboard">
+      <div class="h-16 animate-pulse rounded-signal border border-line bg-surface" />
+      <div class="h-72 animate-pulse rounded-signal border border-line bg-surface" />
+    </template>
 
-      <div class="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-7">
-        <div
-          v-for="app in apps"
-          :key="app.title"
-          class="group flex flex-col items-center justify-center rounded-2xl border border-[#e5e6eb] bg-white p-5 text-center shadow-sm transition-all hover:-translate-y-1 hover:border-[#1785E6] hover:shadow-md cursor-pointer"
-          @click="router.push(app.path)"
+    <template v-else>
+      <!-- 指标条：六项汇总压缩为一行，让位给下方告警流 -->
+      <div class="grid grid-cols-2 gap-px overflow-hidden rounded-signal border border-line bg-line sm:grid-cols-3 lg:grid-cols-6">
+        <NuxtLink
+          v-for="m in metrics" :key="m.label"
+          :to="m.path"
+          class="flex flex-col gap-0.5 bg-surface px-4 py-3 transition-colors hover:bg-primary-softer"
         >
-          <!-- 图标容器 -->
-          <div
-            class="flex h-16 w-16 items-center justify-center rounded-2xl shadow-sm transition-transform group-hover:scale-105"
-            :class="[app.iconBg, app.iconColor]"
+          <span class="text-xs text-muted">{{ m.label }}</span>
+          <span class="font-mono text-xl font-semibold" :class="m.tone ? TONE_CLASS[m.tone] : 'text-ink'">
+            {{ m.value ?? EMPTY }}
+          </span>
+        </NuxtLink>
+      </div>
+
+      <!-- 主区：告警流为主，右侧为在线率与来源分布 -->
+      <div class="grid grid-cols-1 gap-3 lg:grid-cols-[1fr_300px]">
+        <!-- 实时告警流 -->
+        <section class="flex min-h-0 flex-col rounded-signal border border-line bg-surface">
+          <header class="flex items-center justify-between gap-2 border-b border-line-soft px-4 py-2.5">
+            <h2 class="flex items-center gap-1.5 text-sm font-semibold text-ink">
+              <Icon name="activity" :size="15" class="text-primary" />{{ t('account.dashboard.recentAlarms') }}
+            </h2>
+            <NuxtLink to="/alarms" class="flex items-center gap-0.5 rounded-chrome text-xs text-muted transition-colors hover:text-primary">
+              {{ t('account.dashboard.viewAll') }}<Icon name="chevron-right" :size="12" />
+            </NuxtLink>
+          </header>
+
+          <div v-if="!alarmRows.length" class="flex-1">
+            <UiEmptyState :text="t('account.dashboard.alarmEmpty')" :hint="t('account.dashboard.alarmEmptyHint')" />
+          </div>
+          <ul v-else class="max-h-[26rem] divide-y divide-line-soft overflow-y-auto">
+            <li v-for="a in alarmRows" :key="a.id">
+              <button
+                type="button"
+                class="flex w-full items-center gap-3 px-4 py-2.5 text-left text-xs transition-colors hover:bg-primary-softer"
+                @click="openAlarm(a)"
+              >
+                <!-- 级别导轨：色＋（严重档）发光，样式统一出自 utils/enums.ts -->
+                <span class="h-6 w-1 shrink-0 rounded-full" :style="alarmRailStyle(a.level)" aria-hidden="true" />
+                <span class="sr-only">{{ levelName(a.level) }}</span>
+                <!-- 时间与相对时间是值守时的主判据，不能用 placeholder 档（深底上仅 3.8:1，低于 AA 的 4.5:1） -->
+                <span class="w-11 shrink-0 font-mono text-muted">{{ fmtHm(a.ts) }}</span>
+                <span class="w-28 shrink-0 truncate font-medium text-ink">{{ a.src }}</span>
+                <span class="min-w-0 flex-1 truncate text-body">{{ a.msg }}</span>
+                <span class="shrink-0 text-muted">{{ ago(a.ts, t) }}</span>
+              </button>
+            </li>
+          </ul>
+        </section>
+
+        <!-- 侧栏：在线率 + 来源分布 + 节点健康 -->
+        <aside class="space-y-3">
+          <section class="rounded-signal border border-line bg-surface px-4 py-4">
+            <p class="text-xs text-muted">{{ t('account.dashboard.onlineRate') }}</p>
+            <div class="mt-1 flex items-baseline gap-2">
+              <span class="font-mono text-3xl font-semibold text-ink">
+                {{ onlineRate === null ? EMPTY : onlineRate + '%' }}
+              </span>
+              <span v-if="offlineCount" class="text-xs text-danger">{{ t('account.dashboard.offlineDevices', { n: offlineCount }) }}</span>
+            </div>
+            <div v-if="onlineBar" class="mt-2.5 h-1.5 overflow-hidden rounded-full bg-line">
+              <div class="h-full rounded-full transition-all duration-500" :style="onlineBar" />
+            </div>
+          </section>
+
+          <section class="rounded-signal border border-line bg-surface px-4 py-4">
+            <p class="mb-2.5 text-xs text-muted">{{ t('account.dashboard.sourceDist') }}</p>
+            <p v-if="!hasAnyDevice" class="text-xs text-placeholder">
+              {{ t('account.dashboard.noDevice') }}<NuxtLink to="/devices" class="text-primary hover:underline">{{ t('account.dashboard.goAddDevice') }}</NuxtLink>
+            </p>
+            <div v-else class="space-y-2">
+              <div v-for="r in srcRows" :key="r.key" class="flex items-center gap-2.5">
+                <span class="w-14 shrink-0 truncate text-xs text-body" :title="r.label">{{ r.label }}</span>
+                <!-- 轨道色与上方在线率条统一用 bg-line：此前用 bg-zone(#1a2222) 与卡片底(#141b1c)
+                     只差 1.05:1，轨道近乎不可见，色块像是浮空的 -->
+                <div class="h-1.5 flex-1 overflow-hidden rounded-full bg-line">
+                  <div class="h-full rounded-full transition-all duration-500" :style="{ width: r.pct + '%', background: r.color }" />
+                </div>
+                <span class="w-6 shrink-0 text-right font-mono text-xs text-ink">{{ r.count }}</span>
+              </div>
+            </div>
+          </section>
+
+          <NuxtLink
+            to="/system/nodes"
+            class="flex items-center justify-between rounded-signal border border-line bg-surface px-4 py-3 transition-colors hover:border-primary"
           >
-            <Icon :name="app.icon" :size="30" />
-          </div>
-          <span class="mt-3 text-sm font-bold text-[#1f2329] group-hover:text-[#1785E6] transition-colors">
-            {{ app.title }}
-          </span>
-          <span class="mt-1 line-clamp-1 text-[11px] text-[#86909c] opacity-0 group-hover:opacity-100 transition-opacity">
-            {{ app.desc }}
-          </span>
-        </div>
+            <span class="flex items-center gap-1.5 text-xs text-muted">
+              <Icon name="server" :size="14" />{{ t('account.dashboard.mediaNodes') }}
+            </span>
+            <span class="text-xs font-medium" :class="TONE_CLASS[nodeSummary.tone] || 'text-muted'">
+              {{ nodeSummary.text }}
+            </span>
+          </NuxtLink>
+        </aside>
       </div>
-    </div>
-
-    <!-- 运行指标与统计看板 -->
-    <div class="grid grid-cols-1 gap-4 lg:grid-cols-3">
-      <!-- 协议接入分布 -->
-      <div class="rounded-xl border border-[#e5e6eb] bg-white p-5 shadow-sm">
-        <div class="mb-3 flex items-center justify-between">
-          <span class="text-sm font-bold text-[#1f2329]">设备来源协议分布</span>
-          <span class="text-xs text-[#86909c]">在线率 {{ onlineRate }}</span>
-        </div>
-        <div class="space-y-3">
-          <div v-for="r in srcRows" :key="r.key" class="flex items-center justify-between text-xs">
-            <div class="flex items-center gap-2">
-              <UiTag :color="r.tag as any" plain>{{ r.label }}</UiTag>
-              <span class="text-[#4e5969]">{{ r.key.toUpperCase() }}</span>
-            </div>
-            <span class="font-bold text-[#1f2329]">{{ r.count }} 台</span>
-          </div>
-        </div>
-      </div>
-
-      <!-- 最近告警消息 -->
-      <div class="col-span-2 rounded-xl border border-[#e5e6eb] bg-white p-5 shadow-sm">
-        <div class="mb-3 flex items-center justify-between">
-          <span class="text-sm font-bold text-[#1f2329]">最新安防动态</span>
-          <button class="text-xs text-[#1785E6] hover:underline" @click="router.push('/alarms')">查看全部 &gt;</button>
-        </div>
-        <div v-if="!alarmRows.length" class="py-8 text-center text-xs text-[#86909c]">
-          暂无告警记录，系统运行良好
-        </div>
-        <div v-else class="divide-y divide-[#f2f3f5]">
-          <div v-for="a in alarmRows" :key="a.id" class="flex items-center justify-between py-2.5 text-xs">
-            <div class="flex items-center gap-2">
-              <span class="h-1.5 w-1.5 rounded-full" :class="a.level === 'error' ? 'bg-[#f53f3f]' : 'bg-[#ff7d00]'" />
-              <span class="font-medium text-[#1f2329]">{{ a.src }}</span>
-              <span class="text-[#4e5969]">{{ a.msg }}</span>
-            </div>
-            <span class="text-[#86909c]">{{ ago(a.ts) }}</span>
-          </div>
-        </div>
-      </div>
-    </div>
+    </template>
   </div>
 </template>

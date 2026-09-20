@@ -4,6 +4,8 @@ import { DialogRoot, DialogPortal, DialogOverlay, DialogContent, DialogTitle, Di
 
 const props = withDefaults(defineProps<{ open: boolean; title?: string; width?: string }>(), { width: 'max-w-md' })
 const emit = defineEmits<{ 'update:open': [v: boolean] }>()
+// Esc 关闭：见 composables/useEscClose.ts
+useEscClose(computed(() => props.open), () => emit('update:open', false))
 </script>
 
 <template>

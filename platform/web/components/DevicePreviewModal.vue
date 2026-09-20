@@ -1,6 +1,6 @@
 <script setup lang="ts">
-// 设备预览与回放弹窗（LIVE-01/02 + REC-01~04）：严格对齐商云原型 UI/UE
-// 包含 Tab 切换（预览直播 vs 回放录像）、实时 OSD 水印、对讲/清晰度/声音控制、24小时可拖拽时间轴
+// 设备预览与回放入口弹窗（LIVE-01/02 + REC-01~03）：预览 Tab 真实拉流 + 抓拍；
+// 回放 Tab 内联单通道回放，核心逻辑与 pages/playback.vue 共用 usePlaybackSession
 const props = withDefaults(
   defineProps<{
     modelValue: boolean
@@ -22,6 +22,7 @@ const emit = defineEmits<{
 
 const api = useApi()
 const toast = useToast()
+const { t } = useI18n()
 
 // 激活的 Tab
 const activeTab = ref<'preview' | 'playback'>('preview')
@@ -31,8 +32,8 @@ const curChannel = computed(() => {
   if (props.channel) return props.channel
   if (props.device?.channels?.length) return props.device.channels[0]
   return {
-    id: props.device?.id || 'ch-default',
-    name: props.device?.name || '默认通道',
+    id: props.device?.id || '',
+    name: props.device?.name || t('live.preview.defaultChannel'),
     streamState: props.device?.status === 'online' ? 'online' : 'offline'
   }
 })
@@ -47,71 +48,45 @@ function onKeydown(e: KeyboardEvent) {
   if (e.key === 'Escape') close()
 }
 
-// ==================== 1. 预览态（直播画面） ====================
-const isPlaying = ref(true)
+// ==================== 预览态（直播画面） ====================
 const isMuted = ref(true)
-const isIntercom = ref(false)
-const clarity = ref<'ultra' | 'hd' | 'sd'>('ultra')
-const showClarityMenu = ref(false)
+const profile = ref<'main' | 'sub'>('main')
 const liveStreamUrl = ref('')
-const livePlayer = ref<any>(null)
+const liveLoading = ref(false)
 const liveContainer = ref<HTMLElement>()
-
-// 格式化当前日期为类似 "2026-09-08 星期二 09:57:04"
-const currentOsdTime = ref('')
-let timerId: any = null
-
-const weekDays = ['星期日', '星期一', '星期二', '星期三', '星期四', '星期五', '星期六']
-function updateOsdClock() {
-  const now = new Date()
-  const year = now.getFullYear()
-  const month = String(now.getMonth() + 1).padStart(2, '0')
-  const day = String(now.getDate()).padStart(2, '0')
-  const week = weekDays[now.getDay()]
-  const hh = String(now.getHours()).padStart(2, '0')
-  const mm = String(now.getMinutes()).padStart(2, '0')
-  const ss = String(now.getSeconds()).padStart(2, '0')
-  currentOsdTime.value = `${year}-${month}-${day} ${week}  ${hh}:${mm}:${ss}`
-}
-
-// 切换播放/暂停
-function togglePlay() {
-  isPlaying.value = !isPlaying.value
-  if (isPlaying.value) {
-    toast.info('恢复实时直播')
-  } else {
-    toast.info('画面已暂停')
-  }
-}
-
-// 切换对讲
-function toggleIntercom() {
-  isIntercom.value = !isIntercom.value
-  if (isIntercom.value) {
-    toast.success('语音对讲已接通，正在采集音频...')
-  } else {
-    toast.info('语音对讲已挂断')
-  }
-}
+const snapshotUrl = ref('')
+const snapshotLoading = ref(false)
 
 // 切换静音
 function toggleMute() {
   isMuted.value = !isMuted.value
-  toast.info(isMuted.value ? '已静音' : '声音已开启')
+  toast.info(isMuted.value ? t('live.msg.muted') : t('live.msg.unmuted'))
 }
 
-// 切换清晰度
-function selectClarity(c: 'ultra' | 'hd' | 'sd') {
-  clarity.value = c
-  showClarityMenu.value = false
-  const names = { ultra: '超清', hd: '高清', sd: '标清' }
-  toast.success(`已切换至${names[c]}码流`)
+// 切换码流（主码流 / 子码流）
+function selectProfile(p: 'main' | 'sub') {
+  if (profile.value === p) return
+  profile.value = p
   fetchLiveStream()
 }
 
 // 抓拍截图
-function takeSnapshot() {
-  toast.success('抓拍成功，已保存至本地相册')
+async function takeSnapshot() {
+  if (!curChannel.value?.id) return
+  snapshotLoading.value = true
+  try {
+    const res: any = await api.post(`/channels/${curChannel.value.id}/snapshot`)
+    if (res?.url) {
+      snapshotUrl.value = res.url
+      toast.success(t('live.msg.snapshotOk'))
+    } else {
+      toast.warning(t('live.msg.snapshotNoImage'))
+    }
+  } catch (e: any) {
+    toastApiError(e, t('live.msg.snapshotFailed'))
+  } finally {
+    snapshotLoading.value = false
+  }
 }
 
 // 全屏
@@ -127,84 +102,58 @@ function toggleFullscreen() {
 // 获取直播流地址
 async function fetchLiveStream() {
   if (!curChannel.value?.id) return
+  liveLoading.value = true
+  liveStreamUrl.value = ''
   try {
-    const profile = clarity.value === 'ultra' ? 'main' : 'sub'
-    const res: any = await api.post(`/channels/${curChannel.value.id}/play`, { profile })
-    liveStreamUrl.value = res.wssFlv || res.wsFlv || res.flv || res.url || ''
-  } catch {
+    const res: any = await api.post(`/channels/${curChannel.value.id}/play`, { profile: profile.value })
+    liveStreamUrl.value = pickFlv(res)
+  } catch (e: any) {
     liveStreamUrl.value = ''
+    toastApiError(e, t('live.msg.playFailed'))
+  } finally {
+    liveLoading.value = false
   }
 }
 
-// ==================== 2. 回放态（录像回放） ====================
-const recDate = ref(new Date())
-const recSource = ref<'platform' | 'device'>('platform')
-const recPlaying = ref(true)
-const recSpeed = ref(1)
-const recCurSeconds = ref(35824) // 默认 09:57:04 (9*3600 + 57*60 + 4 = 35824)
-let recTimer: any = null
-
-// 格式化秒数为 HH:mm:ss
-function formatSeconds(secs: number) {
-  const h = String(Math.floor(secs / 3600)).padStart(2, '0')
-  const m = String(Math.floor((secs % 3600) / 60)).padStart(2, '0')
-  const s = String(Math.floor(secs % 60)).padStart(2, '0')
-  return `${h}:${m}:${s}`
+function stopLiveStream() {
+  if (!curChannel.value?.id) return
+  api.post(`/channels/${curChannel.value.id}/stop`).catch((e: any) => console.warn('停流失败', curChannel.value.id, e))
 }
 
-const playbackOsdTime = computed(() => {
-  const d = recDate.value
-  const year = d.getFullYear()
-  const month = String(d.getMonth() + 1).padStart(2, '0')
-  const day = String(d.getDate()).padStart(2, '0')
-  const week = weekDays[d.getDay()]
-  return `${year}-${month}-${day} ${week}  ${formatSeconds(recCurSeconds.value)}`
-})
+// ==================== 回放态（Tab 内联播放，REC-01~03） ====================
+// channelId/deviceId 用独立 ref 而非直接绑定 curChannel：只在真正进入回放 Tab 时才赋值，
+// 离开时清空，借助 usePlaybackSession 内部 watch(channelId,...) 的变化触发实现懒加载，
+// 避免每次打开预览弹窗都顺带请求录像能力/记录（该弹窗不会真正卸载，见 close 分支说明）
+const pbChannelId = ref('')
+const pbDeviceId = ref('')
+const {
+  dayStart, shiftDay, pickDate,
+  calOpen, calMonth, recDays, dayKey, calDays,
+  source, canDevice,
+  TYPE_COLOR, TYPE_NAME, typeFilter, shownSegs,
+  tlEl, onWheel, segStyle, ticks,
+  session, paused, muted: pbMuted, speed, speeds, sessionSource, deviceUrl, platformUrl,
+  videoEl, curTs, curLeft,
+  onTimelineClick, togglePause, onSpeedChange, forward30, closeSession,
+  toggleMute: togglePbMute, doSnapshot: doPbSnapshot, onVideoMeta, onVideoTime, onVideoErr
+} = usePlaybackSession(pbChannelId, pbDeviceId)
 
-// 模拟录像段（全天 00:00 - 24:00）
-// 连续录像（绿），事件告警（橙）
-const recSegments = ref([
-  { startSec: 0, endSec: 28800, type: 'timer' },      // 00:00 - 08:00
-  { startSec: 28800, endSec: 36000, type: 'timer' },  // 08:00 - 10:00 (含当前时间)
-  { startSec: 32400, endSec: 33000, type: 'event' },  // 09:00 - 09:10 移动侦测
-  { startSec: 43200, endSec: 64800, type: 'timer' },  // 12:00 - 18:00
-  { startSec: 68400, endSec: 86400, type: 'timer' }   // 19:00 - 24:00
-])
+const fmtSeg = (ts: any) => new Date(Number(ts)).toLocaleString('zh-CN', { hour12: false })
 
-// 时间轴点击与拖拽
-const timelineRef = ref<HTMLElement>()
-
-function onTimelineClick(e: MouseEvent) {
-  if (!timelineRef.value) return
-  const rect = timelineRef.value.getBoundingClientRect()
-  const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
-  recCurSeconds.value = Math.floor(ratio * 86400)
-  toast.info(`跳转至 ${formatSeconds(recCurSeconds.value)}`)
+// 电子放大（P1，简单点击循环 1x/2x/4x，CSS transform 缩放画面）
+const zoomLevel = ref(1)
+function cycleZoom() {
+  zoomLevel.value = zoomLevel.value >= 4 ? 1 : zoomLevel.value * 2
 }
 
-// 改变日期
-function shiftDay(days: number) {
-  const next = new Date(recDate.value.getTime() + days * 86400000)
-  recDate.value = next
-  toast.info(`切换到日期: ${recDate.value.toLocaleDateString()}`)
+function enterPlayback() {
+  pbChannelId.value = curChannel.value?.id || ''
+  pbDeviceId.value = props.device?.id || ''
 }
-
-// 回放倍速切换
-function toggleSpeed() {
-  const speeds = [1, 2, 4, 8]
-  const idx = speeds.indexOf(recSpeed.value)
-  recSpeed.value = speeds[(idx + 1) % speeds.length]
-  toast.info(`回放倍速: ${recSpeed.value}x`)
-}
-
-// 快进 30s
-function forward30() {
-  recCurSeconds.value = Math.min(86400, recCurSeconds.value + 30)
-}
-
-// 快退 10s
-function backward10() {
-  recCurSeconds.value = Math.max(0, recCurSeconds.value - 10)
+function leavePlayback() {
+  pbChannelId.value = ''
+  pbDeviceId.value = ''
+  zoomLevel.value = 1
 }
 
 // 生命周期与监听
@@ -213,22 +162,14 @@ watch(
   (val) => {
     if (val) {
       activeTab.value = props.initialTab || 'preview'
-      updateOsdClock()
-      if (timerId) clearInterval(timerId)
-      timerId = setInterval(updateOsdClock, 1000)
-      fetchLiveStream()
+      snapshotUrl.value = ''
       window.addEventListener('keydown', onKeydown)
-
-      // 回放时间步进定时器
-      if (recTimer) clearInterval(recTimer)
-      recTimer = setInterval(() => {
-        if (activeTab.value === 'playback' && recPlaying.value) {
-          recCurSeconds.value = (recCurSeconds.value + recSpeed.value) % 86400
-        }
-      }, 1000)
+      if (activeTab.value === 'preview') fetchLiveStream()
+      else enterPlayback()
     } else {
-      if (timerId) clearInterval(timerId)
-      if (recTimer) clearInterval(recTimer)
+      stopLiveStream()
+      liveStreamUrl.value = ''
+      leavePlayback()
       window.removeEventListener('keydown', onKeydown)
     }
   },
@@ -236,8 +177,6 @@ watch(
 )
 
 onBeforeUnmount(() => {
-  if (timerId) clearInterval(timerId)
-  if (recTimer) clearInterval(recTimer)
   window.removeEventListener('keydown', onKeydown)
 })
 </script>
@@ -248,285 +187,333 @@ onBeforeUnmount(() => {
     class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-[1px] p-4 animate-in fade-in duration-200"
     @click.self="close"
   >
-    <!-- 弹窗容器（严格对齐商云设备弹窗尺寸与圆角） -->
+    <!-- 弹窗容器：浮层用 surface-2（比表格/卡片的 surface 再高一级）+ 外壳 chrome 圆角 -->
     <div
-      class="relative flex w-full max-w-[820px] flex-col overflow-hidden rounded-lg bg-white shadow-2xl transition-all"
+      class="relative flex w-full max-w-[820px] flex-col overflow-hidden rounded-chrome border border-line bg-surface-2 shadow-pop transition-all"
     >
       <!-- 弹窗头部：标题 + 关闭按钮 -->
       <div class="flex items-center justify-between px-5 pt-4 pb-2">
         <div class="flex items-center gap-2">
-          <h2 class="text-base font-semibold text-[#1f2329]">
-            {{ device?.name || curChannel?.name || '办公室' }}
+          <h2 class="text-base font-semibold text-ink">
+            {{ device?.name || curChannel?.name || t('live.preview.title') }}
           </h2>
           <span
             v-if="device?.status"
             class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-normal"
-            :class="device.status === 'online' ? 'bg-[#e8ffea] text-[#00b578]' : 'bg-[#ffece8] text-[#f53f3f]'"
+            :class="device.status === 'online' ? 'bg-success-soft text-success' : 'bg-danger-soft text-danger'"
           >
-            <span class="h-1.5 w-1.5 rounded-full" :class="device.status === 'online' ? 'bg-[#00b578]' : 'bg-[#f53f3f]'" />
-            {{ device.status === 'online' ? '在线' : '离线' }}
+            <span class="h-1.5 w-1.5 rounded-full" :class="device.status === 'online' ? 'bg-success' : 'bg-danger'" />
+            {{ device.status === 'online' ? t('common.online') : t('common.offline') }}
           </span>
         </div>
         <button
-          class="rounded p-1 text-[#86909c] transition-colors hover:bg-[#f2f3f5] hover:text-[#1f2329]"
-          title="关闭"
+          class="rounded-chrome p-1 text-muted transition-colors hover:bg-zone hover:text-ink"
+          :title="t('common.close')"
+          :aria-label="t('common.close')"
           @click="close"
         >
           <Icon name="x" :size="18" />
         </button>
       </div>
 
-      <!-- Tab 切换栏（左对齐，蓝底预览 + 白底回放，严格 100% 还原图 1） -->
+      <!-- Tab 切换栏 -->
       <div class="flex items-center px-5 pb-3">
-        <div class="inline-flex rounded overflow-hidden border border-[#dcdfe6] text-xs">
+        <div class="inline-flex rounded-chrome overflow-hidden border border-line text-xs">
           <!-- 预览 Tab -->
           <button
             class="px-5 py-1.5 font-medium transition-colors"
-            :class="activeTab === 'preview' ? 'bg-[#1785E6] text-white' : 'bg-white text-[#4e5969] hover:text-[#1785E6]'"
-            @click="activeTab = 'preview'"
+            :class="activeTab === 'preview' ? 'bg-primary text-white' : 'text-muted hover:text-primary'"
+            @click="activeTab = 'preview'; fetchLiveStream()"
           >
-            预览
+            {{ t('live.preview.tabPreview') }}
           </button>
           <!-- 回放 Tab -->
           <button
-            class="flex items-center gap-1.5 px-5 py-1.5 font-medium border-l border-[#dcdfe6] transition-colors"
-            :class="activeTab === 'playback' ? 'bg-[#1785E6] text-white' : 'bg-white text-[#4e5969] hover:text-[#1785E6]'"
-            @click="activeTab = 'playback'"
+            class="flex items-center gap-1.5 px-5 py-1.5 font-medium border-l border-line transition-colors"
+            :class="activeTab === 'playback' ? 'bg-primary text-white' : 'text-muted hover:text-primary'"
+            @click="activeTab = 'playback'; stopLiveStream(); liveStreamUrl = ''; enterPlayback()"
           >
             <Icon name="video" :size="13" />
-            <span>回放</span>
+            <span>{{ t('live.preview.tabPlayback') }}</span>
           </button>
-        </div>
-
-        <!-- 回放时的日期与存储源选择 -->
-        <div v-if="activeTab === 'playback'" class="ml-auto flex items-center gap-2 text-xs text-[#4e5969]">
-          <div class="flex items-center rounded border border-[#dcdfe6] bg-white px-2 py-0.5">
-            <button class="px-1 hover:text-[#1785E6]" title="前一天" @click="shiftDay(-1)">&lt;</button>
-            <span class="mx-1.5 font-mono text-[11px] font-medium text-[#1f2329]">
-              {{ recDate.getFullYear() }}-{{ String(recDate.getMonth() + 1).padStart(2, '0') }}-{{ String(recDate.getDate()).padStart(2, '0') }}
-            </span>
-            <button class="px-1 hover:text-[#1785E6]" title="后一天" @click="shiftDay(1)">&gt;</button>
-          </div>
-          <span class="inline-flex items-center gap-1 text-[11px] text-[#86909c]">
-            <span class="h-2 w-2 rounded-sm bg-[#00b578]" /> 连续录像
-            <span class="h-2 w-2 rounded-sm bg-[#ff7d00] ml-1" /> 告警录像
-          </span>
         </div>
       </div>
 
-      <!-- ==================== 播放容器区域 (16:9 标准比例) ==================== -->
+      <!-- ==================== 预览 Tab：播放容器区域 (16:9 标准比例) ==================== -->
       <div
+        v-if="activeTab === 'preview'"
         ref="liveContainer"
         class="relative aspect-video w-full overflow-hidden bg-black select-none flex items-center justify-center"
       >
-        <!-- 1. 真实视频播放器（有流时挂载） -->
         <H265Player
-          v-if="liveStreamUrl && isPlaying && activeTab === 'preview'"
-          ref="livePlayer"
+          v-if="liveStreamUrl"
           :url="liveStreamUrl"
           :muted="isMuted"
           class="h-full w-full object-contain"
         />
 
-        <!-- 2. 高保真商云监控画面（图 1 真实办公室实景与模拟监控背景） -->
-        <div v-else class="relative h-full w-full flex items-center justify-center overflow-hidden">
-          <img
-            src="/img/office-cam.jpg"
-            alt="监控画面"
-            class="h-full w-full object-cover transition-transform duration-300"
-            :class="!isPlaying && activeTab === 'preview' ? 'brightness-75' : ''"
-          />
+        <!-- 无流占位：与 live.vue 一致的图标 + 文案 -->
+        <div v-else class="flex flex-col items-center justify-center gap-2 text-placeholder">
+          <Icon :name="liveLoading ? 'refresh' : 'video'" :size="30" :stroke="1.4" :class="liveLoading ? 'ipc-spin' : ''" />
+          <span class="text-xs">{{ liveLoading ? t('live.preview.loading') : t('live.preview.noStream') }}</span>
+        </div>
+      </div>
 
-          <!-- 暂停状态居中提示 -->
-          <div
-            v-if="(!isPlaying && activeTab === 'preview') || (!recPlaying && activeTab === 'playback')"
-            class="absolute inset-0 flex items-center justify-center bg-black/30 backdrop-blur-[1px]"
-          >
-            <div class="flex items-center gap-2 rounded-full bg-black/60 px-4 py-1.5 text-xs text-white">
-              <Icon name="pause" :size="14" />
-              <span>画面已暂停</span>
+      <!-- ==================== 回放 Tab：单通道内联回放（REC-01~03） ==================== -->
+      <template v-else>
+        <div class="relative aspect-video w-full overflow-hidden bg-black select-none flex items-center justify-center">
+          <div class="h-full w-full overflow-hidden">
+            <div class="h-full w-full transition-transform duration-200" :style="{ transform: `scale(${zoomLevel})` }">
+              <H265Player v-if="deviceUrl" :url="deviceUrl" :muted="pbMuted" class="h-full w-full object-contain" />
+              <video
+                v-else-if="platformUrl"
+                ref="videoEl"
+                :src="platformUrl"
+                autoplay
+                preload="metadata"
+                class="h-full w-full bg-black object-contain"
+                :muted="pbMuted"
+                @loadedmetadata="onVideoMeta"
+                @timeupdate="onVideoTime"
+                @error="onVideoErr"
+              />
+              <div v-else class="flex h-full flex-col items-center justify-center gap-2 text-placeholder">
+                <Icon name="film" :size="30" :stroke="1.4" />
+                <span class="text-xs">{{ pbChannelId ? t('live.playback.emptyPickSeg') : t('live.playback.emptyPickChannel') }}</span>
+              </div>
             </div>
           </div>
-        </div>
 
-        <!-- OSD 水印（严格对齐商云白色粗黑描边时间排版） -->
-        <div
-          class="pointer-events-none absolute left-6 top-5 z-20 text-sm md:text-base font-bold tracking-wider text-white select-none"
-          style="text-shadow: 1px 1px 2px #000, -1px -1px 2px #000, 1px -1px 2px #000, -1px 1px 2px #000;"
-        >
-          {{ activeTab === 'preview' ? currentOsdTime : playbackOsdTime }}
-        </div>
-
-        <!-- 语音对讲激活提示 -->
-        <div
-          v-if="isIntercom && activeTab === 'preview'"
-          class="absolute top-5 right-5 z-20 flex items-center gap-1.5 rounded bg-[#00b578]/90 px-2.5 py-1 text-xs text-white shadow"
-        >
-          <span class="h-2 w-2 animate-ping rounded-full bg-white" />
-          <Icon name="mic" :size="13" />
-          <span>正在对讲...</span>
-        </div>
-      </div>
-
-      <!-- ==================== 回放 24 小时时间轴 (仅在回放 Tab 显示) ==================== -->
-      <div v-if="activeTab === 'playback'" class="border-t border-[#e5e6eb] bg-[#f9fafc] px-5 py-2.5">
-        <div class="mb-1 flex items-center justify-between text-[11px] text-[#86909c]">
-          <span>00:00</span>
-          <span>04:00</span>
-          <span>08:00</span>
-          <span class="font-bold text-[#1785E6]">{{ formatSeconds(recCurSeconds) }}</span>
-          <span>16:00</span>
-          <span>20:00</span>
-          <span>24:00</span>
-        </div>
-
-        <!-- 时间轴主体轨道 -->
-        <div
-          ref="timelineRef"
-          class="relative h-6 w-full cursor-pointer rounded bg-[#e5e6eb] overflow-hidden select-none"
-          title="点击定位时间点"
-          @click="onTimelineClick"
-        >
-          <!-- 连续录像色块 (绿) & 告警录像色块 (橙) -->
+          <!-- OSD：当前回放时间戳 -->
           <div
-            v-for="(seg, idx) in recSegments"
-            :key="idx"
-            class="absolute top-0 bottom-0 rounded-sm"
-            :class="seg.type === 'timer' ? 'bg-[#00b578]/70 hover:bg-[#00b578]' : 'bg-[#ff7d00] hover:bg-[#ff7d00]/90'"
-            :style="{
-              left: `${(seg.startSec / 86400) * 100}%`,
-              width: `${((seg.endSec - seg.startSec) / 86400) * 100}%`
-            }"
-          />
-
-          <!-- 红色时间游标线 -->
-          <div
-            class="pointer-events-none absolute top-0 bottom-0 z-10 w-[2px] bg-[#f53f3f]"
-            :style="{ left: `${(recCurSeconds / 86400) * 100}%` }"
+            v-if="curTs"
+            class="pointer-events-none absolute left-2 top-2 rounded-chrome bg-black/50 px-2 py-0.5 font-mono text-[11px] text-white"
           >
-            <div class="h-1.5 w-1.5 -translate-x-[2px] bg-[#f53f3f] rotate-45" />
+            {{ new Date(curTs).toLocaleString('zh-CN', { hour12: false }) }}
           </div>
         </div>
-      </div>
 
-      <!-- ==================== 底部控制栏（100% 对齐图 1 底部：暂停/对讲/静音/超清） ==================== -->
-      <div class="flex items-center justify-between px-5 py-2.5 bg-white border-t border-[#e5e6eb]">
+        <!-- 日期 / 存储位置 -->
+        <div class="flex flex-wrap items-center gap-2 border-t border-line bg-surface-2 px-5 py-2">
+          <button
+            type="button"
+            class="flex h-7 w-7 items-center justify-center rounded-chrome border border-line text-muted hover:border-primary hover:text-primary"
+            :aria-label="t('live.playback.prevDay')"
+            @click="shiftDay(-1)"
+          >
+            <Icon name="chevron-left" :size="14" />
+          </button>
+          <UiPopover v-model:open="calOpen" width="w-64">
+            <template #trigger>
+              <button class="flex h-7 items-center gap-1.5 rounded-chrome border border-line bg-surface px-2.5 text-sm text-body hover:border-primary">
+                <Icon name="calendar" :size="13" class="text-placeholder" />{{ new Date(dayStart).toLocaleDateString('zh-CN') }}
+              </button>
+            </template>
+            <div>
+              <div class="mb-1 flex items-center justify-between">
+                <button type="button" class="rounded-chrome p-1 text-muted hover:bg-zone" :aria-label="t('live.playback.prevMonth')" @click="calMonth = new Date(calMonth.getFullYear(), calMonth.getMonth() - 1, 1)"><Icon name="chevron-left" :size="14" /></button>
+                <span class="text-sm font-medium text-ink">{{ t('live.playback.calMonthLabel', { y: calMonth.getFullYear(), m: calMonth.getMonth() + 1 }) }}</span>
+                <button type="button" class="rounded-chrome p-1 text-muted hover:bg-zone" :aria-label="t('live.playback.nextMonth')" @click="calMonth = new Date(calMonth.getFullYear(), calMonth.getMonth() + 1, 1)"><Icon name="chevron-right" :size="14" /></button>
+              </div>
+              <div class="grid grid-cols-7 gap-0.5 text-center text-[11px] text-placeholder">
+                <span v-for="w in ['live.playback.weekMon', 'live.playback.weekTue', 'live.playback.weekWed', 'live.playback.weekThu', 'live.playback.weekFri', 'live.playback.weekSat', 'live.playback.weekSun']" :key="w" class="py-1">{{ t(w) }}</span>
+              </div>
+              <div class="grid grid-cols-7 gap-0.5">
+                <template v-for="(d, i) in calDays" :key="i">
+                  <button
+                    v-if="d"
+                    class="relative flex h-7 items-center justify-center rounded-chrome text-[13px] transition-colors hover:bg-primary-soft"
+                    :class="dayStart === d.getTime() ? 'bg-primary font-medium text-white hover:bg-primary' : recDays.has(dayKey(d)) ? 'font-medium text-primary' : 'text-body'"
+                    @click="pickDate(d)"
+                  >
+                    {{ d.getDate() }}
+                    <span v-if="recDays.has(dayKey(d)) && dayStart !== d.getTime()" class="absolute bottom-0.5 h-1 w-1 rounded-full bg-primary" />
+                  </button>
+                  <span v-else />
+                </template>
+              </div>
+              <p class="mt-1.5 border-t border-line-soft pt-1.5 text-[11px] text-placeholder">
+                <span class="mr-1 inline-block h-1.5 w-1.5 rounded-full bg-primary align-middle" />{{ t('live.playback.calDotHint') }}
+              </p>
+            </div>
+          </UiPopover>
+          <button
+            type="button"
+            class="flex h-7 w-7 items-center justify-center rounded-chrome border border-line text-muted hover:border-primary hover:text-primary"
+            :aria-label="t('live.playback.nextDay')"
+            @click="shiftDay(1)"
+          >
+            <Icon name="chevron-right" :size="14" />
+          </button>
+          <UiSegmented
+            :model-value="source"
+            @update:model-value="source = $event as any"
+            :items="[...(canDevice ? [{ label: t('live.playback.srcDevice'), value: 'device' }] : []), { label: t('live.playback.srcPlatform'), value: 'platform' }]"
+          />
+          <span v-if="session" class="ml-auto">
+            <UiTag :color="sessionSource === 'platform' ? 'primary' : 'success'" plain>
+              {{ sessionSource === 'platform' ? t('live.playback.tagPlatform') : t('live.playback.tagDevice') }}
+            </UiTag>
+          </span>
+        </div>
+
+        <!-- 24h 时间轴 -->
+        <div class="border-t border-line bg-surface-2 px-5 py-2">
+          <div class="relative mb-1 h-3.5">
+            <span v-for="tk in ticks" :key="tk.left" class="absolute -translate-x-1/2 font-mono text-[10px] text-placeholder" :style="{ left: tk.left + '%' }">{{ tk.label }}</span>
+          </div>
+          <div
+            ref="tlEl"
+            class="relative h-7 cursor-pointer rounded-signal border border-line-soft bg-canvas shadow-[inset_0_1px_4px_rgba(0,0,0,0.6)]"
+            @click="onTimelineClick"
+            @wheel="onWheel"
+          >
+            <div
+              v-for="(seg, i) in shownSegs"
+              :key="i"
+              class="absolute bottom-1 top-1 rounded-signal transition-opacity hover:opacity-85"
+              :style="{ ...segStyle(seg), background: TYPE_COLOR[seg.type] || 'var(--color-rec-timer)' }"
+              :title="t('live.playback.segTitle', { start: fmtSeg(seg.s), end: fmtSeg(seg.e), type: TYPE_NAME[seg.type] ? t(TYPE_NAME[seg.type]) : seg.type })"
+            />
+            <div v-if="curTs" class="pointer-events-none absolute -bottom-1 -top-1 w-[2px] bg-primary shadow-[0_0_6px_var(--color-primary)]" :style="{ left: curLeft }" />
+          </div>
+          <div class="mt-1.5 flex flex-wrap items-center gap-3">
+            <UiCheckbox v-model="typeFilter.timer">
+              <span class="inline-flex items-center gap-1.5 text-xs"><span class="h-1.5 w-1.5 rounded-full" :style="{ background: TYPE_COLOR.timer }" />{{ t('live.playback.typeTimer') }}</span>
+            </UiCheckbox>
+            <UiCheckbox v-model="typeFilter.event">
+              <span class="inline-flex items-center gap-1.5 text-xs"><span class="h-1.5 w-1.5 rounded-full" :style="{ background: TYPE_COLOR.event }" />{{ t('live.playback.typeEvent') }}</span>
+            </UiCheckbox>
+            <UiCheckbox v-model="typeFilter.manual">
+              <span class="inline-flex items-center gap-1.5 text-xs"><span class="h-1.5 w-1.5 rounded-full" :style="{ background: TYPE_COLOR.manual }" />{{ t('live.playback.typeManual') }}</span>
+            </UiCheckbox>
+            <span class="ml-auto text-[11px] text-placeholder">{{ t('live.playback.segCount', { n: shownSegs.length }) }}</span>
+          </div>
+        </div>
+      </template>
+
+      <!-- ==================== 底部控制栏（仅预览 Tab） ==================== -->
+      <div v-if="activeTab === 'preview'" class="flex items-center justify-between px-5 py-2.5 bg-surface-2 border-t border-line">
         <!-- 左侧工具组 -->
         <div class="flex items-center gap-3">
-          <!-- 播放 / 暂停按钮 -->
-          <button
-            class="flex h-7 w-7 items-center justify-center rounded text-[#1f2329] transition-colors hover:bg-[#f2f3f5] hover:text-[#1785E6]"
-            :title="isPlaying ? '暂停' : '播放'"
-            @click="activeTab === 'preview' ? togglePlay() : (recPlaying = !recPlaying)"
-          >
-            <Icon
-              :name="(activeTab === 'preview' ? isPlaying : recPlaying) ? 'pause' : 'play'"
-              :size="15"
-            />
-          </button>
-
-          <!-- 预览模式：对讲按钮（麦克风图标 + 对讲文字，图 1 关键元素） -->
-          <button
-            v-if="activeTab === 'preview'"
-            class="flex items-center gap-1 rounded px-2 py-1 text-xs transition-colors"
-            :class="isIntercom ? 'bg-[#e8ffea] text-[#00b578] font-semibold' : 'text-[#4e5969] hover:bg-[#f2f3f5] hover:text-[#1785E6]'"
-            title="语音对讲"
-            @click="toggleIntercom"
-          >
-            <Icon name="mic" :size="14" />
-            <span>对讲</span>
-          </button>
-
-          <!-- 回放模式：快退 10s / 快进 30s -->
-          <template v-if="activeTab === 'playback'">
-            <button
-              class="rounded p-1 text-xs text-[#4e5969] hover:bg-[#f2f3f5] hover:text-[#1785E6]"
-              title="快退 10 秒"
-              @click="backward10"
-            >
-              <Icon name="skip-back" :size="14" />
-            </button>
-            <button
-              class="rounded p-1 text-xs text-[#4e5969] hover:bg-[#f2f3f5] hover:text-[#1785E6]"
-              title="快进 30 秒"
-              @click="forward30"
-            >
-              <Icon name="fast-forward" :size="14" />
-            </button>
-            <button
-              class="rounded border border-[#dcdfe6] px-2 py-0.5 text-xs font-mono font-medium text-[#4e5969] hover:border-[#1785E6] hover:text-[#1785E6]"
-              title="切换倍速"
-              @click="toggleSpeed"
-            >
-              {{ recSpeed }}x
-            </button>
-          </template>
-
           <!-- 音量 / 静音切换 -->
           <button
-            class="flex h-7 w-7 items-center justify-center rounded text-[#4e5969] transition-colors hover:bg-[#f2f3f5] hover:text-[#1785E6]"
-            :title="isMuted ? '开启声音' : '静音'"
+            class="flex h-7 w-7 items-center justify-center rounded-chrome text-muted transition-colors hover:bg-zone hover:text-primary"
+            :title="isMuted ? t('live.preview.unmute') : t('live.preview.mute')"
+            :aria-label="isMuted ? t('live.preview.unmute') : t('live.preview.mute')"
             @click="toggleMute"
           >
             <Icon :name="isMuted ? 'volume-x' : 'volume-2'" :size="15" />
           </button>
 
-          <!-- 清晰度切换下拉（预览模式：超清/高清/标清胶囊，图 1 关键元素） -->
-          <div v-if="activeTab === 'preview'" class="relative">
+          <!-- 码流切换：主码流 / 子码流 -->
+          <div class="inline-flex rounded-chrome border border-line overflow-hidden text-xs">
             <button
-              class="rounded border border-[#dcdfe6] px-2 py-0.5 text-xs text-[#4e5969] transition-colors hover:border-[#1785E6] hover:text-[#1785E6]"
-              @click="showClarityMenu = !showClarityMenu"
+              class="px-2 py-0.5 transition-colors"
+              :class="profile === 'main' ? 'bg-primary-soft text-primary font-medium' : 'text-muted hover:text-primary'"
+              @click="selectProfile('main')"
             >
-              {{ clarity === 'ultra' ? '超清' : clarity === 'hd' ? '高清' : '标清' }}
+              {{ t('live.player.mainStream') }}
             </button>
-
-            <!-- 清晰度菜单 -->
-            <div
-              v-if="showClarityMenu"
-              class="absolute bottom-full left-0 mb-1 w-20 rounded border border-[#e5e6eb] bg-white py-1 shadow-lg z-30"
+            <button
+              class="px-2 py-0.5 border-l border-line transition-colors"
+              :class="profile === 'sub' ? 'bg-primary-soft text-primary font-medium' : 'text-muted hover:text-primary'"
+              @click="selectProfile('sub')"
             >
-              <button
-                class="w-full px-3 py-1 text-left text-xs hover:bg-[#f2f3f5]"
-                :class="clarity === 'ultra' ? 'font-bold text-[#1785E6]' : 'text-[#4e5969]'"
-                @click="selectClarity('ultra')"
-              >
-                超清
-              </button>
-              <button
-                class="w-full px-3 py-1 text-left text-xs hover:bg-[#f2f3f5]"
-                :class="clarity === 'hd' ? 'font-bold text-[#1785E6]' : 'text-[#4e5969]'"
-                @click="selectClarity('hd')"
-              >
-                高清
-              </button>
-              <button
-                class="w-full px-3 py-1 text-left text-xs hover:bg-[#f2f3f5]"
-                :class="clarity === 'sd' ? 'font-bold text-[#1785E6]' : 'text-[#4e5969]'"
-                @click="selectClarity('sd')"
-              >
-                标清
-              </button>
-            </div>
+              {{ t('live.player.subStream') }}
+            </button>
           </div>
         </div>
 
         <!-- 右侧辅助工具组：抓拍与全屏 -->
         <div class="flex items-center gap-2">
+          <a
+            v-if="snapshotUrl"
+            :href="snapshotUrl"
+            target="_blank"
+            rel="noopener"
+            class="text-xs text-primary hover:underline"
+          >{{ t('live.preview.viewSnapshot') }}</a>
           <button
-            class="flex h-7 w-7 items-center justify-center rounded text-[#4e5969] transition-colors hover:bg-[#f2f3f5] hover:text-[#1785E6]"
-            title="抓拍图片"
+            class="flex h-7 w-7 items-center justify-center rounded-chrome text-muted transition-colors hover:bg-zone hover:text-primary disabled:cursor-not-allowed disabled:opacity-40"
+            :title="t('live.preview.snapshot')"
+            :aria-label="t('live.preview.snapshot')"
+            :disabled="snapshotLoading || !liveStreamUrl"
             @click="takeSnapshot"
           >
-            <Icon name="camera" :size="15" />
+            <Icon :name="snapshotLoading ? 'refresh' : 'camera'" :size="15" :class="snapshotLoading ? 'ipc-spin' : ''" />
           </button>
           <button
-            class="flex h-7 w-7 items-center justify-center rounded text-[#4e5969] transition-colors hover:bg-[#f2f3f5] hover:text-[#1785E6]"
-            title="全屏"
+            class="flex h-7 w-7 items-center justify-center rounded-chrome text-muted transition-colors hover:bg-zone hover:text-primary"
+            :title="t('live.preview.fullscreen')"
+            :aria-label="t('live.preview.fullscreen')"
             @click="toggleFullscreen"
           >
             <Icon name="maximize" :size="15" />
           </button>
         </div>
+      </div>
+
+      <!-- ==================== 底部控制栏（仅回放 Tab） ==================== -->
+      <div v-else-if="activeTab === 'playback'" class="flex flex-wrap items-center gap-2 bg-surface-2 border-t border-line px-5 py-2.5">
+        <button
+          class="flex h-7 w-7 items-center justify-center rounded-chrome text-muted transition-colors hover:bg-zone hover:text-primary disabled:cursor-not-allowed disabled:opacity-40"
+          :title="paused ? t('live.playback.resume') : t('live.playback.pause')"
+          :aria-label="paused ? t('live.playback.resume') : t('live.playback.pause')"
+          :disabled="!session"
+          @click="togglePause"
+        >
+          <Icon :name="paused ? 'play' : 'pause'" :size="15" />
+        </button>
+        <button
+          class="flex h-7 w-7 items-center justify-center rounded-chrome text-muted transition-colors hover:bg-zone hover:text-primary disabled:cursor-not-allowed disabled:opacity-40"
+          :title="'30s'"
+          :aria-label="'30s'"
+          :disabled="!session"
+          @click="forward30"
+        >
+          <Icon name="fast-forward" :size="15" />
+        </button>
+        <button
+          class="flex h-7 w-7 items-center justify-center rounded-chrome text-muted transition-colors hover:bg-zone hover:text-primary"
+          :title="pbMuted ? t('live.playback.unmute') : t('live.playback.mute')"
+          :aria-label="pbMuted ? t('live.playback.unmute') : t('live.playback.mute')"
+          @click="togglePbMute"
+        >
+          <Icon :name="pbMuted ? 'volume-x' : 'volume-2'" :size="15" />
+        </button>
+        <UiSelect
+          :model-value="String(speed)" width="w-20" size="sm" :disabled="!session"
+          :options="speeds.map((s: number) => ({ label: s + 'x', value: String(s) }))" @update:model-value="onSpeedChange"
+        />
+        <button
+          class="flex h-7 w-7 items-center justify-center rounded-chrome text-muted transition-colors hover:bg-zone hover:text-primary"
+          :title="t('live.playback.snapshot')"
+          :aria-label="t('live.playback.snapshot')"
+          @click="doPbSnapshot"
+        >
+          <Icon name="camera" :size="15" />
+        </button>
+        <!-- 电子放大：简单点击循环 1x → 2x → 4x → 1x -->
+        <button
+          class="flex h-7 items-center gap-1 rounded-chrome px-1.5 text-xs text-muted transition-colors hover:bg-zone hover:text-primary"
+          :title="t('live.preview.zoomLevel', { level: zoomLevel })"
+          :aria-label="t('live.preview.zoomLevel', { level: zoomLevel })"
+          @click="cycleZoom"
+        >
+          <Icon name="zoom-in" :size="15" /><span class="font-mono">{{ zoomLevel }}x</span>
+        </button>
+
+        <span class="ml-auto" />
+        <button
+          class="flex h-7 w-7 items-center justify-center rounded-chrome text-muted transition-colors hover:bg-zone hover:text-danger disabled:cursor-not-allowed disabled:opacity-40"
+          :title="t('live.playback.closeSession')"
+          :aria-label="t('live.playback.closeSession')"
+          :disabled="!session"
+          @click="closeSession"
+        >
+          <Icon name="x" :size="15" />
+        </button>
       </div>
     </div>
   </div>

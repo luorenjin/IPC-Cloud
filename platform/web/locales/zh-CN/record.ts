@@ -1,0 +1,116 @@
+// 录像模块词条：录像计划（pages/record/plans.vue，含存储概览 REC-07）、
+// 录像计划模板（pages/record/templates.vue）、周×24h 网格编辑器（components/ScheduleGrid.vue）。
+//
+// 星期名 DAY_NAMES 在 utils/format.ts，不在此重复定义。
+export default {
+  // ---- 存储概览（REC-07） ----
+  'record.storage.title': '录像存储',
+  'record.storage.recalc': '重新计算',
+  'record.storage.loadFailed': '存储概览加载失败',
+  'record.storage.used': '已用',
+  'record.storage.percent': '（{n}%）',
+  'record.storage.segments': '录像片段',
+  'record.storage.segmentsUnit': '段',
+  'record.storage.keep': '保留',
+  'record.storage.keepUnit': '天',
+  'record.storage.nearFull': '存储即将写满，超出后最早的录像会被覆盖。请清理录像或扩容后再继续。',
+  'record.storage.calculating': '正在统计…',
+
+  // ---- 录像计划列表 ----
+  'record.plans.title': '录像计划',
+  'record.plans.create': '新建录像设置',
+  'record.plans.colChannel': '通道',
+  'record.plans.colTemplate': '录像模板',
+  'record.plans.colProfile': '码流',
+  'record.plans.colEnabled': '启用',
+  'record.plans.empty': '暂无录像计划，点击「新建录像设置」开始配置',
+  'record.plans.toggleAria': '启用录像计划 {name}',
+  'record.plans.editPlan': '修改计划',
+  'record.plans.editProfile': '修改码流',
+
+  // 新建录像设置向导
+  'record.plans.dialogTitle': '新建录像设置',
+  'record.plans.stepChannel': '选择通道',
+  'record.plans.stepTemplate': '选择模板',
+  'record.plans.stepProfile': '选择码流',
+  'record.plans.channelHint': '按设备分组，可勾选设备整组或单个通道',
+  'record.plans.selectedChannels': '已选 {n} 个通道',
+  'record.plans.noChannels': '暂无通道，请先在设备管理中接入设备',
+  'record.plans.templateHint': '选择录像计划模板（模板可在「录像模板」页维护）',
+  'record.plans.noTemplates': '暂无录像模板，请先在「录像模板」页创建',
+  'record.plans.builtin': '内置',
+  'record.plans.profileHint': '选择录像使用的码流；主码流画质高、占用存储大，子码流反之',
+  'record.plans.mainDesc': '高清录像，占用存储大',
+  'record.plans.subDesc': '流畅录像，占用存储小',
+  'record.plans.summary': '即将为 {count} 个通道创建 {template}（{profile}）录像计划',
+  'record.plans.prevStep': '上一步',
+  'record.plans.nextStep': '下一步',
+
+  // 修改计划 / 修改码流对话框
+  'record.plans.editPlanTitle': '修改录像计划',
+  'record.plans.channel': '通道',
+  'record.plans.template': '录像模板',
+  'record.plans.templatePlaceholder': '选择录像模板',
+  'record.plans.editProfileTitle': '修改码流',
+
+  // ---- 码流与录像类型 ----
+  'record.profile.main': '主码流',
+  'record.profile.sub': '子码流',
+  'record.kind.timer': '定时录像',
+  'record.kind.event': '事件录像',
+
+  // ---- 录像计划模板 ----
+  'record.templates.title': '录像计划模板',
+  'record.templates.create': '新建模板',
+  'record.templates.colName': '模板名称',
+  'record.templates.colKind': '类型',
+  'record.templates.colSchedule': '计划时间',
+  'record.templates.colBuiltin': '内置',
+  'record.templates.colRef': '通道引用数',
+  'record.templates.empty': '暂无录像模板，点击「新建模板」开始配置',
+  'record.templates.builtin': '内置',
+  'record.templates.copy': '复制',
+  'record.templates.deleteBlocked': '引用统计不可用，暂不能删除',
+  'record.templates.editTitle': '编辑录像模板',
+  'record.templates.createTitle': '新建录像模板',
+  'record.templates.nameLabel': '模板名称',
+  'record.templates.namePlaceholder': '如：全天定时录像',
+  'record.templates.kindLabel': '类型',
+  'record.templates.scheduleEvent': '事件触发时段（事件发生时在时段内才录像）',
+  'record.templates.scheduleTimer': '录像时间（在网格上拖选时段）',
+  'record.templates.refWarn': '该模板正被 {n} 个通道使用，保存后将同步更新这些通道的录像计划',
+  'record.templates.copySuffix': '{name}（副本）',
+
+  // ---- 周 × 24h 网格 ----
+  'record.schedule.notSet': '未设置',
+
+  // ---- 反馈与确认 ----
+  'record.msg.listSep': '、',
+  'record.msg.loadBaseFailed': '加载基础数据失败',
+  'record.msg.loadPlansFailed': '加载录像计划失败',
+  'record.msg.loadTemplatesFailed': '加载录像模板失败',
+  'record.msg.loadRefsFailed': '引用统计加载失败',
+  'record.msg.actionFailed': '操作失败',
+  'record.msg.deletePlanTitle': '删除确认',
+  'record.msg.deletePlanMessage': '确定删除通道「{name}」的录像计划？',
+  'record.msg.deletePlanDetail': '删除后该通道将停止按计划录像，已存储的录像文件不受影响。',
+  'record.msg.pickChannel': '请选择通道',
+  'record.msg.pickTemplate': '请选择录像模板',
+  'record.msg.planCreated': '录像计划已创建',
+  'record.msg.createPlanFailed': '创建录像计划失败',
+  'record.msg.planUpdated': '录像计划已更新',
+  'record.msg.profileUpdated': '码流已更新',
+  'record.msg.nameRequired': '请填写模板名称',
+  'record.msg.tplCascadeTitle': '修改录像模板',
+  'record.msg.tplCascadeMessage': '修改后将同步更新使用该模板的 {n} 个通道',
+  'record.msg.tplCascadeDetail': '受影响通道：{channels}',
+  'record.msg.tplCascadeConfirm': '继续保存',
+  'record.msg.tplUpdated': '模板已更新',
+  'record.msg.tplCreated': '模板已创建',
+  'record.msg.copiedOk': '已复制为「{name}」',
+  'record.msg.copyFailed': '复制失败',
+  'record.msg.tplInUse': '该模板正被 {n} 个通道使用，请先在录像计划中解绑后再删除',
+  'record.msg.deleteTplTitle': '删除确认',
+  'record.msg.deleteTplMessage': '确定删除录像模板「{name}」？',
+  'record.msg.deleteTplDetail': '删除后该模板不可恢复，已产生的录像文件不受影响。'
+}

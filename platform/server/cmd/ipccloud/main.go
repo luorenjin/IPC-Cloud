@@ -25,6 +25,10 @@ import (
 	"github.com/jetscam/ipccloud/server/internal/store"
 	"github.com/jetscam/ipccloud/server/internal/task"
 	"github.com/jetscam/ipccloud/server/internal/wshub"
+
+	// 嵌入 IANA 时区数据库：不依赖运行镜像是否恰好安装了 tzdata，
+	// 使布防时段按项目时区求值在任何基础镜像下都成立。
+	_ "time/tzdata"
 )
 
 func main() {
@@ -34,6 +38,9 @@ func main() {
 	store.Open(cfg)
 	store.OpenRedis(cfg)
 	store.Seed(cfg)
+	// 存量通道补建默认告警规则：engine 已对设备侧事件启用严格模式判定，
+	// 缺此迁移会使升级后设备侧告警全部静默。失败不阻断启动，但必须留下日志。
+	store.MigrateDefaultAlarmRules()
 
 	_ = os.MkdirAll(cfg.DataDir, 0o755)
 	gin.SetMode(gin.ReleaseMode)
@@ -47,6 +54,7 @@ func main() {
 	api.SetEngine(eng)
 	eng.SubscribeEvents()
 	eng.StartRecordRunner()
+	eng.StartRebootRunner()
 	eng.StartNodeStatsRunner()
 
 	// 任务中心生命周期治理（P-18）：回收僵尸任务 + 清理过期任务

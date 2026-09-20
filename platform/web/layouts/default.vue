@@ -90,8 +90,8 @@ async function onCancelTask(tk: any) {
 async function refreshBadges() {
   const api = useApi()
   try {
-    const res: any = await api.get('/alarms', { unread: 1, pageSize: 1 })
-    unread.value = res?.total ?? 0
+    const res: any = await api.get('/alarms', { pageSize: 1 })
+    unread.value = res?.unread ?? 0
   } catch {}
   try {
     const res: any = await api.get('/devices/gb28181/pending')
@@ -153,24 +153,28 @@ function goto(r: any) {
 
 const menu = computed(() => [
   { label: t('nav.dashboard'), icon: 'gauge', path: '/' },
+  // 设备为单条目：添加设备已是列表页工具栏按钮，国标待确认由列表页入口进入，
+  // 待办计数上提至此一级菜单，保留"侧栏一眼可见有事待办"（ADD-05）。
+  { label: t('nav.devices'), icon: 'video', path: '/devices', badge: pendingCount.value },
+  // 预览与回放同属"看画面"（一个看实时、一个看过去），归入「视频」一组。
   {
-    label: t('nav.devices'), icon: 'video', children: [
-      { label: t('nav.deviceList'), path: '/devices' },
-      { label: t('nav.addDevice'), path: '/devices?add=1' },
-      { label: t('nav.pending'), path: '/devices/pending', badge: pendingCount.value }
+    label: t('nav.video'), icon: 'monitor', children: [
+      { label: t('nav.live'), path: '/live' },
+      { label: t('nav.playback'), path: '/playback' }
     ]
   },
-  { label: t('nav.live'), icon: 'monitor', path: '/live' },
-  { label: t('nav.playback'), icon: 'film', path: '/playback' },
   {
     label: t('nav.alarms'), icon: 'bell', children: [
       { label: t('nav.messageCenter'), path: '/alarms' },
       { label: t('nav.alarmRules'), path: '/alarms/rules' },
-      { label: t('nav.alarmTemplates'), path: '/alarms/templates' }
+      { label: t('nav.alarmTemplates'), path: '/alarms/templates' },
+      { label: t('nav.alarmPolicies'), path: '/alarms/policies' }
     ]
   },
+  // 命名为「计划」而非「录像」：后者会与「视频」下的"录像回放"撞概念，
+  // 而本组子项恰为"录像计划 / 计划模板"，「计划」既准确又无歧义。
   {
-    label: t('nav.record'), icon: 'film', children: [
+    label: t('nav.plan'), icon: 'calendar', children: [
       { label: t('nav.recordPlans'), path: '/record/plans' },
       { label: t('nav.recordTemplates'), path: '/record/templates' }
     ]
@@ -187,24 +191,141 @@ const menu = computed(() => [
   }
 ])
 
+/* ---------------- 侧栏三档形态 ----------------
+ * full  —— 宽屏默认：220px 展开，文字+图标
+ * mini  —— 手动收起：56px 仅图标，靠 title/aria-label 提供名称
+ * drawer—— 窄屏(<1024px)：抽屉浮层，点遮罩或选中条目后关闭
+ * 用户的手动选择记在 localStorage，但窄屏一律走 drawer，不受记忆影响。
+ */
+const sidebarMini = ref(false)
+const drawerOpen = ref(false)
+const isNarrow = ref(false)
+
+let mq: MediaQueryList | null = null
+function syncNarrow(e: { matches: boolean }) {
+  isNarrow.value = e.matches
+  if (!e.matches) drawerOpen.value = false // 回到宽屏时关掉抽屉，避免残留遮罩
+}
+onMounted(() => {
+  try {
+    sidebarMini.value = localStorage.getItem('ipc_sidebar_mini') === '1'
+  } catch {
+    // 隐私模式下 localStorage 可能抛错，用默认展开即可
+  }
+  mq = window.matchMedia('(max-width: 1023px)')
+  syncNarrow(mq)
+  mq.addEventListener('change', syncNarrow)
+})
+onBeforeUnmount(() => mq?.removeEventListener('change', syncNarrow))
+
+function toggleSidebar() {
+  if (isNarrow.value) {
+    drawerOpen.value = !drawerOpen.value
+    return
+  }
+  sidebarMini.value = !sidebarMini.value
+  try {
+    localStorage.setItem('ipc_sidebar_mini', sidebarMini.value ? '1' : '0')
+  } catch {
+    // 记不住就下次重来，不影响本次使用
+  }
+}
+/** 仅在窄屏抽屉态下，选中条目后需要收起抽屉 */
+function afterNavigate() {
+  if (isNarrow.value) drawerOpen.value = false
+}
+/** mini 档不显示文字，分组也无法展开，点击直接进入首个子项 */
+const collapsed = computed(() => sidebarMini.value && !isNarrow.value)
+
 const expanded = reactive<Record<string, boolean>>({})
 function toggleGroup(label: string) { expanded[label] = !expanded[label] }
+
+/* ---------------- mini 档的二级菜单浮层 ----------------
+ * 收起态（56px）里二级菜单无法内联展开：nav 是 overflow-y-auto，内联展开会被直接裁掉，
+ * 更关键的是原来"点击分组头 = 进入首个子项"的写法让人根本选不到其它子项。
+ * 这里改为 fixed 定位的浮层：nav 的 overflow 会裁剪 absolute 子元素，而 fixed 相对视口
+ * 定位不受影响（宽屏态 aside 上没有 transform，不会形成包含块）。
+ * 落点在打开时按分组头的 rect 计算；滚动/缩放/切路由时直接关闭，避免浮层与按钮错位。
+ */
+const flyoutLabel = ref('')
+const flyoutPos = reactive({ top: 0, left: 0 })
+let flyoutCloseTimer: ReturnType<typeof setTimeout> | null = null
+
+function cancelFlyoutClose() {
+  if (flyoutCloseTimer) { clearTimeout(flyoutCloseTimer); flyoutCloseTimer = null }
+}
+function closeFlyout() {
+  cancelFlyoutClose()
+  flyoutLabel.value = ''
+}
+/** 鼠标从分组头移到浮层之间有一小段空隙，延迟关闭以免浮层被"闪断" */
+function scheduleFlyoutClose() {
+  cancelFlyoutClose()
+  flyoutCloseTimer = setTimeout(() => { flyoutCloseTimer = null; flyoutLabel.value = '' }, 120)
+}
+function openFlyout(label: string, el?: HTMLElement | null) {
+  if (!collapsed.value) return
+  cancelFlyoutClose()
+  if (el) {
+    const r = el.getBoundingClientRect()
+    flyoutPos.top = r.top
+    flyoutPos.left = r.right + 6
+  }
+  flyoutLabel.value = label
+}
+function onGroupClick(m: any, e: MouseEvent) {
+  if (!collapsed.value) { toggleGroup(m.label); return }
+  // 鼠标用户已由 hover 打开时，点击不再切换，否则会"悬停打开 → 点击立刻关掉"
+  if (flyoutLabel.value === m.label) return
+  openFlyout(m.label, e.currentTarget as HTMLElement)
+}
+/** 焦点离开整个分组（含浮层）才关闭；在按钮与浮层子项之间移动焦点不应关 */
+function onGroupFocusOut(e: FocusEvent) {
+  if (!collapsed.value) return
+  const next = e.relatedTarget as Node | null
+  if (next && (e.currentTarget as HTMLElement).contains(next)) return
+  closeFlyout()
+}
+
+// 路由变化、侧栏形态切换、视口尺寸变化都直接关掉浮层，避免它停在已经错位的位置
+watch(() => route.path, () => closeFlyout())
+watch(collapsed, () => closeFlyout())
+function onFlyoutViewportChange() { if (flyoutLabel.value) closeFlyout() }
+onMounted(() => window.addEventListener('resize', onFlyoutViewportChange))
+onBeforeUnmount(() => window.removeEventListener('resize', onFlyoutViewportChange))
 function groupActive(m: any) {
   return (m.children || []).some((s: any) => isActive(s.path))
 }
 function isActive(path: string) {
   const p = path.split('?')[0]
   if (p === '/') return route.path === '/'
-  if (path.includes('?add=1')) return route.path === '/devices' && route.query.add === '1'
   return route.path.startsWith(p)
 }
 menu.value.forEach((m: any) => { if (m.children) expanded[m.label] = groupActive(m) })
 
-const userMenu = [
+// computed：语言切换后菜单文案与当前语言标记要跟着变
+const userMenu = computed(() => [
   { label: t('user.profile'), value: 'profile' },
-  { label: t('user.language') + '：' + (locale.value === 'zh-CN' ? '中文' : 'EN'), value: 'lang' },
+  { label: t('user.language') + t('common.colon') + (locale.value === 'zh-CN' ? t('lang.zh') : t('lang.en')), value: 'lang' },
   { label: t('user.logout'), value: 'logout', danger: true, divided: true }
-]
+])
+/** 打开任务中心：每次打开拉一次最新列表，避免常驻轮询 */
+function openTasks() {
+  taskOpen.value = true
+  loadTasks()
+}
+
+/** 节点健康的一句话描述，供顶栏图标的 tooltip 与可访问名称共用 */
+const nodeLabel = computed(() => (nodeHealthy.value ? t('nav.nodeHealthy') : t('nav.nodeUnhealthy')))
+
+/* 消息中心入口：已在消息中心时点击属于"同路由导航"，页面不会重新挂载，
+   表现为点了毫无反应；这里发一个信号，让列表回到最新（第 1 页 + 滚到顶）。
+   不在消息中心时什么都不做，交给 NuxtLink 正常跳转。 */
+const messageCenterTick = useState('messageCenterTick', () => 0)
+function openMessageCenter() {
+  if (route.path === '/alarms') messageCenterTick.value++
+}
+
 function onUserMenu(v: string) {
   if (v === 'profile') navigateTo('/account')
   else if (v === 'lang') setLocale(locale.value === 'zh-CN' ? 'en' : 'zh-CN')
@@ -213,41 +334,116 @@ function onUserMenu(v: string) {
 </script>
 
 <template>
-  <div class="flex h-screen overflow-hidden bg-canvas">
+  <div class="flex h-screen overflow-hidden bg-canvas" @keydown.esc="drawerOpen = false; closeFlyout()">
+    <!-- 键盘用户跳过导航直达正文 -->
+    <a href="#ipc-main" class="ipc-skip-link">{{ t('nav.skipToMain') }}</a>
+
     <!-- 侧栏 -->
-    <aside class="flex w-55 shrink-0 flex-col bg-sidebar" style="width: 220px">
-      <div class="flex h-13 items-center gap-2 border-b border-white/5 px-5" style="height: 52px">
-        <span class="flex h-6 w-6 items-center justify-center rounded bg-primary text-white"><Icon name="video" :size="14" /></span>
-        <span class="text-[17px] font-bold tracking-wide text-white">IpcCloud</span>
+    <!-- 窄屏抽屉遮罩：点击关闭；Esc 由 @keydown.esc 在根容器处理 -->
+    <div
+      v-if="isNarrow && drawerOpen"
+      class="fixed inset-0 z-40 bg-black/60"
+      @click="drawerOpen = false"
+    />
+
+    <!-- 侧栏：宽屏 full/mini 两档，窄屏为抽屉浮层 -->
+    <aside
+      class="flex shrink-0 flex-col bg-sidebar transition-[width] duration-200"
+      :class="[
+        isNarrow
+          ? ['fixed inset-y-0 left-0 z-50 w-sidebar shadow-pop', drawerOpen ? '' : '-translate-x-full']
+          : (collapsed ? 'w-sidebar-mini' : 'w-sidebar')
+      ]"
+      :inert="isNarrow && !drawerOpen ? true : undefined"
+    >
+      <div class="flex h-bar items-center gap-2 border-b border-line" :class="collapsed ? 'justify-center px-0' : 'px-5'">
+        <span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-signal bg-primary text-sidebar"><Icon name="video" :size="14" /></span>
+        <span v-if="!collapsed" class="text-[17px] font-bold tracking-wide text-ink">IpcCloud</span>
       </div>
-      <nav class="flex-1 overflow-y-auto py-2">
+      <nav class="flex-1 overflow-y-auto py-2" :aria-label="t('nav.main')" @scroll="closeFlyout()">
         <template v-for="m in menu" :key="m.label">
-          <div
+          <!-- 单条目：语义上是"去某处"，用链接而非按钮 -->
+          <NuxtLink
             v-if="!m.children"
-            class="mx-2 flex cursor-pointer items-center gap-2.5 rounded px-3 py-2 text-sm transition-colors"
-            :class="isActive(m.path) ? 'bg-primary font-medium text-white' : 'text-sidebar-text hover:bg-sidebar-hover hover:text-white'"
-            @click="navigateTo(m.path)"
+            :to="m.path"
+            :title="collapsed ? m.label : undefined"
+            :aria-label="collapsed ? m.label : undefined"
+            :aria-current="isActive(m.path) ? 'page' : undefined"
+            class="relative mx-2 flex items-center gap-2.5 rounded-signal py-2 text-sm transition-colors"
+            :class="[
+              collapsed ? 'justify-center px-0' : 'px-3',
+              isActive(m.path) ? 'bg-sidebar-hover font-medium text-ink' : 'text-sidebar-text hover:bg-sidebar-hover hover:text-ink'
+            ]"
+            @click="afterNavigate"
           >
-            <Icon :name="m.icon" :size="16" />{{ m.label }}
-          </div>
-          <template v-else>
-            <div
-              class="mx-2 flex cursor-pointer items-center gap-2.5 rounded px-3 py-2 text-sm transition-colors"
-              :class="groupActive(m) ? 'text-white' : 'text-sidebar-text hover:bg-sidebar-hover hover:text-white'"
-              @click="toggleGroup(m.label)"
+            <span class="absolute left-0 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-full bg-primary transition-opacity" :class="isActive(m.path) ? 'opacity-100' : 'opacity-0'" />
+            <Icon :name="m.icon" :size="16" :class="isActive(m.path) ? 'text-primary' : ''" />
+            <template v-if="!collapsed">{{ m.label }}</template>
+            <span
+              v-if="m.badge"
+              class="rounded-full bg-danger text-[10px] leading-4 text-white"
+              :class="collapsed ? 'absolute right-1 top-1 h-1.5 w-1.5 p-0' : 'ml-auto px-1.5'"
             >
-              <Icon :name="m.icon" :size="16" />{{ m.label }}
-              <Icon name="chevron-down" :size="13" class="ml-auto transition-transform" :class="expanded[m.label] ? '' : '-rotate-90'" />
-            </div>
-            <div v-show="expanded[m.label]" class="mb-1 ml-4 border-l border-white/8 pl-2">
-              <div
-                v-for="s in m.children" :key="s.path"
-                class="flex cursor-pointer items-center justify-between rounded px-3 py-1.5 text-[13px] transition-colors"
-                :class="isActive(s.path) ? 'bg-primary font-medium text-white' : 'text-sidebar-text hover:bg-sidebar-hover hover:text-white'"
-                @click="navigateTo(s.path)"
+              <template v-if="!collapsed">{{ m.badge > 99 ? '99+' : m.badge }}</template>
+              <span v-else class="sr-only">{{ t('nav.pendingCount', { n: m.badge }) }}</span>
+            </span>
+          </NuxtLink>
+
+          <template v-else>
+            <!-- 分组头 + 二级菜单：展开态是内联折叠列表，收起态改为浮层（悬停/点击/聚焦触发）。
+                 两种形态复用同一份子项标记，避免子项文案与徽标在两处各写一遍而漂移。 -->
+            <div
+              class="relative"
+              @mouseleave="collapsed && scheduleFlyoutClose()"
+              @focusout="onGroupFocusOut"
+            >
+              <!-- 分组头：展开/收起是状态切换，用按钮并声明 aria-expanded -->
+              <button
+                type="button"
+                class="mx-2 flex w-[calc(100%-1rem)] items-center gap-2.5 rounded-signal py-2 text-sm transition-colors"
+                :class="[
+                  collapsed ? 'justify-center px-0' : 'px-3',
+                  collapsed && flyoutLabel === m.label
+                    ? 'bg-sidebar-hover text-ink'
+                    : (groupActive(m) ? 'text-ink' : 'text-sidebar-text hover:bg-sidebar-hover hover:text-ink')
+                ]"
+                :title="collapsed ? m.label : undefined"
+                :aria-label="collapsed ? m.label : undefined"
+                :aria-haspopup="collapsed ? 'menu' : undefined"
+                :aria-expanded="collapsed ? flyoutLabel === m.label : !!expanded[m.label]"
+                @mouseenter="collapsed && openFlyout(m.label, $event.currentTarget as HTMLElement)"
+                @focus="collapsed && openFlyout(m.label, $event.currentTarget as HTMLElement)"
+                @click="onGroupClick(m, $event)"
               >
-                <span>{{ s.label }}</span>
-                <span v-if="s.badge" class="rounded-full bg-danger px-1.5 text-[10px] leading-4 text-white">{{ s.badge > 99 ? '99+' : s.badge }}</span>
+                <Icon :name="m.icon" :size="16" :class="groupActive(m) ? 'text-primary' : ''" />
+                <template v-if="!collapsed">
+                  {{ m.label }}
+                  <Icon name="chevron-down" :size="13" class="ml-auto transition-transform" :class="expanded[m.label] ? '' : '-rotate-90'" />
+                </template>
+              </button>
+              <div
+                v-show="collapsed ? flyoutLabel === m.label : expanded[m.label]"
+                :class="collapsed
+                  ? 'fixed z-50 w-44 rounded-signal border border-line bg-surface py-1 shadow-pop'
+                  : 'mb-1 ml-4 border-l border-line pl-2'"
+                :style="collapsed ? { top: flyoutPos.top + 'px', left: flyoutPos.left + 'px' } : undefined"
+                :role="collapsed ? 'menu' : undefined"
+                :aria-label="collapsed ? m.label : undefined"
+              >
+                <NuxtLink
+                  v-for="s in m.children" :key="s.path"
+                  :to="s.path"
+                  :role="collapsed ? 'menuitem' : undefined"
+                  :aria-current="isActive(s.path) ? 'page' : undefined"
+                  class="relative flex items-center justify-between rounded-signal px-3 py-1.5 text-[13px] transition-colors"
+                  :class="isActive(s.path) ? 'bg-sidebar-hover font-medium text-ink' : 'text-sidebar-text hover:bg-sidebar-hover hover:text-ink'"
+                  @click="afterNavigate(); closeFlyout()"
+                >
+                  <!-- 激活竖线挂在内联态的左边框上；浮层里没有这条边，画出来会飘在面板外 -->
+                  <span v-if="!collapsed" class="absolute -left-2 top-1/2 h-3.5 w-0.5 -translate-y-1/2 rounded-full bg-primary transition-opacity" :class="isActive(s.path) ? 'opacity-100' : 'opacity-0'" />
+                  <span>{{ s.label }}</span>
+                  <span v-if="s.badge" class="rounded-full bg-danger px-1.5 text-[10px] leading-4 text-white">{{ s.badge > 99 ? '99+' : s.badge }}</span>
+                </NuxtLink>
               </div>
             </div>
           </template>
@@ -257,15 +453,16 @@ function onUserMenu(v: string) {
 
     <!-- 主区 -->
     <div class="flex min-w-0 flex-1 flex-col">
-      <header class="flex h-13 shrink-0 items-center gap-3 border-b border-line bg-surface px-4" style="height: 52px">
-        <!-- 返回首页按钮（严格对齐图 4 顶栏左侧） -->
+      <header class="flex h-bar shrink-0 items-center gap-3 border-b border-line bg-surface px-4">
+        <!-- 侧栏开关：宽屏切 mini/full，窄屏开合抽屉 -->
         <button
-          v-if="route.path !== '/'"
           type="button"
-          class="flex items-center gap-1 rounded border border-[#e5e6eb] bg-white px-2.5 py-1 text-xs text-[#4e5969] hover:border-[#1785E6] hover:text-[#1785E6] transition-colors"
-          @click="navigateTo('/')"
+          class="rounded-chrome p-1.5 text-muted transition-colors hover:bg-zone hover:text-primary"
+          :aria-label="isNarrow ? (drawerOpen ? t('nav.closeNav') : t('nav.openNav')) : (collapsed ? t('nav.expandSidebar') : t('nav.collapseSidebar'))"
+          :aria-expanded="isNarrow ? drawerOpen : !collapsed"
+          @click="toggleSidebar"
         >
-          <Icon name="chevron-left" :size="13" />返回首页
+          <Icon name="panel-left" :size="17" />
         </button>
 
         <div class="flex items-center gap-1.5">
@@ -276,8 +473,9 @@ function onUserMenu(v: string) {
           />
           <button
             type="button"
-            class="p-1.5 rounded text-[#86909c] hover:bg-[#f2f3f5] hover:text-[#1785E6]"
-            title="所有企业及项目"
+            class="p-1.5 rounded-chrome text-muted hover:bg-zone hover:text-primary"
+            :aria-label="t('nav.allProjects')"
+            :title="t('nav.allProjects')"
             @click="navigateTo('/console')"
           >
             <Icon name="grid" :size="15" />
@@ -288,55 +486,70 @@ function onUserMenu(v: string) {
           <div class="flex h-8 w-64 items-center gap-1.5 rounded border border-line bg-canvas px-2.5 focus-within:border-primary focus-within:bg-surface">
             <Icon name="search" :size="14" class="text-placeholder" />
             <input
-              v-model="search" class="w-full bg-transparent text-sm outline-none placeholder:text-placeholder"
-              :placeholder="t('common.search') + '（设备 / 通道）'" @focus="searchResults.length && (searchOpen = true)"
+              v-model="search" class="ipc-focus-none w-full bg-transparent text-sm outline-none placeholder:text-placeholder"
+              :placeholder="t('nav.searchPlaceholder')" @focus="searchResults.length && (searchOpen = true)"
             />
           </div>
-          <div v-if="searchOpen && searchResults.length" class="absolute left-0 top-9 z-50 w-72 rounded border border-line bg-surface p-1 shadow-pop">
-            <div
+          <div v-if="searchOpen && searchResults.length" class="absolute left-0 top-9 z-50 w-72 rounded-chrome border border-line bg-surface-2 p-1 shadow-pop">
+            <button
               v-for="(r, i) in searchResults" :key="i"
-              class="flex cursor-pointer items-center gap-2 rounded px-2.5 py-1.5 text-sm hover:bg-primary-soft"
+              type="button"
+              class="flex w-full items-center gap-2 rounded px-2.5 py-1.5 text-left text-sm hover:bg-primary-soft"
               @click="goto(r)"
             >
               <Icon name="video" :size="14" class="text-placeholder" />
               <span class="truncate">{{ r.label }}</span>
               <span v-if="r.sub" class="ml-auto text-xs text-placeholder">{{ r.sub }}</span>
-            </div>
+            </button>
           </div>
         </div>
 
         <div class="ml-auto flex items-center gap-4">
-          <!-- 节点健康小图标 -->
-          <UiTooltip :label="nodeHealthy ? '流媒体节点正常' : '存在离线节点'">
-            <span class="flex items-center gap-1 text-xs" :class="nodeHealthy ? 'text-success' : 'text-danger'">
+          <!-- 节点健康：点击进入媒体节点页（与总览页「媒体节点 N 个正常」同一入口）。
+               原先是个纯 span——无链接、无手型、不可聚焦，看着像入口却点不动。 -->
+          <UiTooltip :label="nodeLabel + t('common.comma') + t('nav.nodeEntry')">
+            <NuxtLink
+              to="/system/nodes"
+              class="flex items-center gap-1 rounded-chrome text-xs transition-colors hover:text-primary"
+              :class="nodeHealthy ? 'text-success' : 'text-danger'"
+              :aria-label="nodeLabel + t('common.comma') + t('nav.nodeEntry')"
+            >
               <Icon name="server" :size="15" />
               <span class="h-1.5 w-1.5 rounded-full" :class="nodeHealthy ? 'bg-success' : 'bg-danger'" />
-            </span>
+            </NuxtLink>
           </UiTooltip>
           <!-- 任务中心 -->
           <UiTooltip :label="t('nav.tasks')">
-            <button class="relative text-muted transition-colors hover:text-primary" @click="taskOpen = true">
+            <button type="button" class="relative rounded-chrome text-muted transition-colors hover:text-primary" :aria-label="t('nav.tasks')" @click="openTasks">
               <Icon name="list" :size="18" />
               <span v-if="runningTasks()" class="absolute -right-1 -top-1 h-2 w-2 rounded-full bg-primary" />
             </button>
           </UiTooltip>
-          <!-- 消息 -->
+          <!-- 消息中心：用链接而非按钮（可聚焦、可中键新开、有手型）；
+               已在本页时由 openMessageCenter 补"回到最新"的反馈，而不是点了毫无反应。 -->
           <UiBadge :value="unread" class="mt-1">
-            <button class="text-muted transition-colors hover:text-primary" @click="navigateTo('/alarms')">
-              <Icon name="bell" :size="18" />
-            </button>
+            <UiTooltip :label="t('nav.messageCenter')">
+              <NuxtLink
+                to="/alarms"
+                class="block rounded-chrome text-muted transition-colors hover:text-primary"
+                :aria-label="unread ? t('nav.messageCenter') + t('common.comma') + t('nav.unreadCount', { n: unread }) : t('nav.messageCenter')"
+                @click="openMessageCenter"
+              >
+                <Icon name="bell" :size="18" />
+              </NuxtLink>
+            </UiTooltip>
           </UiBadge>
           <!-- 用户 -->
           <UiDropdown :items="userMenu" @select="onUserMenu">
             <span class="flex cursor-pointer items-center gap-1 text-sm text-body hover:text-primary">
-              <Icon name="user" :size="15" />{{ user?.name || user?.username || '用户' }}
+              <Icon name="user" :size="15" />{{ user?.name || user?.username || t('user.fallbackName') }}
               <Icon name="chevron-down" :size="13" />
             </span>
           </UiDropdown>
         </div>
       </header>
 
-      <main class="min-h-0 flex-1 overflow-auto p-4"><slot /></main>
+      <main id="ipc-main" tabindex="-1" class="min-h-0 flex-1 overflow-auto p-4"><slot /></main>
     </div>
 
     <!-- 任务中心抽屉（P-18） -->
@@ -352,13 +565,15 @@ function onUserMenu(v: string) {
             @click="taskFilter = f.v as any"
           >{{ f.l }}</button>
         </div>
-        <button class="text-muted transition hover:text-primary" title="刷新" @click="reloadTasks">
+        <button class="text-muted transition hover:text-primary" :title="t('common.refresh')" @click="reloadTasks">
           <Icon name="refresh" :size="15" />
         </button>
       </div>
 
-      <div v-if="taskLoading && !tasks.length" class="p-5 text-center text-sm text-placeholder">加载中…</div>
-      <div v-else-if="!tasks.length" class="p-5"><UiEmptyState text="暂无任务" /></div>
+      <div v-if="taskLoading && !tasks.length" class="p-5 text-center text-sm text-placeholder">{{ t('common.loading') }}</div>
+      <div v-else-if="!tasks.length" class="p-5">
+        <UiEmptyState :text="t('task.empty')" :hint="t('task.emptyHint')" />
+      </div>
       <ul v-else class="divide-y divide-line-soft">
         <li v-for="tk in tasks" :key="tk.id" class="group px-5 py-3">
           <div class="flex items-center justify-between gap-2">

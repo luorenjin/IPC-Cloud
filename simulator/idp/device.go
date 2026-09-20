@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"strings"
 	"sync"
@@ -38,14 +39,24 @@ type Device struct {
 	PlatformAddr string
 	// SnapshotJPEG 快照图片内容（assets/frame.jpg）
 	SnapshotJPEG []byte
+	// PwdChanged 对应 hello.localUserChanged（接入规范 §5.5.2）的**初始值**：
+	// 设备本地默认口令是否已修改。平台只在它为 false 时提示「仍在用出厂默认口令」。
+	// 运行期会被改密（置 true）与恢复出厂（置 false）改写。
+	PwdChanged bool
 	// OnLog 可选日志钩子
 	OnLog func(format string, args ...any)
 
-	cli      mqtt.Client
-	mu       sync.Mutex
-	pushes   map[string]*pushSession
-	nextMsg  int64
-	bound    bool
+	cli     mqtt.Client
+	mu      sync.Mutex
+	pushes  map[string]*pushSession
+	nextMsg int64
+	bound   bool
+	cfg     map[string]any // 本地配置（见 config.go，键名/范围与固件规则表对齐）
+	// startedAt 设备开机时刻，status.report.uptime 的基准（Start 时置位）。
+	startedAt time.Time
+	// pwdHash 改密后的口令哈希（只存哈希，不存明文）；pwdChanged 是当前是否已改过默认口令
+	pwdHash    string
+	pwdChanged bool
 }
 
 // pushSession 一次推流会话。
@@ -56,6 +67,12 @@ type pushSession struct {
 // Start 连接 broker 并开始生命周期。
 func (d *Device) Start() error {
 	d.pushes = map[string]*pushSession{}
+	// 设备开机时刻：uptime 基准（重启模拟器＝重启设备，uptime 归零）
+	d.startedAt = time.Now()
+	// 运行期改密状态从启动参数接过来（默认 true=已改密），之后由 cfg.set / cfg.reset 改写
+	d.mu.Lock()
+	d.pwdChanged = d.PwdChanged
+	d.mu.Unlock()
 	opts := mqtt.NewClientOptions().
 		AddBroker(d.Broker).
 		SetClientID("sim-" + d.ID).
@@ -161,6 +178,10 @@ func (d *Device) hello() {
 			"record.device.query", "record.device.play", "record.platform",
 			"reboot", "ptz",
 		},
+		// 默认口令是否已修改：false 时平台在「本地账户」区块标黄提示。
+		// 自研固件首次绑定/首次登录必须强制修改（接入规范 §590），所以这个字段要跟着 hello 一起来。
+		// 这里是**当前**状态而不是启动参数原值：平台改密后应不再标黄，恢复出厂后应重新标黄
+		"localUserChanged": d.pwdChangedNow(),
 	}
 	d.publishUp("status", envOf("status.hello", d.newMsgID(), data))
 	// 平台对 hello 幂等处理（已绑定则直接刷新通道/在线态），视为已注册，
@@ -171,16 +192,31 @@ func (d *Device) hello() {
 	d.logf("hello sent")
 }
 
-// reportLoop 周期状态上报。
+// reportLoop 周期状态上报（§5.5.2 status.report）。
+//
+// 指标必须是「活」的：早先这里是四个写死的常量（uptime 恒 3600、cpu/mem/temp 恒定），
+// 于是平台详情页「在线时长」永远显示 01:00:00（用户报的死值），运行指标也不随后续上报变化，
+// 连 30s 刷新链路都看不出来。
+//
+//	uptime —— 设备侧真实运行秒数（随上报自然增长；模拟器重启＝设备重启，故归零）
+//	cpu/mem/temp —— 固定相位正弦的小幅波动，确定性、可复现（不引入随机数，避免同一份
+//	                配置两次跑出不同上报值），数值范围对应一台普通 IPC 的空载波动。
 func (d *Device) reportLoop() {
 	t := time.NewTicker(30 * time.Second)
 	defer t.Stop()
 	for range t.C {
+		up := time.Since(d.startedAt).Seconds()
 		d.publishUp("status", envOf("status.report", d.newMsgID(), map[string]any{
-			"cpu": 12.5, "mem": 41.2, "temp": 38.5, "uptime": 3600,
+			"cpu":    round1(12.5 + 4.0*math.Sin(up/37.0)),
+			"mem":    round1(41.2 + 1.5*math.Sin(up/53.0)),
+			"temp":   round1(38.5 + 1.2*math.Sin(up/41.0)),
+			"uptime": int64(up),
 		}))
 	}
 }
+
+// round1 保留一位小数（与平台侧 fmtPercent/fmtTemp 的展示精度一致）。
+func round1(v float64) float64 { return math.Round(v*10) / 10 }
 
 func (d *Device) newMsgID() string {
 	d.mu.Lock()
@@ -205,7 +241,8 @@ func (d *Device) onMessage(_ mqtt.Client, msg mqtt.Message) {
 	if data == nil {
 		data = map[string]any{}
 	}
-	d.logf("cmd %s %v", typ, data)
+	// 日志脱敏：cfg.set 的 values 可能带明文口令，不能直接 %v 打出去
+	d.logf("cmd %s %v", typ, redactCmdData(data))
 	switch typ {
 	case "cmd.bind":
 		d.bound = true
@@ -247,11 +284,36 @@ func (d *Device) onMessage(_ mqtt.Client, msg mqtt.Message) {
 		d.stopPush("rec:" + sid)
 		d.ack(env, 0, "", map[string]any{})
 	case "cfg.get":
-		d.ack(env, 0, "", map[string]any{"values": map[string]any{
-			"osd.text": "SIM-IPC", "video.main.fps": 25, "video.main.bitrate": 800,
-		}})
+		// keys 为空也要回全量：平台按 cfgKeys 下发，设备只回自己拥有的键（同固件按 pattern 匹配）。
+		keys := []string{}
+		if raw, ok := data["keys"].([]any); ok {
+			for _, k := range raw {
+				if s, ok := k.(string); ok {
+					keys = append(keys, s)
+				}
+			}
+		}
+		d.ack(env, 0, "", map[string]any{"values": d.cfgGet(keys)})
 	case "cfg.set":
-		d.ack(env, 0, "", map[string]any{"rejected": []string{}})
+		values, _ := data["values"].(map[string]any)
+		rejected := d.cfgSet(values)
+		d.ack(env, 0, "", map[string]any{"rejected": rejected})
+		// 改过口令就重新宣告一次 hello：localUserChanged 是 hello 字段，
+		// 不重发的话平台会一直显示“仍在用出厂默认口令”，直到下一次重连才自洽。
+		// 失败（进了 rejected）不算数——没改成功就不该改变对外声称的状态。
+		if cfgTouchedSecret(values, rejected) {
+			go func() {
+				time.Sleep(time.Second)
+				d.hello()
+			}()
+		}
+	case "cfg.reset":
+		d.cfgReset()
+		d.ack(env, 0, "", map[string]any{})
+		go func() {
+			time.Sleep(time.Second)
+			d.hello()
+		}()
 	default:
 		d.ack(env, 400, "unknown type", nil)
 	}
@@ -334,14 +396,14 @@ func (d *Device) handleSnapshot(env cmdMsg, data map[string]any) {
 		return
 	}
 	defer resp.Body.Close()
+	// 平台 REST 的成功响应是「把 data 平铺在顶层」（api/common.go 的 ok()），
+	// 不是 {code,data:{...}}——只有失败才回 {code,msg,suggest}。
+	// 按嵌套结构解会静默拿到空 url，表现为「抓图成功但图片是空的」。
 	var r struct {
-		Code int `json:"code"`
-		Data struct {
-			URL string `json:"url"`
-		} `json:"data"`
+		URL string `json:"url"`
 	}
 	_ = json.NewDecoder(resp.Body).Decode(&r)
-	d.ack(env, 0, "", map[string]any{"url": r.Data.URL})
+	d.ack(env, 0, "", map[string]any{"url": r.URL})
 }
 
 // startPush 启动 RTMP 推流。

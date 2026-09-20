@@ -158,6 +158,14 @@ func (e *Engine) startInternalStream(dev *models.Device, ch *models.Channel, pro
 }
 
 // scheduleMatches schedule {"days":[1..7],"ranges":[["00:00","24:00"]]}。
+//
+// 交叉引用：engine 包内还有一份 alarmrule.go 的 scheduleActiveAt，求值**同一个**
+// Schedule 结构却语义相反——这边 days 为空表示全天录且忽略 ranges、ranges 为空表示
+// 从不录、按服务器本地时区求值；那边 days/ranges 为空都表示不限（全天候放行），按
+// 项目时区求值。两份实现由同一个周×24h 网格编辑器产出的模板输入，用户会理所当然地
+// 认为语义相同——内置模板（days 全选 + 00:00-24:00）下两者结论一致，掩盖了分歧，但
+// 一旦出现 days 或 ranges 为空的自定义模板，两条链路立刻分叉。此为已知限制（详见
+// 设计文档 §6），修改任一处求值逻辑前，必须同时确认另一处是否需要同步调整。
 func scheduleMatches(sch models.JSONB, now time.Time) bool {
 	rawDays, _ := sch["days"].([]any)
 	rawRanges, _ := sch["ranges"].([]any)
@@ -209,7 +217,10 @@ func toStr(v any) string {
 func parseHM(s string) int {
 	s = strings.TrimSpace(s)
 	var h, m int
-	if len(s) >= 4 {
+	// 需要索引到 s[4]（"HH:MM" 的分钟十位），条件须为 len>=5；原先写成 len>=4 时，
+	// 4 字符输入（如 "8:30"）会通过判断却越界访问 s[4] 而 panic。只修越界，不改变
+	// 本函数对合法 "HH:MM" 输入的既有解析结果。
+	if len(s) >= 5 {
 		h = int(s[0]-'0')*10 + int(s[1]-'0')
 		m = int(s[3]-'0')*10 + int(s[4]-'0')
 	}

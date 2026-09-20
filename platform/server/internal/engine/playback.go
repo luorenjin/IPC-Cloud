@@ -174,7 +174,7 @@ func (e *Engine) StartPlayback(userID, channelID string, start, end int64, speed
 		}
 	} else {
 		zlm := media.ForNode(node)
-		port, err := zlm.OpenRtpServer(context.Background(), 0, 1, stream)
+		port, err := zlm.OpenRtpServerWithRecycle(context.Background(), 1, stream)
 		if err != nil {
 			return nil, errs.ENodeOffline.WithMsg("openRtpServer 失败")
 		}
@@ -198,11 +198,11 @@ func (e *Engine) StartPlayback(userID, channelID string, start, end int64, speed
 		Base: start, NodeID: node.ID, App: app, Stream: stream, Start: start, End: end})
 	return map[string]any{
 		"sessionId": sessionID, "source": "device",
-		"node":     map[string]any{"id": node.ID, "publicHost": node.PublicHost, "httpPort": node.HTTPPort, "httpsPort": node.HTTPSPort},
-		"app":      app, "stream": stream,
-		"wsFlv":    e.flvURL(node, app, stream, token, "ws"),
-		"wssFlv":   e.flvURL(node, app, stream, token, "wss"),
-		"token":    token,
+		"node": map[string]any{"id": node.ID, "publicHost": node.PublicHost, "httpPort": node.HTTPPort, "httpsPort": node.HTTPSPort},
+		"app":  app, "stream": stream,
+		"wsFlv":  e.flvURL(node, app, stream, token, "ws"),
+		"wssFlv": e.flvURL(node, app, stream, token, "wss"),
+		"token":  token,
 	}, nil
 }
 

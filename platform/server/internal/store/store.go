@@ -29,6 +29,7 @@ func Open(cfg *config.Config) *gorm.DB {
 		&models.Device{}, &models.Channel{},
 		&models.MediaNode{}, &models.StreamSession{},
 		&models.RecordTemplate{}, &models.RecordPlan{}, &models.RecordIndex{},
+		&models.RebootPlan{},
 		&models.AlarmTemplate{}, &models.AlarmRule{}, &models.AlarmEvent{},
 		&models.AuditLog{}, &models.Task{},
 		&models.IdpPreadd{}, &models.GbWhitelist{}, &models.GbPending{},
@@ -36,7 +37,56 @@ func Open(cfg *config.Config) *gorm.DB {
 	); err != nil {
 		log.Fatalf("auto migrate: %v", err)
 	}
+	backfillAuditTenant()
+	MigrateMilliTimestamps()
 	return db
+}
+
+// ProjectTenant 取项目所属租户。定时任务等没有登录上下文的地方写审计日志时用它补全租户维度。
+func ProjectTenant(projectID string) string {
+	if projectID == "" {
+		return ""
+	}
+	var p models.Project
+	if err := DB.First(&p, "id = ?", projectID).Error; err != nil {
+		return ""
+	}
+	return p.TenantID
+}
+
+// backfillAuditTenant 回填历史操作日志的租户。
+//
+// audit_logs 早期没有 tenant_id 列，加上后若不回填，旧记录会因 tenant_id 为空
+// 而从所有带租户条件的查询里消失（表现形如“审计日志丢了”，本次就是这样发现的）。
+//
+// 注意 AutoMigrate 给已有行补的列值是 **NULL** 而不是 ”，
+// 所以判定必须用 coalesce(tenant_id, ”) = ”，直接写 `= ”` 会一条都匹配不上。
+//
+// 两轮按可靠度递减回填：
+//  1. 有 project_id 的按项目取租户（projects.tenant_id 是权威来源，覆盖定时重启等
+//     无登录用户的写入）；
+//  2. 剩下的按 username 关联 users（登录事件没有项目，只能按人对）。
+//
+// 仍无法归属的行（用户名已被删除/从未存在的登录失败记录）保持为空，
+// 因而对任何租户都不可见——这是无归属信息时的安全默认值，不猜租户。
+func backfillAuditTenant() {
+	byProject := DB.Exec(`UPDATE audit_logs AS a SET tenant_id = p.tenant_id
+	                      FROM projects AS p
+	                      WHERE coalesce(a.tenant_id, '') = '' AND a.project_id <> '' AND p.id = a.project_id`)
+	if byProject.Error != nil {
+		log.Printf("[migrate] 回填操作日志租户（按项目）失败：%v", byProject.Error)
+	}
+	byUser := DB.Exec(`UPDATE audit_logs AS a SET tenant_id = u.tenant_id
+	                   FROM users AS u
+	                   WHERE coalesce(a.tenant_id, '') = '' AND a.username <> '' AND u.username = a.username`)
+	if byUser.Error != nil {
+		log.Printf("[migrate] 回填操作日志租户（按用户）失败：%v", byUser.Error)
+		return
+	}
+	if n := byProject.RowsAffected + byUser.RowsAffected; n > 0 {
+		log.Printf("[migrate] 回填 %d 条操作日志的 tenant_id（按项目 %d / 按用户 %d）",
+			n, byProject.RowsAffected, byUser.RowsAffected)
+	}
 }
 
 // Seed 首次启动创建租户/项目/默认角色/超管。
@@ -75,31 +125,81 @@ func Seed(cfg *config.Config) {
 	DB.Create(u)
 	DB.Create(&models.UserRole{UserID: u.ID, RoleID: "role_super", ProjectID: proj.ID})
 
-	// 内置录像/布防模板
-	now := models.NowMilli()
-	db := DB
-	db.Create(&models.RecordTemplate{ID: "rt_24h", ProjectID: proj.ID, Name: "全天候", Kind: "timer",
-		Schedule: models.JSONB{"days": []int{1, 2, 3, 4, 5, 6, 7}, "ranges": [][]string{{"00:00", "24:00"}}},
-		Builtin: true, CreatedAt: now, UpdatedAt: now})
-	db.Create(&models.RecordTemplate{ID: "rt_weekday", ProjectID: proj.ID, Name: "工作日", Kind: "timer",
-		Schedule: models.JSONB{"days": []int{1, 2, 3, 4, 5}, "ranges": [][]string{{"00:00", "24:00"}}},
-		Builtin: true, CreatedAt: now, UpdatedAt: now})
-	db.Create(&models.RecordTemplate{ID: "rt_weekend", ProjectID: proj.ID, Name: "周末", Kind: "timer",
-		Schedule: models.JSONB{"days": []int{6, 7}, "ranges": [][]string{{"00:00", "24:00"}}},
-		Builtin: true, CreatedAt: now, UpdatedAt: now})
-	for _, n := range []string{"at_allday", "at_workday", "at_weekend"} {
-		_ = n
+	// 内置录像/布防模板 + 默认策略（ADD-09），与 api/projects.go 的 handleCreateProject
+	// 同构：使 p_default 与后续新建项目行为一致、开箱即用，且设置在 UI 里可见可改。
+	// 此前两个模板集都建了、但两个默认策略设置都没写，导致 p_default 下新接入的通道
+	// 拿不到任何默认录像计划/告警规则（告警侧后果见 devsvc.ApplyDefaultAlarmRule 的注释）。
+	//
+	// key 直接写字面量而非引用 devsvc.RecordDefaultsKey / devsvc.AlarmDefaultsKey——
+	// store 包不能导入 devsvc（devsvc 已导入 store，引用会形成循环依赖）。这两个字面量
+	// 必须与 devsvc.RecordDefaultsKey（"recordDefaults"）/ devsvc.AlarmDefaultsKey
+	// （"alarmDefaults"）保持一致，修改任一处需同步核对。
+	if tplID := SeedRecordTemplates(proj.ID); tplID != "" {
+		DB.Create(&models.Setting{Scope: proj.ID, Key: "recordDefaults",
+			Value: models.JSONB{"enabled": true, "templateId": tplID, "profile": "main"}})
 	}
-	db.Create(&models.AlarmTemplate{ID: "at_24h", ProjectID: proj.ID, Name: "全天候",
-		Schedule: models.JSONB{"days": []int{1, 2, 3, 4, 5, 6, 7}, "ranges": [][]string{{"00:00", "24:00"}}},
-		Builtin: true, CreatedAt: now, UpdatedAt: now})
-	db.Create(&models.AlarmTemplate{ID: "at_workday", ProjectID: proj.ID, Name: "工作日",
-		Schedule: models.JSONB{"days": []int{1, 2, 3, 4, 5}, "ranges": [][]string{{"00:00", "24:00"}}},
-		Builtin: true, CreatedAt: now, UpdatedAt: now})
-	db.Create(&models.AlarmTemplate{ID: "at_weekend", ProjectID: proj.ID, Name: "周末",
-		Schedule: models.JSONB{"days": []int{6, 7}, "ranges": [][]string{{"00:00", "24:00"}}},
-		Builtin: true, CreatedAt: now, UpdatedAt: now})
+	if tplID := SeedAlarmTemplates(proj.ID); tplID != "" {
+		DB.Create(&models.Setting{Scope: proj.ID, Key: "alarmDefaults",
+			Value: models.JSONB{"enabled": true, "templateId": tplID,
+				"kinds": models.DeviceSideAlarmKinds}})
+	}
 
 	log.Printf("seed done (admin/%s)", cfg.AdminPassword)
 	_ = time.Now
+}
+
+// SeedRecordTemplates 为项目创建 REC-05 的三个内置录像模板，返回"全天候"模板 ID。
+//
+// 初始播种与新建项目（handleCreateProject）共用：此前内置模板只在播种时为默认项目创建，
+// 新建项目一个模板都没有，会使 ADD-09 的默认录像策略对新项目无从指向。
+func SeedRecordTemplates(projectID string) string {
+	now := models.NowMilli()
+	defs := []struct {
+		name string
+		days []int
+	}{
+		{"全天候", []int{1, 2, 3, 4, 5, 6, 7}},
+		{"工作日", []int{1, 2, 3, 4, 5}},
+		{"周末", []int{6, 7}},
+	}
+	defaultID := ""
+	for i, d := range defs {
+		t := models.RecordTemplate{
+			ID: "rt_" + models.NewID(), ProjectID: projectID, Name: d.name, Kind: "timer",
+			Schedule: models.JSONB{"days": d.days, "ranges": [][]string{{"00:00", "24:00"}}},
+			Builtin:  true, CreatedAt: now, UpdatedAt: now,
+		}
+		if DB.Create(&t).Error == nil && i == 0 {
+			defaultID = t.ID // 首个"全天候"作为新项目默认录像模板
+		}
+	}
+	return defaultID
+}
+
+// SeedAlarmTemplates 为项目创建 ALM-01 的三个内置布防模板，返回"全天候"模板 ID。
+//
+// 与 SeedRecordTemplates 同构，成因也相同：内置布防模板此前只在初始播种时为默认项目
+// 创建，新建项目一个都没有，导致默认告警策略无从指向。
+func SeedAlarmTemplates(projectID string) string {
+	now := models.NowMilli()
+	defs := []struct {
+		name string
+		days []int
+	}{
+		{"全天候", []int{1, 2, 3, 4, 5, 6, 7}},
+		{"工作日", []int{1, 2, 3, 4, 5}},
+		{"周末", []int{6, 7}},
+	}
+	defaultID := ""
+	for i, d := range defs {
+		t := models.AlarmTemplate{
+			ID: "at_" + models.NewID(), ProjectID: projectID, Name: d.name,
+			Schedule: models.JSONB{"days": d.days, "ranges": [][]string{{"00:00", "24:00"}}},
+			Builtin:  true, CreatedAt: now, UpdatedAt: now,
+		}
+		if DB.Create(&t).Error == nil && i == 0 {
+			defaultID = t.ID // 首个"全天候"作为默认布防模板
+		}
+	}
+	return defaultID
 }

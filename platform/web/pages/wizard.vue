@@ -4,6 +4,7 @@ definePageMeta({ layout: 'auth' })
 const api = useApi()
 const { loadMe, setupDone } = useAuth()
 const toast = useToast()
+const { t } = useI18n()
 
 const step = ref(0)
 const projectId = ref<string>(((useCookie('ipc_project').value as any) || '') as string)
@@ -11,7 +12,7 @@ const projectId = ref<string>(((useCookie('ipc_project').value as any) || '') as
 // 已完成设置的账户不再进入向导（A22）
 onMounted(() => {
   if (setupDone.value && projectId.value) {
-    toast.info('您已完成初始设置')
+    toast.info(t('account.msg.setupAlreadyDone'))
     navigateTo('/')
   }
 })
@@ -22,7 +23,7 @@ const creating = ref(false)
 const err1 = ref('')
 
 async function createProject() {
-  if (!projectName.value.trim()) { err1.value = '请输入项目名称'; return }
+  if (!projectName.value.trim()) { err1.value = t('account.msg.projectNameRequired'); return }
   err1.value = ''
   creating.value = true
   try {
@@ -30,10 +31,10 @@ async function createProject() {
     projectId.value = p.id
     useCookie('ipc_project', { maxAge: 60 * 60 * 24 * 30 }).value = p.id
     await loadMe()
-    toast.success('项目创建成功')
+    toast.success(t('account.msg.projectCreated'))
     step.value = 1
   } catch (e: any) {
-    err1.value = e?.msg || '创建失败'
+    err1.value = e?.msg || t('account.msg.projectCreateFailed')
   } finally {
     creating.value = false
   }
@@ -47,7 +48,7 @@ const selfcheckTip = ref(false)
 
 async function addNode() {
   if (!nodeForm.name.trim() || !nodeForm.apiUrl.trim()) {
-    err2.value = { msg: '请填写节点名称和 API 地址' }
+    err2.value = { msg: t('account.msg.nodeFieldsRequired') }
     return
   }
   err2.value = null
@@ -58,7 +59,7 @@ async function addNode() {
     try {
       const chk: any = await api.post(`/media-nodes/${n.id}/selfcheck`)
       if (chk?.ok === false) {
-        err2.value = { msg: '节点自检未通过', reason: chk?.reason || chk?.detail || '请检查地址与密钥' }
+        err2.value = { msg: t('account.msg.selfcheckFailed'), reason: chk?.reason || chk?.detail || t('account.msg.selfcheckFailedReason') }
       } else {
         selfcheckTip.value = true
       }
@@ -66,7 +67,7 @@ async function addNode() {
       selfcheckTip.value = true
     }
   } catch (e: any) {
-    err2.value = { msg: e?.msg || '添加失败', reason: e?.suggest }
+    err2.value = { msg: e?.msg || t('account.msg.nodeAddFailed'), reason: e?.suggest }
   } finally {
     addingNode.value = false
   }
@@ -76,60 +77,64 @@ async function addNode() {
 async function finish() {
   step.value = 2
   if (!projectId.value) return
-  try { await api.put(`/projects/${projectId.value}`, { setupDone: true }) } catch {}
+  try {
+    await api.put(`/projects/${projectId.value}`, { setupDone: true })
+  } catch (e: any) {
+    toastApiError(e, t('account.msg.setupSaveFailed'))
+  }
 }
 </script>
 
 <template>
-  <div class="w-[580px] max-w-[calc(100vw-32px)] rounded-md bg-surface p-8 shadow-pop">
-    <h1 class="mb-6 text-center text-lg font-bold text-ink">首次设置向导</h1>
-    <UiSteps :steps="['创建项目', '添加媒体节点', '完成']" :current="step" class="mb-8 justify-center" />
+  <div class="w-[580px] max-w-[calc(100vw-32px)] rounded-signal border border-line bg-surface p-8 shadow-pop">
+    <h1 class="mb-6 text-center text-lg font-bold text-ink">{{ t('account.wizard.title') }}</h1>
+    <UiSteps :steps="[t('account.wizard.step1'), t('account.wizard.step2'), t('account.wizard.step3')]" :current="step" class="mb-8 justify-center" />
 
     <!-- 第 1 步 -->
     <div v-if="step === 0">
       <div class="grid grid-cols-[90px_1fr] items-center gap-x-3">
-        <label class="text-right text-sm text-body"><span class="text-danger">*</span> 项目名称</label>
-        <UiInput v-model="projectName" placeholder="如：园区监控" maxlength="32" @enter="createProject" />
+        <label class="text-right text-sm text-body"><span class="text-danger">*</span> {{ t('account.wizard.projectName') }}</label>
+        <UiInput v-model="projectName" :placeholder="t('account.wizard.projectNamePlaceholder')" maxlength="32" @enter="createProject" />
       </div>
-      <div v-if="err1" class="mt-4 flex items-start gap-2 rounded border border-[#f7c8c4] bg-danger-soft px-3 py-2.5 text-sm text-danger">
+      <div v-if="err1" class="mt-4 flex items-start gap-2 rounded-chrome border border-danger/30 bg-danger-soft px-3 py-2.5 text-sm text-danger">
         <Icon name="alert-circle" :size="15" class="mt-0.5 shrink-0" />{{ err1 }}
       </div>
       <div class="mt-6 flex justify-center gap-2">
-        <UiButton @click="step = 1">跳过</UiButton>
-        <UiButton variant="primary" :disabled="creating" @click="createProject">创建项目</UiButton>
+        <UiButton @click="step = 1">{{ t('account.wizard.skip') }}</UiButton>
+        <UiButton variant="primary" :disabled="creating" @click="createProject">{{ t('account.wizard.createProject') }}</UiButton>
       </div>
     </div>
 
     <!-- 第 2 步 -->
     <div v-if="step === 1">
       <div class="grid grid-cols-[90px_1fr] items-center gap-x-3 gap-y-3">
-        <label class="text-right text-sm text-body"><span class="text-danger">*</span> 节点名称</label>
-        <UiInput v-model="nodeForm.name" placeholder="如：主媒体节点" />
-        <label class="text-right text-sm text-body"><span class="text-danger">*</span> API 地址</label>
-        <UiInput v-model="nodeForm.apiUrl" placeholder="如：http://1.2.3.4:8080" />
-        <label class="text-right text-sm text-muted">通信密钥</label>
-        <UiInput v-model="nodeForm.secret" placeholder="节点通信密钥" type="password" />
-        <label class="text-right text-sm text-muted">公网地址</label>
-        <UiInput v-model="nodeForm.publicHost" placeholder="如：stream.example.com" />
+        <label class="text-right text-sm text-body"><span class="text-danger">*</span> {{ t('account.wizard.nodeName') }}</label>
+        <UiInput v-model="nodeForm.name" :placeholder="t('account.wizard.nodeNamePlaceholder')" />
+        <label class="text-right text-sm text-body"><span class="text-danger">*</span> {{ t('account.wizard.nodeApiUrl') }}</label>
+        <UiInput v-model="nodeForm.apiUrl" :placeholder="t('account.wizard.nodeApiUrlPlaceholder')" />
+        <label class="text-right text-sm text-muted">{{ t('account.wizard.nodeSecret') }}</label>
+        <UiInput v-model="nodeForm.secret" :placeholder="t('account.wizard.nodeSecretPlaceholder')" type="password" />
+        <label class="text-right text-sm text-muted">{{ t('account.wizard.nodePublicHost') }}</label>
+        <UiInput v-model="nodeForm.publicHost" :placeholder="t('account.wizard.nodePublicHostPlaceholder')" />
       </div>
-      <div v-if="err2" class="mt-4 flex items-start gap-2 rounded border border-[#f7c8c4] bg-danger-soft px-3 py-2.5 text-sm text-danger">
+      <div v-if="err2" class="mt-4 flex items-start gap-2 rounded-chrome border border-danger/30 bg-danger-soft px-3 py-2.5 text-sm text-danger">
         <Icon name="alert-circle" :size="15" class="mt-0.5 shrink-0" />
         <div>
           <p>{{ err2.msg }}</p>
           <p v-if="err2.reason" class="mt-0.5 text-xs opacity-80">{{ err2.reason }}</p>
         </div>
       </div>
-      <div v-if="selfcheckTip" class="mt-4 flex items-start gap-2 rounded border border-[#bfe7d6] bg-success-soft px-3 py-2.5 text-sm text-success">
+      <div v-if="selfcheckTip" class="mt-4 flex items-start gap-2 rounded-chrome border border-success/30 bg-success-soft px-3 py-2.5 text-sm text-success">
         <Icon name="check-circle" :size="15" class="mt-0.5 shrink-0" />
         <div>
-          <p>节点已添加，自检通过</p>
-          <p class="mt-0.5 text-xs opacity-80">详细状态可在【系统 → 媒体节点】页面查看。</p>
+          <p>{{ t('account.wizard.selfcheckOk') }}</p>
+          <p class="mt-0.5 text-xs opacity-80">{{ t('account.wizard.selfcheckOkHint') }}</p>
         </div>
       </div>
       <div class="mt-6 flex justify-center gap-2">
-        <UiButton @click="finish">跳过</UiButton>
-        <UiButton v-if="!selfcheckTip" variant="primary" :disabled="addingNode" @click="addNode">添加节点</UiButton>
-        <UiButton v-else variant="primary" @click="finish">下一步</UiButton>
+        <UiButton @click="finish">{{ t('account.wizard.skip') }}</UiButton>
+        <UiButton v-if="!selfcheckTip" variant="primary" :disabled="addingNode" @click="addNode">{{ t('account.wizard.addNode') }}</UiButton>
+        <UiButton v-else variant="primary" @click="finish">{{ t('account.wizard.next') }}</UiButton>
       </div>
     </div>
 
@@ -138,9 +143,9 @@ async function finish() {
       <span class="flex h-14 w-14 items-center justify-center rounded-full bg-success-soft text-success">
         <Icon name="check" :size="28" :stroke="3" />
       </span>
-      <p class="text-base font-semibold text-ink">初始设置完成</p>
-      <p class="text-sm text-muted">接下来可以添加您的第一批摄像头设备。</p>
-      <UiButton variant="primary" size="lg" class="mt-2" @click="navigateTo('/devices')">去添加设备</UiButton>
+      <p class="text-base font-semibold text-ink">{{ t('account.wizard.doneTitle') }}</p>
+      <p class="text-sm text-muted">{{ t('account.wizard.doneHint') }}</p>
+      <UiButton variant="primary" size="lg" class="mt-2" @click="navigateTo('/devices')">{{ t('account.wizard.goAddDevice') }}</UiButton>
     </div>
   </div>
 </template>

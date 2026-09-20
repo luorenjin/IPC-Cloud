@@ -18,6 +18,11 @@ var appEngine *engine.Engine
 // handlePlay LIVE-01/02：按需起播。
 func handlePlay(c *gin.Context) {
 	ctx := getCtx(c)
+	chID := c.Param("id")
+	// 归属校验：通道必须属于当前项目，否则会替别的项目/租户把流拉起来
+	if _, okc := channelInProject(c, chID); !okc {
+		return
+	}
 	var req struct {
 		Profile string `json:"profile"`
 	}
@@ -25,7 +30,7 @@ func handlePlay(c *gin.Context) {
 	if req.Profile == "" {
 		req.Profile = "main"
 	}
-	resp, err := appEngine.StartPlay(ctx.UserID, c.Param("id"), req.Profile)
+	resp, err := appEngine.StartPlay(ctx.UserID, chID, req.Profile)
 	if err != nil {
 		fail(c, toAppErr(err))
 		return
@@ -35,6 +40,10 @@ func handlePlay(c *gin.Context) {
 
 // handleStopPlay 显式停流。
 func handleStopPlay(c *gin.Context) {
+	chID := c.Param("id")
+	if _, okc := channelInProject(c, chID); !okc {
+		return
+	}
 	var req struct {
 		Profile string `json:"profile"`
 	}
@@ -42,13 +51,17 @@ func handleStopPlay(c *gin.Context) {
 	if req.Profile == "" {
 		req.Profile = "main"
 	}
-	appEngine.StopPlay(c.Param("id"), req.Profile, "user_stop")
+	appEngine.StopPlay(chID, req.Profile, "user_stop")
 	ok(c, nil)
 }
 
 // handleSnapshot 抓图。
 func handleSnapshot(c *gin.Context) {
-	url, err := appEngine.Snapshot(c.Param("id"))
+	chID := c.Param("id")
+	if _, okc := channelInProject(c, chID); !okc {
+		return
+	}
+	url, err := appEngine.Snapshot(chID)
 	if err != nil {
 		fail(c, toAppErr(err))
 		return
@@ -58,7 +71,11 @@ func handleSnapshot(c *gin.Context) {
 
 // handleRefreshCover 封面刷新（MGR-05）。
 func handleRefreshCover(c *gin.Context) {
-	url, err := appEngine.RefreshCover(c.Param("id"))
+	chID := c.Param("id")
+	if _, okc := channelInProject(c, chID); !okc {
+		return
+	}
+	url, err := appEngine.RefreshCover(chID)
 	if err != nil {
 		fail(c, toAppErr(err))
 		return
@@ -68,6 +85,10 @@ func handleRefreshCover(c *gin.Context) {
 
 // handlePTZ LIVE-07。
 func handlePTZ(c *gin.Context) {
+	chID := c.Param("id")
+	if _, okc := channelInProject(c, chID); !okc {
+		return
+	}
 	var req struct {
 		Op     string  `json:"op" binding:"required"` // move|stop|preset_set|preset_goto|preset_del
 		Pan    float64 `json:"pan"`
@@ -83,7 +104,7 @@ func handlePTZ(c *gin.Context) {
 	if req.Speed == 0 {
 		req.Speed = 50
 	}
-	if err := appPTZ(c.Param("id"), req.Op, req.Pan, req.Tilt, req.Zoom, req.Speed, req.Preset); err != nil {
+	if err := appPTZ(chID, req.Op, req.Pan, req.Tilt, req.Zoom, req.Speed, req.Preset); err != nil {
 		fail(c, toAppErr(err))
 		return
 	}
@@ -103,11 +124,15 @@ func handleChannelRecords(c *gin.Context) {
 		fail(c, errs.EBadRequest)
 		return
 	}
+	chID := c.Param("id")
+	if _, okc := channelInProject(c, chID); !okc {
+		return
+	}
 	var types []string
 	for _, t := range splitComma(q.Types) {
 		types = append(types, t)
 	}
-	resp, err := appEngine.QueryRecords(c.Param("id"), q.Start, q.End, types, q.Source)
+	resp, err := appEngine.QueryRecords(chID, q.Start, q.End, types, q.Source)
 	if err != nil {
 		fail(c, toAppErr(err))
 		return
@@ -127,10 +152,14 @@ func handleStartPlayback(c *gin.Context) {
 		fail(c, errs.EBadRequest)
 		return
 	}
+	chID := c.Param("id")
+	if _, okc := channelInProject(c, chID); !okc {
+		return
+	}
 	if req.Speed == 0 {
 		req.Speed = 1
 	}
-	resp, err := appEngine.StartPlayback(ctx.UserID, c.Param("id"), req.Start, req.End, req.Speed, req.Source)
+	resp, err := appEngine.StartPlayback(ctx.UserID, chID, req.Start, req.End, req.Speed, req.Source)
 	if err != nil {
 		fail(c, toAppErr(err))
 		return
@@ -168,9 +197,8 @@ func handleStopPlayback(c *gin.Context) {
 // 设备侧 preset 由 cmd.ptz preset_set/goto/del 驱动）。
 func handlePTZPresetsList(c *gin.Context) {
 	chID := c.Param("id")
-	var ch models.Channel
-	if store.DB.First(&ch, "id = ?", chID).Error != nil {
-		fail(c, errs.ENotFound)
+	// 归属校验（原本这里按主键直查通道，跨项目也会放行）
+	if _, okc := channelInProject(c, chID); !okc {
 		return
 	}
 	items := []gin.H{}
@@ -186,6 +214,9 @@ func handlePTZPresetsList(c *gin.Context) {
 // handlePTZPresetAdd 新增预置位（cmd.ptz preset_set）。
 func handlePTZPresetAdd(c *gin.Context) {
 	chID := c.Param("id")
+	if _, okc := channelInProject(c, chID); !okc {
+		return
+	}
 	var req struct {
 		Name   string `json:"name"`
 		Preset int    `json:"preset"`
@@ -205,6 +236,10 @@ func handlePTZPresetAdd(c *gin.Context) {
 
 // handlePTZPresetGoto 调用预置位。
 func handlePTZPresetGoto(c *gin.Context) {
+	chID := c.Param("id")
+	if _, okc := channelInProject(c, chID); !okc {
+		return
+	}
 	var req struct {
 		ID     string `json:"id"`
 		Preset int    `json:"preset"`
@@ -212,13 +247,13 @@ func handlePTZPresetGoto(c *gin.Context) {
 	_ = c.ShouldBindJSON(&req)
 	idx := req.Preset
 	if idx <= 0 {
-		idx = presetIndexOf(c.Param("id"), req.ID)
+		idx = presetIndexOf(chID, req.ID)
 	}
 	if idx <= 0 {
 		fail(c, errs.EBadRequest.WithMsg("预置位不存在"))
 		return
 	}
-	if err := appPTZ(c.Param("id"), "preset_goto", 0, 0, 0, 50, idx); err != nil {
+	if err := appPTZ(chID, "preset_goto", 0, 0, 0, 50, idx); err != nil {
 		fail(c, toAppErr(err))
 		return
 	}
@@ -228,6 +263,9 @@ func handlePTZPresetGoto(c *gin.Context) {
 // handlePTZPresetDelete 删除预置位。
 func handlePTZPresetDelete(c *gin.Context) {
 	chID := c.Param("id")
+	if _, okc := channelInProject(c, chID); !okc {
+		return
+	}
 	pid := c.Param("pid")
 	idx := presetIndexOf(chID, pid)
 	if idx > 0 {
@@ -320,9 +358,16 @@ func nextPresetIndex(chID string) int {
 // handleListChannels 通道列表（预览树用）。
 func handleListChannels(c *gin.Context) {
 	ctx := getCtx(c)
+	q := store.DB.Where("project_id = ? AND enabled = ?", ctx.ProjectID, true)
+	// ids 精确筛选：供首页告警流按需取通道名，避免为几个名字全量拉取
+	if ids := c.Query("ids"); ids != "" {
+		q = q.Where("id IN ?", splitComma(ids))
+	}
+	if dev := c.Query("deviceId"); dev != "" {
+		q = q.Where("device_id = ?", dev)
+	}
 	var chs []models.Channel
-	store.DB.Where("project_id = ? AND enabled = ?", ctx.ProjectID, true).
-		Order("device_id ASC, idx ASC").Find(&chs)
+	q.Order("device_id ASC, idx ASC").Find(&chs)
 	ok(c, gin.H{"items": chs})
 }
 
@@ -349,6 +394,7 @@ func splitComma(s string) []string {
 func SetEngine(e *engine.Engine) { appEngine = e }
 
 // appPTZ 分派 PTZ（IDP 支持；其他来源能力集不含 ptz）。
+// 调用方必须先用 channelInProject 校验归属：本函数只按 ID 取通道，不做项目判定。
 func appPTZ(channelID, op string, pan, tilt, zoom, speed float64, preset int) error {
 	var ch models.Channel
 	if err := store.DB.First(&ch, "id = ?", channelID).Error; err != nil {

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -112,6 +113,23 @@ func (z *ZLM) CloseRtpServer(streamID string) error {
 	return err
 }
 
+// OpenRtpServerWithRecycle 打开 GB28181 收流端口；失败时先回收同名残留端口再重试一次。
+//
+// openRtpServer 失败最常见的原因不是节点不可达，而是上一次会话异常结束（INVITE 超时、
+// 设备掉线、节点重启）导致同名流的收流端口没被回收——此时直接返回失败会让用户看到
+// "起播失败：openRtpServer 失败"，而回收后重试通常立刻成功。
+func (z *ZLM) OpenRtpServerWithRecycle(ctx context.Context, tcpMode int, streamID string) (int, error) {
+	port, err := z.OpenRtpServer(ctx, 0, tcpMode, streamID)
+	if err == nil {
+		return port, nil
+	}
+	log.Printf("[zlm] openRtpServer(%s) 失败：%v；回收残留收流端口后重试", streamID, err)
+	if cerr := z.CloseRtpServer(streamID); cerr != nil {
+		log.Printf("[zlm] closeRtpServer(%s) 回收失败：%v", streamID, cerr)
+	}
+	return z.OpenRtpServer(ctx, 0, tcpMode, streamID)
+}
+
 func (z *ZLM) GetMediaList(ctx context.Context) ([]map[string]any, error) {
 	// getMediaList 的 data 是顶层数组（无 "list" 包装），须经 callTop 读取
 	top, err := z.callTop(ctx, "getMediaList", nil)
@@ -147,7 +165,18 @@ func (z *ZLM) StopRecord(app, stream string, typ int) error {
 }
 
 // GetSnap 抓图返回 JPEG 字节。
+//
+// 必须校验响应体内容：ZLM 的 getSnap 在参数缺失、源不可达、流不存在时**依然返回 HTTP 200**，
+// 响应体是错误 JSON（如 {"code":-300,"msg":"Required parameter missed: \"url\""}）
+// 或 config.ini 中 defaultSnap 指定的占位图（本站点是 PNG）。只判状态码会把这两种"假图"
+// 当成抓拍落盘并回填 cover_url / snapshot_url，前端表现为破图或永远一张 logo，
+// 排查时又因为文件确实存在而误判为前端问题。config.ini 的 snap 模板固定输出 mjpeg（JPEG），
+// 故以 JPEG 魔数作为"这是真图"的判据。
 func (z *ZLM) GetSnap(rawURL string, timeoutSec int) ([]byte, error) {
+	// 空 url 一定触发上面的 -300 错误响应，直接短路
+	if rawURL == "" {
+		return nil, fmt.Errorf("抓图失败：缺少拉流地址")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSec+2)*time.Second)
 	defer cancel()
 	p := url.Values{"url": {rawURL}, "timeout_sec": {fmt.Sprint(timeoutSec)}, "expire_sec": {"1"}}
@@ -162,7 +191,19 @@ func (z *ZLM) GetSnap(rawURL string, timeoutSec int) ([]byte, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("snap http %d", resp.StatusCode)
 	}
-	return io.ReadAll(resp.Body)
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if !isJPEG(b) {
+		return nil, fmt.Errorf("抓图失败：节点未返回有效图片")
+	}
+	return b, nil
+}
+
+// isJPEG 按 JPEG 魔数（SOI + 标记）判断响应体是否为真图。
+func isJPEG(b []byte) bool {
+	return len(b) > 3 && b[0] == 0xFF && b[1] == 0xD8 && b[2] == 0xFF
 }
 
 // KickSessions 踢掉观看者（节点详情用）。

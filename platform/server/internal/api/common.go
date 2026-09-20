@@ -57,10 +57,11 @@ func AuthMiddleware() gin.HandlerFunc {
 			return
 		}
 		ctx := &Ctx{UserID: u.ID, TenantID: u.TenantID, Username: u.Username}
-		if pid := c.GetHeader("X-Project-Id"); pid != "" {
+		// 显式查询参数优先于当前会话请求头：console.vue 等页面需要用同一登录态
+		// 查询"非当前项目"的统计数据，若请求头始终优先则该查询参数永远失效。
+		if pid := c.Query("projectId"); pid != "" {
 			ctx.ProjectID = pid
-		}
-		if pid := c.Query("projectId"); pid != "" && ctx.ProjectID == "" {
+		} else if pid := c.GetHeader("X-Project-Id"); pid != "" {
 			ctx.ProjectID = pid
 		}
 		if ctx.ProjectID != "" {
@@ -89,6 +90,21 @@ func getCtx(c *gin.Context) *Ctx {
 	return v.(*Ctx)
 }
 
+// roleHasAction 判断角色是否具备某项操作权限（ACC-05）。super 角色为 "*"。
+// 供 requirePerm 中间件与需要按"目标项目"而非"当前会话项目"校验的 handler 共用。
+func roleHasAction(r *models.Role, action string) bool {
+	if r == nil {
+		return false
+	}
+	acts, _ := r.Perms["actions"].([]any)
+	for _, a := range acts {
+		if s, _ := a.(string); s == "*" || s == action {
+			return true
+		}
+	}
+	return false
+}
+
 // hasPerm 判断上下文角色是否具备某动作权限（供处理器内做细粒度分支，不中断请求）。
 func hasPerm(ctx *Ctx, action string) bool {
 	if ctx == nil || ctx.Role == nil {
@@ -112,16 +128,8 @@ func requirePerm(action string) gin.HandlerFunc {
 			c.Abort()
 			return
 		}
-		acts, _ := ctx.Role.Perms["actions"].([]any)
 		menus, _ := ctx.Role.Perms["menus"].([]any)
-		has := false
-		for _, a := range acts {
-			if s, _ := a.(string); s == "*" || s == action {
-				has = true
-				break
-			}
-		}
-		if !has {
+		if !roleHasAction(ctx.Role, action) {
 			fail(c, errs.EForbid)
 			c.Abort()
 			return

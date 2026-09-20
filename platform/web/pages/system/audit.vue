@@ -2,6 +2,7 @@
 // 操作日志（ACC-08）：筛选（时间范围/操作者/对象类型/动作）、分页与导出 CSV
 const api = useApi()
 const toast = useToast()
+const { t } = useI18n()
 const { currentProject, loadMe } = useAuth()
 
 const filters = reactive({
@@ -17,48 +18,27 @@ const total = ref(0)
 const items = ref<any[]>([])
 const loading = ref(false)
 
-/* 动作中文映射（未匹配的动作原样展示） */
-const ACTION_MAP: Record<string, string> = {
-  'device.add': '添加设备',
-  'device.delete': '删除设备',
-  'device.transfer': '转移设备',
-  'user.create': '创建成员',
-  'user.delete': '删除成员',
-  'role.create': '创建角色',
-  'role.update': '修改角色',
-  'role.delete': '删除角色',
-  'group.create': '创建分组',
-  'group.delete': '删除分组',
-  'node.create': '创建节点',
-  'node.delete': '删除节点',
-  'settings.update': '修改设置',
-  'login': '登录',
-  'logout': '退出登录'
-}
-const actionLabel = (a: string) => ACTION_MAP[a] || a || '-'
+/*
+ * 动作中文名见 utils/enums.ts 的 AUDIT_ACTION_MAP（唯一的动作词条来源）。
+ * 旧实现是页内自建映射，键名写成 `device.add` / `user.create` 这类「资源.动词」，
+ * 而后端 AuditLog.Action 存的是**动词本身**（api/audit.go：路径命中 auditVerbs 取该段，
+ * 否则按 HTTP 方法回落 create/update/delete），资源类型在 Target（如 `device:<id>`）里
+ * → 旧映射永远匹配不上，动作列一直靠原样显示。
+ */
+const actionLabel = (a: string) => (a ? t(auditActionKey(a)) : '-')
 
-/* 对象类型（由动作前缀推断） */
-const TARGET_TYPES = [
-  { label: '全部', value: '' },
-  { label: '设备', value: 'device' },
-  { label: '成员', value: 'user' },
-  { label: '角色', value: 'role' },
-  { label: '分组', value: 'group' },
-  { label: '节点', value: 'node' },
-  { label: '设置', value: 'settings' },
-  { label: '会话', value: 'login' }
-]
-function targetTypeOf(action: string): string {
-  const a = String(action || '')
-  if (a.startsWith('device.')) return '设备'
-  if (a.startsWith('user.')) return '成员'
-  if (a.startsWith('role.')) return '角色'
-  if (a.startsWith('group.')) return '分组'
-  if (a.startsWith('node.') || a.startsWith('media-node')) return '节点'
-  if (a.startsWith('settings.') || a.startsWith('alarm.') || a.startsWith('record.')) return '设置'
-  if (a === 'login' || a === 'logout') return '会话'
-  return '其他'
-}
+/*
+ * 对象类型取自 AuditLog.Target 的前缀（`device:<id>` / 无 ID 时为 `device`），
+ * 因为 action 只存动词、不含资源类型：取值集与展示顺序见 utils/enums.ts 的 AUDIT_TARGET_TYPES。
+ * 旧实现按 `action.startsWith('device.')` 推断，而 action 永远是 config/diag/update 这类动词
+ * → 除登录外全部落「其他」，且筛选值与后端也对不上。
+ */
+const TARGET_TYPES = computed(() => [
+  { label: t('common.all'), value: '' },
+  ...AUDIT_TARGET_TYPES.map((tt) => ({ label: t(auditTargetTypeKey(tt)), value: tt as string }))
+])
+/** 行内展示：`device:<id>` → 设备 */
+const targetTypeLabel = (target: string) => t(auditTargetTypeKey(auditTargetTypeOf(target)))
 
 async function loadLogs() {
   loading.value = true
@@ -67,25 +47,20 @@ async function loadLogs() {
       page: page.value,
       pageSize: pageSize.value,
       action: filters.action.trim() || undefined,
-      username: filters.username.trim() || undefined
+      username: filters.username.trim() || undefined,
+      // 对象类型交服务端按 target 前缀过滤（原先是在前端对当前页做 filter，与 total/分页口径相冲）
+      targetType: filters.targetType || undefined
     }
-    // 时间范围 -> 后端 ts 过滤（以毫秒时间戳传递，未支持时由后端忽略）
-    if (filters.dateFrom) params.start = Date.parse(filters.dateFrom + 'T00:00:00')
-    if (filters.dateTo) params.end = Date.parse(filters.dateTo + 'T23:59:59')
+    // 时间范围按**项目时区**的自然日过滤，后端把 YYYY-MM-DD 换算成 [当日 00:00, 次日 00:00)。
+    // 不要在这里用 Date.parse 算毫秒：那会把浏览器时区烘进筛选条件（服务端 TZ 是 UTC，
+    // 项目时区在 projects.tz），跨时区值班会看错一天。
+    if (filters.dateFrom) params.startDate = filters.dateFrom
+    if (filters.dateTo) params.endDate = filters.dateTo
     const res: any = await api.get('/audit-logs', params)
-    let list = res?.items || []
-    // 对象类型为前端派生字段，做客户端过滤
-    if (filters.targetType) {
-      list = list.filter((r: any) => {
-        const t = r.targetType || targetTypeOf(r.action)
-        const label = TARGET_TYPES.find((x) => x.value === filters.targetType)?.label
-        return t === label || String(r.action || '').startsWith(filters.targetType + '.')
-      })
-    }
-    items.value = list
+    items.value = res?.items || []
     total.value = res?.total || 0
   } catch (e: any) {
-    toastApiError(e, '加载操作日志失败')
+    toastApiError(e, t('system.msg.auditLoadFailed'))
   } finally {
     loading.value = false
   }
@@ -105,36 +80,40 @@ function resetFilters() {
   search()
 }
 
-/* 导出 CSV（带当前筛选条件；后端 /audit-logs/export 输出 CSV） */
-function exportLogs() {
-  const qs = new URLSearchParams()
-  if (filters.action.trim()) qs.set('action', filters.action.trim())
-  if (filters.username.trim()) qs.set('username', filters.username.trim())
-  if (filters.dateFrom) qs.set('start', String(Date.parse(filters.dateFrom + 'T00:00:00')))
-  if (filters.dateTo) qs.set('end', String(Date.parse(filters.dateTo + 'T23:59:59')))
-  window.open('/api/v1/audit-logs/export' + (qs.toString() ? '?' + qs.toString() : ''))
-  toast.success('已开始导出（最多 10000 条）')
+/* 导出 CSV（后端 /audit-logs/export 输出 CSV）
+ * 筛选条件与列表同一套（服务端 auditFilter）：action/username/targetType/日期范围都会生效，
+ * 导出就是「现在看到的这批」。上限 10000 行的防护在服务端。 */
+async function exportLogs() {
+  const params: any = {}
+  if (filters.action.trim()) params.action = filters.action.trim()
+  if (filters.username.trim()) params.username = filters.username.trim()
+  if (filters.targetType) params.targetType = filters.targetType
+  if (filters.dateFrom) params.startDate = filters.dateFrom
+  if (filters.dateTo) params.endDate = filters.dateTo
+  try {
+    await api.download('/audit-logs/export', params)
+    toast.success(t('system.msg.auditExportStarted'))
+  } catch (e: any) {
+    toastApiError(e, t('system.msg.auditExportFailed'))
+  }
 }
 
-const fmtTime = (ts: any) =>
-  ts ? new Date(typeof ts === 'string' ? Date.parse(ts) : ts).toLocaleString() : '-'
 
-/* 结果标签：success 绿 / fail 红 */
+/* 结果标签映射见 utils/enums.ts */
 function resultTag(r: string) {
-  if (r === 'success') return { text: '成功', color: 'success' as const }
-  if (r === 'fail') return { text: '失败', color: 'danger' as const }
-  return { text: r || '-', color: 'info' as const }
+  const i = resultInfo(r)
+  return { text: t(i.labelKey), color: i.color }
 }
 
-const cols = [
-  { key: 'ts', label: '时间', width: '170px' },
-  { key: 'username', label: '操作者', width: '120px' },
-  { key: 'targetType', label: '对象类型', width: '90px', align: 'center' as const },
-  { key: 'target', label: '对象', width: '200px' },
-  { key: 'action', label: '动作', width: '140px' },
-  { key: 'result', label: '结果', width: '80px', align: 'center' as const },
-  { key: 'ip', label: 'IP', width: '140px' }
-]
+const cols = computed(() => [
+  { key: 'ts', label: t('common.time'), width: '170px' },
+  { key: 'username', label: t('system.audit.operator'), width: '120px' },
+  { key: 'targetType', label: t('system.audit.targetType'), width: '90px', align: 'center' as const },
+  { key: 'target', label: t('system.audit.colTarget'), width: '200px' },
+  { key: 'action', label: t('system.audit.colAction'), width: '140px' },
+  { key: 'result', label: t('system.audit.colResult'), width: '80px', align: 'center' as const },
+  { key: 'ip', label: t('system.audit.colIp'), width: '140px' }
+])
 
 onMounted(async () => {
   // 布局可能尚未完成会话加载，兜底拉取一次
@@ -145,47 +124,56 @@ onMounted(async () => {
 
 <template>
   <div class="space-y-3">
-    <UiCard title="操作日志" flat>
+    <UiCard :title="t('system.audit.title')" flat>
       <template #extra>
         <UiButton variant="primary" size="sm" @click="exportLogs">
-          <UiIcon name="download" :size="14" />导出 CSV
+          <UiIcon name="download" :size="14" />{{ t('system.audit.exportCsv') }}
         </UiButton>
       </template>
 
       <!-- 筛选条件 -->
-      <div class="mb-3 flex flex-wrap items-center gap-2">
-        <span class="text-sm text-muted">时间</span>
+      <div class="mb-3 flex flex-wrap items-center gap-2 rounded-signal border border-line-soft bg-zone px-3 py-2.5">
+        <span class="flex items-center gap-1 text-xs text-placeholder"><UiIcon name="calendar" :size="13" />{{ t('system.audit.timeLabel') }}</span>
         <UiInput v-model="filters.dateFrom" type="date" size="sm" width="w-40" @enter="search" />
-        <span class="text-placeholder">至</span>
+        <span class="text-placeholder">{{ t('system.audit.dateTo') }}</span>
         <UiInput v-model="filters.dateTo" type="date" size="sm" width="w-40" @enter="search" />
         <UiInput
-          v-model="filters.username" placeholder="操作者" clearable
+          v-model="filters.username" :placeholder="t('system.audit.operator')" clearable
           size="sm" width="w-36" @enter="search" @clear="search"
         />
-        <UiSelect v-model="filters.targetType" :options="TARGET_TYPES" size="sm" width="w-32" placeholder="对象类型" />
+        <!-- 单选下拉没有「输入中」状态，选中即查询；文本框仍靠回车/查询按钮触发 -->
+        <UiSelect
+          v-model="filters.targetType" :options="TARGET_TYPES" size="sm" width="w-32"
+          :placeholder="t('system.audit.targetType')" @update:model-value="search"
+        />
         <UiInput
-          v-model="filters.action" placeholder="动作，如 device.add" clearable
+          v-model="filters.action" :placeholder="t('system.audit.actionPlaceholder')" clearable
           size="sm" width="w-45" @enter="search" @clear="search"
         />
         <UiButton variant="primary" size="sm" @click="search">
-          <UiIcon name="search" :size="13" />查询
+          <UiIcon name="search" :size="13" />{{ t('common.query') }}
         </UiButton>
-        <UiButton size="sm" @click="resetFilters">重置</UiButton>
+        <UiButton size="sm" @click="resetFilters">{{ t('common.reset') }}</UiButton>
       </div>
 
-      <UiEmptyState v-if="!loading && !items.length" text="暂无操作日志" icon="history" />
+      <UiEmptyState v-if="!loading && !items.length" :text="t('system.audit.empty')" icon="history" />
       <UiTable v-else :columns="cols" :rows="items" :loading="loading">
-        <template #ts="{ row }">{{ fmtTime(row.ts) }}</template>
+        <template #ts="{ row }"><span class="font-mono text-xs text-body">{{ fmtTime(row.ts) }}</span></template>
         <template #username="{ row }">{{ row.username || '-' }}</template>
-        <template #targetType="{ row }">{{ row.targetType || targetTypeOf(row.action) }}</template>
+        <template #targetType="{ row }">{{ targetTypeLabel(row.target) }}</template>
         <template #target="{ row }">
           <span class="block truncate" :title="row.target">{{ row.target || '-' }}</span>
         </template>
-        <template #action="{ row }">{{ actionLabel(row.action) }}</template>
+        <template #action="{ row }">
+          <div class="leading-tight">
+            <div class="text-body">{{ actionLabel(row.action) }}</div>
+            <div class="font-mono text-[11px] text-placeholder">{{ row.action || '-' }}</div>
+          </div>
+        </template>
         <template #result="{ row }">
           <UiTag :color="resultTag(row.result).color">{{ resultTag(row.result).text }}</UiTag>
         </template>
-        <template #ip="{ row }">{{ row.ip || '-' }}</template>
+        <template #ip="{ row }"><span class="font-mono text-xs text-muted">{{ row.ip || '-' }}</span></template>
       </UiTable>
 
       <!-- 分页 -->

@@ -8,6 +8,7 @@ const props = defineProps<{
   muted?: boolean
 }>()
 
+const { t } = useI18n()
 const state = ref<'idle' | 'loading' | 'playing' | 'error'>('idle')
 const errMsg = ref('')
 const emit = defineEmits<{ (e: 'retry'): void }>()
@@ -24,18 +25,18 @@ async function ensureLib(): Promise<any> {
       if (win.H265webjsPlayer) return win.H265webjsPlayer
       await new Promise((r) => setTimeout(r, 100))
     }
-    throw new Error('h265web.js 加载超时')
+    throw new Error(t('live.player.libTimeout'))
   }
   await new Promise<void>((resolve, reject) => {
     const s = document.createElement('script')
     s.src = '/vendor/h265web.js'
     s.dataset.h265web = '1'
     s.onload = () => resolve()
-    s.onerror = () => reject(new Error('h265web.js 未部署（/vendor/h265web.js）'))
+    s.onerror = () => reject(new Error(t('live.player.libMissing')))
     document.head.appendChild(s)
   })
   const lib = win.H265webjsPlayer
-  if (!lib) throw new Error('h265web.js 全局对象缺失（H265webjsPlayer）')
+  if (!lib) throw new Error(t('live.player.libGlobalMissing'))
   return lib
 }
 
@@ -47,7 +48,7 @@ async function play(url?: string) {
     const create = await ensureLib()
     destroy()
     const box = container.value
-    if (!box) throw new Error('播放容器未就绪')
+    if (!box) throw new Error(t('live.player.containerNotReady'))
     box.id = containerId
     player = create()
     // wasm 渲染把解码帧拉伸铺满构建尺寸的视口（change_viewport 无宽高比保护），
@@ -85,13 +86,13 @@ async function play(url?: string) {
       liveBufferLatencyMaxLatency: 1.5,
       liveBufferLatencyMinRemain: 0.5
     })
-    if (!ok) throw new Error('播放器初始化失败')
+    if (!ok) throw new Error(t('live.player.initFailed'))
     player.on_ready_show_done_callback = () => {
       if (state.value === 'loading') state.value = 'playing'
     }
     player.on_play_finished = () => {
       state.value = 'error'
-      errMsg.value = '流已结束'
+      errMsg.value = t('live.player.streamEnded')
     }
     player.on_error_callback = (e: any) => {
       state.value = 'error'
@@ -165,7 +166,7 @@ watch(state, (s) => {
     timeoutTimer.value = setTimeout(() => {
       if (state.value === 'loading') {
         state.value = 'error'
-        errMsg.value = 'E4002 起流超时'
+        errMsg.value = t('live.player.startTimeout')
       }
     }, 30000)
   }
@@ -173,17 +174,17 @@ watch(state, (s) => {
 
 // 错误码解析（MGR-15：E4xxx 流媒体错误单独展示）
 const errCode = computed(() => (/E\d{4}/.exec(errMsg.value || '') || [''])[0])
-const errText = computed(() => (errMsg.value || '播放失败').replace(/E\d{4}\s*/, '') || '播放失败')
+const errText = computed(() => (errMsg.value || t('live.player.playFailed')).replace(/E\d{4}\s*/, '') || t('live.player.playFailed'))
 </script>
 
 <template>
   <div ref="container" class="player-box">
-    <div v-if="state === 'idle'" class="absolute inset-0 z-10 flex items-center justify-center text-sm text-placeholder">未播放</div>
+    <div v-if="state === 'idle'" class="absolute inset-0 z-10 flex items-center justify-center text-sm text-placeholder">{{ t('live.player.idle') }}</div>
     <div v-else-if="state === 'loading'" class="absolute inset-0 z-10 flex items-center justify-center gap-2 text-sm text-placeholder">
-      <Icon name="refresh" :size="16" class="ipc-spin" />正在连接…
+      <Icon name="refresh" :size="16" class="ipc-spin" />{{ t('live.player.connecting') }}
     </div>
     <div v-else-if="state === 'error'" class="absolute inset-0 z-10 flex items-center justify-center p-4">
-      <UiErrorCard :code="errCode" :msg="errText" :suggest="'可点击重试重新起流；持续失败请在设备列表发起诊断'" @retry="emit('retry')" @diagnose="emit('retry')" />
+      <UiErrorCard :code="errCode" :msg="errText" :suggest="t('live.player.errorSuggest')" @retry="emit('retry')" @diagnose="emit('retry')" />
     </div>
     <div v-if="title && state === 'playing'" class="absolute inset-x-0 top-0 bg-black/45 px-2 py-1 text-xs text-white">{{ title }}</div>
   </div>
@@ -191,7 +192,7 @@ const errText = computed(() => (errMsg.value || '播放失败').replace(/E\d{4}\
 
 <style scoped>
 .player-box {
-  position: relative; width: 100%; height: 100%; background: #000;
+  position: relative; width: 100%; height: 100%; background: black;
   display: flex; align-items: center; justify-content: center;
 }
 /* wasm 画布按 16:9 位图尺寸构建，CSS auto 显示（禁止库内联拉伸样式），

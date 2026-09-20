@@ -33,6 +33,30 @@ func errCode(code int) string {
 
 func (a *Adapter) markOnline(deviceID string) {
 	_ = store.KVSet("idp:online:"+deviceID, "1", offlineAfter+time.Minute)
+
+	// 接入规范 §3.2 的状态机要求 offline → online 的**恢复**边：idp 的离线判定是
+	// 「LWT 即时，或 3×Keepalive（默认 180s）无消息」，所以「收到任意上行报文」即等于在线。
+	// 仅刷 Redis 键不足以表达这一点——DB 的 status 只有 hello / bind / 预添加命中会写 online，
+	// 于是设备一旦错过它那条 hello 就再也回不到 online：
+	//   实测冷启动竞态（EMQX 尚未就绪，server 13:22:18 才订阅上，而模拟器 13:22:17 已发 hello，
+	//   hello 无 retain 故丢失）：此后设备每 30s 持续上报，Redis 键 TTL 220s 一直存活，
+	//   而界面恒显「离线」——同一时刻两个在线表示自相矛盾。
+	// 不变量（修复后）：Redis 在线键存在 ⟺ DB status = online；反方向由 offlineWatcher 负责。
+	// 幂等且低开销：上报每 30s 一次，因此只在状态不是 online 时才写库（避免每条上报都 Save + 广播）。
+	var dev models.Device
+	if store.DB.Select("id", "status", "project_id").
+		First(&dev, "id = ? AND deleted_at = 0", deviceID).Error != nil {
+		return
+	}
+	// 未绑定设备（project_id 为空）不在此处上线：它尚无归属，其上线时机由绑定/预添加流程决定，
+	// 这里不改变既有语义。
+	if dev.ProjectID == "" {
+		return
+	}
+	if dev.Status != "online" {
+		log.Printf("[idp] %s 上报恢复在线（§3.2 恢复边）", deviceID)
+		devsvc.SetDeviceStatus(deviceID, "online", nil)
+	}
 }
 
 // isRevoked SET-02：设备是否在 CRL 吊销列表中（吊销的设备拒绝 hello/绑定）。
@@ -98,6 +122,14 @@ func (a *Adapter) handleHello(deviceID string, env Envelope) {
 	var caps []string
 	_ = json.Unmarshal(capsRaw, &caps)
 
+	// 默认密码是否已修改（接入规范 §5.5.2 hello.localUserChanged）。
+	// 用 comma-ok 读：字段缺失（非 IDP 来源或未实现该字段的固件）绝不能当成 false，
+	// 否则会在平台上凭空报一条「仍在用出厂默认密码」，把正常设备也说成有风险。
+	meta := models.JSONB{}
+	if pwdChanged, has := d["localUserChanged"].(bool); has {
+		meta["localUserChanged"] = pwdChanged
+	}
+
 	var dev models.Device
 	err := store.DB.First(&dev, "id = ?", deviceID).Error
 	if err != nil {
@@ -107,6 +139,7 @@ func (a *Adapter) handleHello(deviceID string, env Envelope) {
 			Identity:     models.JSONB{"deviceId": deviceID},
 			Status:       "offline",
 			Capabilities: models.StringSlice(caps),
+			Meta:         meta,
 			CreatedAt:    models.NowMilli(), UpdatedAt: models.NowMilli(),
 		}
 		if err := store.DB.Create(&dev).Error; err != nil {
@@ -116,6 +149,13 @@ func (a *Adapter) handleHello(deviceID string, env Envelope) {
 	} else {
 		dev.Model, dev.Vendor, dev.Fw, dev.Hw = model, vendor, fw, hw
 		dev.Capabilities = models.StringSlice(caps)
+		// 与报告的 metrics 共存：只覆盖 hello 带来的那几个键，不整个重置 meta
+		if dev.Meta == nil {
+			dev.Meta = models.JSONB{}
+		}
+		for k, v := range meta {
+			dev.Meta[k] = v
+		}
 		dev.UpdatedAt = models.NowMilli()
 		store.DB.Save(&dev)
 	}

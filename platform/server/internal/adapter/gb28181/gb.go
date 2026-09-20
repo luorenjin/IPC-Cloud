@@ -254,7 +254,8 @@ func (a *Adapter) ensureChannel(dev *models.Device, idx int, name, gbChannelID s
 	var ch models.Channel
 	err := store.DB.First(&ch, "device_id = ? AND meta->>'gbChannelId' = ?", dev.ID, gbChannelID).Error
 	if err == nil {
-		ch.Name = name
+		// 通道名走统一入口：设备名记进 meta["deviceName"]，平台改过名的通道不被目录重查冲掉
+		devsvc.ApplyDeviceChannelName(&ch, name)
 		ch.Idx = idx
 		ch.UpdatedAt = models.NowMilli()
 		store.DB.Save(&ch)
@@ -265,10 +266,13 @@ func (a *Adapter) ensureChannel(dev *models.Device, idx int, name, gbChannelID s
 		Idx: idx, Name: name, Enabled: true, StreamState: "idle",
 		Capabilities: models.StringSlice(gbDefaultCaps()),
 		Meta: models.JSONB{"gbChannelId": gbChannelID,
-			"gbStream": gbChannelID + "_main", "gbStreamSub": gbChannelID + "_sub"},
+			"gbStream": gbChannelID + "_main", "gbStreamSub": gbChannelID + "_sub",
+			devsvc.DeviceNameKey: name},
 		CreatedAt: models.NowMilli(), UpdatedAt: models.NowMilli(),
 	}
 	store.DB.Create(&ch)
+	devsvc.ApplyDefaultRecordPlan(ch.ID, dev.ProjectID) // ADD-09
+	devsvc.ApplyDefaultAlarmRule(ch.ID, dev.ProjectID)  // ADD-09
 	return &ch
 }
 

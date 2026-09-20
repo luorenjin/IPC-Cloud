@@ -16,7 +16,9 @@ type Scheduler struct{}
 
 func NewScheduler() *Scheduler { return &Scheduler{} }
 
-func stickyKey(channelID, profile string) string { return fmt.Sprintf("channel:%s:%s:node", channelID, profile) }
+func stickyKey(channelID, profile string) string {
+	return fmt.Sprintf("channel:%s:%s:node", channelID, profile)
+}
 
 // Pick 为通道选择节点：优先粘性，否则选健康节点中 streams/maxStreams/weight 最小者。
 func (s *Scheduler) Pick(channelID, profile string) (*models.MediaNode, error) {
@@ -41,15 +43,24 @@ func (s *Scheduler) Pick(channelID, profile string) (*models.MediaNode, error) {
 		return nil, fmt.Errorf("E4001 无可用媒体节点")
 	}
 	// 2. 最小负载
+	return pickLeastLoaded(nodes), nil
+}
+
+// pickLeastLoaded 返回负载最小的节点。抽成纯函数以便脱离 DB 覆盖测试。
+// 注意：不可写 `for i := range nodes[1:]`，那样 i 从 0 起而 nodes[i] 取的是
+// 原切片，既错位又漏掉最后一个节点（历史 bug）。
+func pickLeastLoaded(nodes []models.MediaNode) *models.MediaNode {
+	if len(nodes) == 0 {
+		return nil
+	}
 	best := &nodes[0]
 	bestScore := loadScore(*best)
-	for i := range nodes[1:] {
-		sc := loadScore(nodes[i])
-		if sc < bestScore {
+	for i := 1; i < len(nodes); i++ {
+		if sc := loadScore(nodes[i]); sc < bestScore {
 			best, bestScore = &nodes[i], sc
 		}
 	}
-	return best, nil
+	return best
 }
 
 func loadScore(n models.MediaNode) float64 {
@@ -72,6 +83,17 @@ func (s *Scheduler) SetSticky(channelID, profile, nodeID string) {
 // ClearSticky 清除粘性映射。
 func (s *Scheduler) ClearSticky(channelID, profile string) {
 	_ = store.KVImpl.Del(context.Background(), stickyKey(channelID, profile))
+}
+
+// StickyNode 读粘性映射（无映射或读取失败返回空串）。
+// 用途：状态对账时判断「该通道本该在哪台节点出流」，从而区分
+// 「节点不可达、状态未知，不能动」与「节点可达但流确实没了，应复位」。
+func (s *Scheduler) StickyNode(channelID, profile string) string {
+	sid, err := store.KVImpl.Get(context.Background(), stickyKey(channelID, profile))
+	if err != nil {
+		return ""
+	}
+	return sid
 }
 
 // NodeOffline 清理节点全部映射。

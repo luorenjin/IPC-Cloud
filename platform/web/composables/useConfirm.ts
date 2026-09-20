@@ -14,20 +14,22 @@ export interface ConfirmOptions {
 
 // 模块级单例（ssr:false，无跨请求状态泄漏风险）
 const state = ref({
-  title: '', message: '', detail: '', confirmText: '确定', cancelText: '取消',
+  title: '', message: '', detail: '', confirmText: '', cancelText: '',
   danger: false, inputConfirm: '', inputPlaceholder: ''
 })
 const open = ref(false)
 let resolver: ((v: boolean) => void) | null = null
 
 export function useConfirm() {
+  const { t } = useI18n()
   function ask(opts: ConfirmOptions = {}): Promise<boolean> {
     state.value = {
-      title: opts.title || '操作确认',
-      message: opts.message || '确定执行该操作吗？',
+      // 默认文案走词条；调用方传入的具体文案优先
+      title: opts.title || t('confirm.title'),
+      message: opts.message || t('confirm.message'),
       detail: opts.detail || '',
-      confirmText: opts.confirmText || '确定',
-      cancelText: opts.cancelText || '取消',
+      confirmText: opts.confirmText || t('common.confirm'),
+      cancelText: opts.cancelText || t('common.cancel'),
       danger: !!opts.danger,
       inputConfirm: opts.inputConfirm || '',
       inputPlaceholder: opts.inputPlaceholder || ''

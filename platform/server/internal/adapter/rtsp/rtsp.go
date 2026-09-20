@@ -141,16 +141,27 @@ func (a *Adapter) StopPlayback(ctx context.Context, channelID, sessionID string)
 func (a *Adapter) Reboot(ctx context.Context, deviceID string) error {
 	return errs.EForbid.WithMsg("RTSP 源不支持远程重启")
 }
+// diagnoseItem 组装一条诊断结果（MGR-07）。
+// err 为 nil 时 msg 留空——曾用 map[bool]string{true:"", false:err.Error()}[ok] 写法，
+// 但 map 字面量的两个 value 都会先求值，探测成功时反而 panic，故必须显式判空。
+func diagnoseItem(item string, err error, costMs int64) map[string]any {
+	msg := ""
+	if err != nil {
+		msg = err.Error()
+	}
+	return map[string]any{"item": item, "ok": err == nil, "cost": costMs, "msg": msg}
+}
+
 func (a *Adapter) Diagnose(ctx context.Context, deviceID string) ([]map[string]any, error) {
 	var dev models.Device
 	if err := store.DB.First(&dev, "id = ?", deviceID).Error; err != nil {
 		return nil, errs.ENotFound
 	}
 	uri, _ := dev.Identity["url"].(string)
+	start := time.Now()
 	_, err := Probe(uri, 5*time.Second)
-	ok := err == nil
 	return []map[string]any{
-		{"item": "rtsp", "ok": ok, "cost": 0, "msg": map[bool]string{true: "", false: err.Error()}[ok]},
+		diagnoseItem("rtsp", err, time.Since(start).Milliseconds()),
 	}, nil
 }
 func (a *Adapter) Transfer(ctx context.Context, deviceID, projectID string) error { return nil }

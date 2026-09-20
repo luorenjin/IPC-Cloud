@@ -21,10 +21,10 @@ func handleListRoles(c *gin.Context) {
 func handleCreateRole(c *gin.Context) {
 	ctx := getCtx(c)
 	var req struct {
-		Name      string         `json:"name" binding:"required"`
-		Perms     models.JSONB   `json:"perms"`
-		Scope     models.JSONB   `json:"scope"`
-		CopyFrom  string         `json:"copyFrom"`
+		Name     string       `json:"name" binding:"required"`
+		Perms    models.JSONB `json:"perms"`
+		Scope    models.JSONB `json:"scope"`
+		CopyFrom string       `json:"copyFrom"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		fail(c, errs.EBadRequest)
@@ -115,8 +115,9 @@ func handleDeleteRole(c *gin.Context) {
 
 func handleListUsers(c *gin.Context) {
 	ctx := getCtx(c)
+	// 成员按租户隔离：成员列表含用户名/真实姓名/联系方式，跨租户可见是直接的租户数据泄露
 	var users []models.User
-	store.DB.Find(&users)
+	store.DB.Where("tenant_id = ?", ctx.TenantID).Find(&users)
 	var urs []models.UserRole
 	store.DB.Where("project_id = ?", ctx.ProjectID).Find(&urs)
 	roleByUser := map[string]string{}
@@ -156,6 +157,10 @@ func handleCreateUser(c *gin.Context) {
 		fail(c, errs.EBadRequest.WithMsg("用户名已存在"))
 		return
 	}
+	// 角色必须属于当前项目：否则可以绑定别家项目的角色，凭空拿到一份不属于自己的权限集
+	if _, okr := roleInProject(c, req.RoleID); !okr {
+		return
+	}
 	u, _ := models.NewUser(ctx.TenantID, req.Username, req.Password, req.Name)
 	u.Contact = req.Contact
 	if err := store.DB.Create(u).Error; err != nil {
@@ -168,6 +173,11 @@ func handleCreateUser(c *gin.Context) {
 
 func handleUpdateUser(c *gin.Context) {
 	id := c.Param("id")
+	ctx := getCtx(c)
+	// 成员是租户级实体：跨租户改成员资料/联系方式/启用状态等同于接管他人账号
+	if _, oku := userInTenant(c, id); !oku {
+		return
+	}
 	var req struct {
 		Name    string `json:"name"`
 		Contact string `json:"contact"`
@@ -177,6 +187,11 @@ func handleUpdateUser(c *gin.Context) {
 	if err := c.ShouldBindJSON(&req); err != nil {
 		fail(c, errs.EBadRequest)
 		return
+	}
+	if req.RoleID != "" {
+		if _, okr := roleInProject(c, req.RoleID); !okr {
+			return
+		}
 	}
 	updates := map[string]any{"updated_at": models.NowMilli()}
 	if req.Name != "" {
@@ -188,8 +203,7 @@ func handleUpdateUser(c *gin.Context) {
 	if req.Status != "" {
 		updates["status"] = req.Status
 	}
-	store.DB.Model(&models.User{}).Where("id = ?", id).Updates(updates)
-	ctx := getCtx(c)
+	store.DB.Model(&models.User{}).Where("id = ? AND tenant_id = ?", id, ctx.TenantID).Updates(updates)
 	if req.RoleID != "" && ctx != nil {
 		store.DB.Where("user_id = ? AND project_id = ?", id, ctx.ProjectID).
 			Delete(&models.UserRole{})
@@ -200,6 +214,12 @@ func handleUpdateUser(c *gin.Context) {
 
 func handleResetPassword(c *gin.Context) {
 	id := c.Param("id")
+	ctx := getCtx(c)
+	// 漏了这一步就是「用一个 ID 直接重置别家租户管理员的密码」——最高危的一类越权，
+	// 拿到的就是对方账号的完全控制权
+	if _, oku := userInTenant(c, id); !oku {
+		return
+	}
 	var req struct {
 		Password string `json:"password" binding:"required"`
 	}
@@ -207,16 +227,16 @@ func handleResetPassword(c *gin.Context) {
 		fail(c, errs.EBadRequest.WithMsg("新密码至少 8 位"))
 		return
 	}
-	store.DB.Model(&models.User{}).Where("id = ?", id).
+	store.DB.Model(&models.User{}).Where("id = ? AND tenant_id = ?", id, ctx.TenantID).
 		Updates(map[string]any{"pwd_hash": crypto.HashPassword(req.Password), "updated_at": models.NowMilli()})
 	ok(c, nil)
 }
 
 func handleDeleteUser(c *gin.Context) {
 	id := c.Param("id")
-	var u models.User
-	if store.DB.First(&u, "id = ?", id).Error != nil {
-		fail(c, errs.ENotFound)
+	ctx := getCtx(c)
+	u, oku := userInTenant(c, id)
+	if !oku {
 		return
 	}
 	var isSuper int64
@@ -226,6 +246,6 @@ func handleDeleteUser(c *gin.Context) {
 		return
 	}
 	store.DB.Delete(&models.UserRole{}, "user_id = ?", id)
-	store.DB.Delete(&u)
+	store.DB.Delete(u, "id = ? AND tenant_id = ?", id, ctx.TenantID)
 	ok(c, nil)
 }

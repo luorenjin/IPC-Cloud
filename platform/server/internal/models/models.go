@@ -1,4 +1,13 @@
-// Package models 数据模型（PRD §7）。除行级时间戳外，业务时间一律为 UTC 毫秒时间戳。
+// Package models 数据模型（PRD §7）。所有时间一律为 UTC 毫秒时间戳，**含 created_at/updated_at**。
+//
+// ⚠️ 行级时间戳必须显式声明精度（只写 json tag 不够）：
+// GORM 对 int64 的 autoCreateTime/autoUpdateTime **默认按秒**写入，而本仓代码到处显式赋
+// models.NowMilli()（毫秒）——两条路径混进同一列，会出现 10 位与 13 位两种值并存
+// （实测 devices.updated_at 全秒、channels.updated_at 秒/毫秒各半），
+// 使得任何「按 updated_at 算时长」的推导都失真。
+// 因此每个 CreatedAt/UpdatedAt 都必须带 gorm:"autoCreateTime:milli" / "autoUpdateTime:milli"；
+// 漏掉时不会报错，只会被 GORM 悄悄按秒覆盖，即使调用方在 Updates(map) 里传了毫秒值。
+// 存量数据由 store.MigrateMilliTimestamps() 统一回填为毫秒。
 package models
 
 import (
@@ -125,6 +134,8 @@ func (s *StringSlice) Scan(v any) error {
 	return errors.New("unsupported text[] type")
 }
 
+// NowMilli 当前时间（UTC 毫秒）。全仓时间戳的唯一来源——不要用 time.Now().Unix()（秒），
+// 否则该字段会与其它时间戳差三个数量级。
 func NowMilli() int64 { return time.Now().UnixMilli() }
 
 // ---------- 组织与权限 ----------
@@ -141,8 +152,8 @@ type Project struct {
 	TZ        string `gorm:"size:64;default:Asia/Shanghai" json:"tz"`
 	Settings  JSONB  `gorm:"type:jsonb" json:"settings"`
 	Enabled   bool   `gorm:"default:true" json:"enabled"`
-	CreatedAt int64  `json:"createdAt"`
-	UpdatedAt int64  `json:"updatedAt"`
+	CreatedAt int64  `gorm:"autoCreateTime:milli" json:"createdAt"`
+	UpdatedAt int64  `gorm:"autoUpdateTime:milli" json:"updatedAt"`
 	SetupDone bool   `gorm:"default:false" json:"setupDone"` // ACC-02 首次向导是否完成
 }
 
@@ -152,7 +163,7 @@ type DeviceGroup struct {
 	ParentID  string `gorm:"size:40;default:" json:"parentId"`
 	Name      string `gorm:"size:128" json:"name"`
 	Sort      int    `gorm:"default:0" json:"sort"`
-	CreatedAt int64  `json:"createdAt"`
+	CreatedAt int64  `gorm:"autoCreateTime:milli" json:"createdAt"`
 }
 
 // Role 权限矩阵 + 资源范围（PRD ACC-05）。
@@ -163,8 +174,8 @@ type Role struct {
 	Builtin   bool   `gorm:"default:false" json:"builtin"` // 超级管理员不可删改
 	Perms     JSONB  `gorm:"type:jsonb" json:"perms"`      // {"menus":[],"actions":[]}
 	Scope     JSONB  `gorm:"type:jsonb" json:"scope"`      // {"groups":[],"channels":[]} 空=全部
-	CreatedAt int64  `json:"createdAt"`
-	UpdatedAt int64  `json:"updatedAt"`
+	CreatedAt int64  `gorm:"autoCreateTime:milli" json:"createdAt"`
+	UpdatedAt int64  `gorm:"autoUpdateTime:milli" json:"updatedAt"`
 }
 
 type User struct {
@@ -175,8 +186,8 @@ type User struct {
 	Name      string `gorm:"size:64" json:"name"`
 	Contact   string `gorm:"size:128" json:"contact"`
 	Status    string `gorm:"size:16;default:active" json:"status"` // active/disabled
-	CreatedAt int64  `json:"createdAt"`
-	UpdatedAt int64  `json:"updatedAt"`
+	CreatedAt int64  `gorm:"autoCreateTime:milli" json:"createdAt"`
+	UpdatedAt int64  `gorm:"autoUpdateTime:milli" json:"updatedAt"`
 }
 
 type UserRole struct {
@@ -209,8 +220,8 @@ type Device struct {
 	Location       string      `gorm:"size:128" json:"location"`
 	Remark         string      `gorm:"size:256" json:"remark"`
 	DeletedAt      int64       `gorm:"index" json:"deletedAt,omitempty"`
-	CreatedAt      int64       `json:"createdAt"`
-	UpdatedAt      int64       `json:"updatedAt"`
+	CreatedAt      int64       `gorm:"autoCreateTime:milli" json:"createdAt"`
+	UpdatedAt      int64       `gorm:"autoUpdateTime:milli" json:"updatedAt"`
 }
 
 // CapabilityMissing 判断设备是否缺少某能力。
@@ -227,44 +238,54 @@ func (d *Device) CapabilityMissing(cap string) bool {
 func (d *Device) HasCapability(cap string) bool { return !d.CapabilityMissing(cap) }
 
 type Channel struct {
-	ID           string      `gorm:"primaryKey;size:40" json:"id"`
-	DeviceID     string      `gorm:"index;size:40" json:"deviceId"`
-	ProjectID    string      `gorm:"index;size:40" json:"projectId"`
-	Idx          int         `gorm:"default:1" json:"idx"`
-	Name         string      `gorm:"size:128" json:"name"`
-	Enabled      bool        `gorm:"default:true" json:"enabled"`
-	StreamState  string      `gorm:"size:16;default:idle" json:"streamState"` // idle/starting/streaming/error
-	Profiles     JSONB       `gorm:"type:jsonb" json:"profiles"`
-	CoverURL     string      `gorm:"size:256" json:"coverUrl"`
-	Capabilities StringSlice `gorm:"type:text[]" json:"capabilities"`
-	Meta         JSONB       `gorm:"type:jsonb" json:"meta"`
-	CreatedAt    int64       `json:"createdAt"`
-	UpdatedAt    int64       `json:"updatedAt"`
+	ID        string `gorm:"primaryKey;size:40" json:"id"`
+	DeviceID  string `gorm:"index;size:40" json:"deviceId"`
+	ProjectID string `gorm:"index;size:40" json:"projectId"`
+	Idx       int    `gorm:"default:1" json:"idx"`
+	Name      string `gorm:"size:128" json:"name"`
+	// NameOverridden 平台是否改过通道名（PRD MGR-05「通道名」）。
+	//
+	// 为什么需要这个标记：设备每次 hello / 注册都会重报通道名（IDP hello.channels[].name、
+	// 国标目录），只靠 name 无法区分「这是设备名」还是「这是用户改的名」。改名时置位，
+	// 此后适配器不再覆盖 name；用户改回设备名（或点「恢复设备名称」）时清位。
+	// 设备上报的原始名始终存 meta["deviceName"]，恢复时取自那里。
+	NameOverridden bool        `gorm:"not null;default:false" json:"nameOverridden"`
+	Enabled        bool        `gorm:"default:true" json:"enabled"`
+	StreamState    string      `gorm:"size:16;default:idle" json:"streamState"` // idle/starting/streaming/error
+	Profiles       JSONB       `gorm:"type:jsonb" json:"profiles"`
+	CoverURL       string      `gorm:"size:256" json:"coverUrl"`
+	Capabilities   StringSlice `gorm:"type:text[]" json:"capabilities"`
+	Meta           JSONB       `gorm:"type:jsonb" json:"meta"`
+	CreatedAt      int64       `gorm:"autoCreateTime:milli" json:"createdAt"`
+	UpdatedAt      int64       `gorm:"autoUpdateTime:milli" json:"updatedAt"`
 }
 
 // ---------- 媒体节点与流 ----------
 
 type MediaNode struct {
-	ID            string `gorm:"primaryKey;size:40" json:"id"`
-	Name          string `gorm:"size:64" json:"name"`
-	APIURL        string `gorm:"size:256" json:"apiUrl"`
-	SecretEnc     string `gorm:"text" json:"-"`
-	PublicHost    string `gorm:"size:128" json:"publicHost"`
-	RTMPPort      int    `gorm:"default:1936" json:"rtmpPort"`
-	HTTPPort      int    `gorm:"default:80" json:"httpPort"`
-	HTTPSPort     int    `gorm:"default:443" json:"httpsPort"`
-	RTPRange      string `gorm:"size:64;default:30000-30100" json:"rtpRange"`
-	MaxStreams    int    `gorm:"default:200" json:"maxStreams"`
-	Streams       int    `gorm:"default:0" json:"streams"`
-	Playing       int    `gorm:"default:0" json:"playing"`      // SYS-01 当前播放路数
-	BwIn          int64  `gorm:"default:0" json:"bwIn"`         // SYS-01 入带宽 B/s
-	BwOut         int64  `gorm:"default:0" json:"bwOut"`        // SYS-01 出带宽 B/s
-	Version       string `gorm:"size:128" json:"version"`       // SYS-01 ZLM 版本（Server 头）
-	Disabled      bool   `gorm:"default:false" json:"disabled"` // 禁用（不参与调度）
-	Weight        int    `gorm:"default:100" json:"weight"`
-	Status        string `gorm:"size:16;default:offline" json:"status"`
+	ID         string `gorm:"primaryKey;size:40" json:"id"`
+	Name       string `gorm:"size:64" json:"name"`
+	APIURL     string `gorm:"size:256" json:"apiUrl"`
+	SecretEnc  string `gorm:"text" json:"-"`
+	PublicHost string `gorm:"size:128" json:"publicHost"`
+	RTMPPort   int    `gorm:"default:1936" json:"rtmpPort"`
+	HTTPPort   int    `gorm:"default:80" json:"httpPort"`
+	HTTPSPort  int    `gorm:"default:443" json:"httpsPort"`
+	RTPRange   string `gorm:"size:64;default:30000-30100" json:"rtpRange"`
+	MaxStreams int    `gorm:"default:200" json:"maxStreams"`
+	Streams    int    `gorm:"default:0" json:"streams"`
+	Playing    int    `gorm:"default:0" json:"playing"`      // SYS-01 当前播放路数
+	BwIn       int64  `gorm:"default:0" json:"bwIn"`         // SYS-01 入带宽 B/s
+	BwOut      int64  `gorm:"default:0" json:"bwOut"`        // SYS-01 出带宽 B/s
+	Version    string `gorm:"size:128" json:"version"`       // SYS-01 ZLM 版本（Server 头）
+	Disabled   bool   `gorm:"default:false" json:"disabled"` // 禁用（不参与调度）
+	Weight     int    `gorm:"default:100" json:"weight"`
+	Status     string `gorm:"size:16;default:offline" json:"status"`
+	// StatusReason ACC-02：自检/保活判定为 offline 时的具体原因（连接被拒、超时、secret 错误等），
+	// online 时清空。前端节点页据此呈现失败原因而非只显示"不可达"。
+	StatusReason  string `gorm:"size:256" json:"statusReason"`
 	LastKeepalive int64  `json:"lastKeepalive"`
-	CreatedAt     int64  `json:"createdAt"`
+	CreatedAt     int64  `gorm:"autoCreateTime:milli" json:"createdAt"`
 }
 
 type StreamSession struct {
@@ -289,8 +310,8 @@ type RecordTemplate struct {
 	Kind      string `gorm:"size:16" json:"kind"` // timer/event
 	Schedule  JSONB  `gorm:"type:jsonb" json:"schedule"`
 	Builtin   bool   `gorm:"default:false" json:"builtin"`
-	CreatedAt int64  `json:"createdAt"`
-	UpdatedAt int64  `json:"updatedAt"`
+	CreatedAt int64  `gorm:"autoCreateTime:milli" json:"createdAt"`
+	UpdatedAt int64  `gorm:"autoUpdateTime:milli" json:"updatedAt"`
 }
 
 type RecordPlan struct {
@@ -299,8 +320,25 @@ type RecordPlan struct {
 	TemplateID string `gorm:"size:40" json:"templateId"`
 	Profile    string `gorm:"size:16;default:main" json:"profile"`
 	Enabled    bool   `gorm:"default:true" json:"enabled"`
-	CreatedAt  int64  `json:"createdAt"`
-	UpdatedAt  int64  `json:"updatedAt"`
+	CreatedAt  int64  `gorm:"autoCreateTime:milli" json:"createdAt"`
+	UpdatedAt  int64  `gorm:"autoUpdateTime:milli" json:"updatedAt"`
+}
+
+// RebootPlan 设备定时重启计划（MGR-08）。
+// 设备与计划一对一：同一台设备只需一条周期规则（多时段由 days 列表表达）。
+// Schedule 复用录像计划的 JSONB 约定：{"days":[1..7],"time":"HH:MM"}，
+// days 为 ISO 星期（1=周一…7=周日），**空列表表示每天**（与 scheduleMatches 一致）。
+type RebootPlan struct {
+	ID       string `gorm:"primaryKey;size:40" json:"id"`
+	DeviceID string `gorm:"uniqueIndex;size:40" json:"deviceId"`
+	Enabled  bool   `gorm:"default:false" json:"enabled"`
+	Schedule JSONB  `gorm:"type:jsonb" json:"schedule"`
+	// LastFiredKey 记录已触发的「项目时区自然日 + 时刻」（YYYY-MM-DD HH:MM）。
+	// 必须落库而不只放内存：轮询间隔 30s，同一次到点会命中 1~2 轮，
+	// 服务重启后还会再扫一遍——没有水位就会出现重复重启。
+	LastFiredKey string `gorm:"size:20" json:"lastFiredKey"`
+	CreatedAt    int64  `gorm:"autoCreateTime:milli" json:"createdAt"`
+	UpdatedAt    int64  `gorm:"autoUpdateTime:milli" json:"updatedAt"`
 }
 
 type RecordIndex struct {
@@ -322,8 +360,8 @@ type AlarmTemplate struct {
 	Name      string `gorm:"size:64" json:"name"`
 	Schedule  JSONB  `gorm:"type:jsonb" json:"schedule"`
 	Builtin   bool   `gorm:"default:false" json:"builtin"`
-	CreatedAt int64  `json:"createdAt"`
-	UpdatedAt int64  `json:"updatedAt"`
+	CreatedAt int64  `gorm:"autoCreateTime:milli" json:"createdAt"`
+	UpdatedAt int64  `gorm:"autoUpdateTime:milli" json:"updatedAt"`
 }
 
 type AlarmRule struct {
@@ -333,9 +371,15 @@ type AlarmRule struct {
 	Kinds      StringSlice `gorm:"type:text[]" json:"kinds"`
 	TemplateID string      `gorm:"size:40" json:"templateId"`
 	Enabled    bool        `gorm:"default:true" json:"enabled"`
-	CreatedAt  int64       `json:"createdAt"`
-	UpdatedAt  int64       `json:"updatedAt"`
+	CreatedAt  int64       `gorm:"autoCreateTime:milli" json:"createdAt"`
+	UpdatedAt  int64       `gorm:"autoUpdateTime:milli" json:"updatedAt"`
 }
+
+// DeviceSideAlarmKinds ALM-03 设备侧智能事件类型全集。
+//
+// 单一事实来源：engine 的通道规则判定、store 的存量迁移、api 的新项目默认策略
+// 三处共用。任何一处各自维护一份都会导致三者行为不一致。
+var DeviceSideAlarmKinds = []string{"motion", "humanoid", "intrusion", "linecross", "tamper", "io"}
 
 type AlarmEvent struct {
 	ID          string `gorm:"primaryKey;size:48" json:"id"`
@@ -353,9 +397,12 @@ type AlarmEvent struct {
 // ---------- 运维 ----------
 
 type AuditLog struct {
-	ID        string `gorm:"primaryKey;size:48" json:"id"`
-	UserID    string `gorm:"index;size:40" json:"userId"`
-	Username  string `gorm:"size:64" json:"username"`
+	ID       string `gorm:"primaryKey;size:48" json:"id"`
+	UserID   string `gorm:"index;size:40" json:"userId"`
+	Username string `gorm:"size:64" json:"username"`
+	// TenantID 审计日志的租户维度。登录事件没有项目（project_id 为空），
+	// 早期只按 project_id 过滤时会让所有租户的登录记录互相可见；查询一律同时带租户。
+	TenantID  string `gorm:"index;size:40" json:"tenantId"`
 	ProjectID string `gorm:"index;size:40" json:"projectId"`
 	Action    string `gorm:"size:64;index" json:"action"`
 	Target    string `gorm:"size:128" json:"target"`
@@ -376,8 +423,8 @@ type Task struct {
 	Progress  int    `json:"progress"`
 	Result    JSONB  `gorm:"type:jsonb" json:"result"`
 	CreatedBy string `gorm:"size:40" json:"createdBy"`
-	CreatedAt int64  `gorm:"index" json:"createdAt"`
-	UpdatedAt int64  `json:"updatedAt"`
+	CreatedAt int64  `gorm:"index;autoCreateTime:milli" json:"createdAt"`
+	UpdatedAt int64  `gorm:"autoUpdateTime:milli" json:"updatedAt"`
 }
 
 // IdpPreadd IDP 预添加记录（7 天有效）。
@@ -391,7 +438,7 @@ type IdpPreadd struct {
 	Location   string `gorm:"size:128" json:"location"`
 	ExpiresAt  int64  `json:"expiresAt"`
 	State      string `gorm:"size:16;default:pending" json:"state"` // pending/activated/expired/failed
-	CreatedAt  int64  `json:"createdAt"`
+	CreatedAt  int64  `gorm:"autoCreateTime:milli" json:"createdAt"`
 }
 
 // GbWhitelist 国标白名单：预填即自动入组。
@@ -402,7 +449,7 @@ type GbWhitelist struct {
 	PwdEnc    string `gorm:"text" json:"-"`
 	GroupID   string `gorm:"size:40" json:"groupId"`
 	Name      string `gorm:"size:128" json:"name"`
-	CreatedAt int64  `json:"createdAt"`
+	CreatedAt int64  `gorm:"autoCreateTime:milli" json:"createdAt"`
 }
 
 // GbPending 待确认的注册设备。

@@ -1,0 +1,116 @@
+// 录像模块词条：录像计划（pages/record/plans.vue，含存储概览 REC-07）、
+// 录像计划模板（pages/record/templates.vue）、周×24h 网格编辑器（components/ScheduleGrid.vue）。
+//
+// 星期名 DAY_NAMES 在 utils/format.ts，不在此重复定义。
+export default {
+  // ---- Storage overview (REC-07) ----
+  'record.storage.title': 'Recording storage',
+  'record.storage.recalc': 'Recalculate',
+  'record.storage.loadFailed': 'Could not load the storage overview',
+  'record.storage.used': 'Used',
+  'record.storage.percent': '({n}%)',
+  'record.storage.segments': 'Segments',
+  'record.storage.segmentsUnit': '',
+  'record.storage.keep': 'Retention',
+  'record.storage.keepUnit': 'days',
+  'record.storage.nearFull': 'Storage is almost full. The oldest recordings will be overwritten — free up space or expand storage.',
+  'record.storage.calculating': 'Calculating…',
+
+  // ---- Recording schedule list ----
+  'record.plans.title': 'Recording schedules',
+  'record.plans.create': 'Create recording schedule',
+  'record.plans.colChannel': 'Channel',
+  'record.plans.colTemplate': 'Schedule template',
+  'record.plans.colProfile': 'Stream',
+  'record.plans.colEnabled': 'Enabled',
+  'record.plans.empty': 'No recording schedules yet. Select Create recording schedule to add one.',
+  'record.plans.toggleAria': 'Enable recording schedule {name}',
+  'record.plans.editPlan': 'Change template',
+  'record.plans.editProfile': 'Change stream',
+
+  // Create-schedule wizard
+  'record.plans.dialogTitle': 'Create recording schedule',
+  'record.plans.stepChannel': 'Channels',
+  'record.plans.stepTemplate': 'Template',
+  'record.plans.stepProfile': 'Stream',
+  'record.plans.channelHint': 'Grouped by device. Select a whole device or individual channels.',
+  'record.plans.selectedChannels': '{n} channels selected',
+  'record.plans.noChannels': 'No channels yet. Add a device under Devices first.',
+  'record.plans.templateHint': 'Pick a schedule template. Templates are managed on the Schedule Templates page.',
+  'record.plans.noTemplates': 'No schedule templates yet. Create one on the Schedule Templates page first.',
+  'record.plans.builtin': 'Built-in',
+  'record.plans.profileHint': 'Choose the stream to record. The main stream gives higher quality but uses more storage; the sub stream is the opposite.',
+  'record.plans.mainDesc': 'High quality, more storage',
+  'record.plans.subDesc': 'Lighter quality, less storage',
+  'record.plans.summary': 'Creating {template} ({profile}) recording schedules for {count} channels',
+  'record.plans.prevStep': 'Back',
+  'record.plans.nextStep': 'Next',
+
+  // Change template / change stream dialogs
+  'record.plans.editPlanTitle': 'Change recording schedule',
+  'record.plans.channel': 'Channel',
+  'record.plans.template': 'Schedule template',
+  'record.plans.templatePlaceholder': 'Select a schedule template',
+  'record.plans.editProfileTitle': 'Change stream',
+
+  // ---- Streams and recording types ----
+  'record.profile.main': 'Main stream',
+  'record.profile.sub': 'Sub stream',
+  'record.kind.timer': 'Scheduled',
+  'record.kind.event': 'Event-triggered',
+
+  // ---- Schedule templates ----
+  'record.templates.title': 'Recording schedule templates',
+  'record.templates.create': 'Create template',
+  'record.templates.colName': 'Template name',
+  'record.templates.colKind': 'Type',
+  'record.templates.colSchedule': 'Schedule',
+  'record.templates.colBuiltin': 'Built-in',
+  'record.templates.colRef': 'Channels using it',
+  'record.templates.empty': 'No schedule templates yet. Select Create template to add one.',
+  'record.templates.builtin': 'Built-in',
+  'record.templates.copy': 'Duplicate',
+  'record.templates.deleteBlocked': 'Usage counts are unavailable, so deleting is disabled',
+  'record.templates.editTitle': 'Edit schedule template',
+  'record.templates.createTitle': 'Create schedule template',
+  'record.templates.nameLabel': 'Template name',
+  'record.templates.namePlaceholder': 'e.g. All-day scheduled recording',
+  'record.templates.kindLabel': 'Type',
+  'record.templates.scheduleEvent': 'Trigger window (events record only when they fall inside it)',
+  'record.templates.scheduleTimer': 'Recording schedule (drag across the grid to select)',
+  'record.templates.refWarn': 'This template is used by {n} channels. Saving updates their recording schedule too.',
+  'record.templates.copySuffix': '{name} (copy)',
+
+  // ---- Week × 24h grid ----
+  'record.schedule.notSet': 'Not set',
+
+  // ---- Feedback and confirmations ----
+  'record.msg.listSep': ', ',
+  'record.msg.loadBaseFailed': 'Could not load devices and channels',
+  'record.msg.loadPlansFailed': 'Could not load recording schedules',
+  'record.msg.loadTemplatesFailed': 'Could not load schedule templates',
+  'record.msg.loadRefsFailed': 'Could not load template usage counts',
+  'record.msg.actionFailed': 'Action failed',
+  'record.msg.deletePlanTitle': 'Delete schedule',
+  'record.msg.deletePlanMessage': 'Delete the recording schedule for channel "{name}"?',
+  'record.msg.deletePlanDetail': 'This channel stops recording on a schedule. Stored recordings are not affected.',
+  'record.msg.pickChannel': 'Select at least one channel',
+  'record.msg.pickTemplate': 'Select a schedule template',
+  'record.msg.planCreated': 'Recording schedule created',
+  'record.msg.createPlanFailed': 'Could not create the recording schedule',
+  'record.msg.planUpdated': 'Recording schedule updated',
+  'record.msg.profileUpdated': 'Stream updated',
+  'record.msg.nameRequired': 'Enter a template name',
+  'record.msg.tplCascadeTitle': 'Edit schedule template',
+  'record.msg.tplCascadeMessage': 'Saving updates the {n} channels that use this template',
+  'record.msg.tplCascadeDetail': 'Affected channels: {channels}',
+  'record.msg.tplCascadeConfirm': 'Save anyway',
+  'record.msg.tplUpdated': 'Template updated',
+  'record.msg.tplCreated': 'Template created',
+  'record.msg.copiedOk': 'Duplicated as "{name}"',
+  'record.msg.copyFailed': 'Could not duplicate the template',
+  'record.msg.tplInUse': 'This template is used by {n} channels. Unbind them under Recording Schedules before deleting it.',
+  'record.msg.deleteTplTitle': 'Delete template',
+  'record.msg.deleteTplMessage': 'Delete schedule template "{name}"?',
+  'record.msg.deleteTplDetail': 'The template cannot be restored. Existing recordings are not affected.'
+}

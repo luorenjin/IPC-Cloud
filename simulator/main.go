@@ -42,6 +42,15 @@ func envOrInt(key string, def int) int {
 	return def
 }
 
+func envOrBool(key string, def bool) bool {
+	if v := os.Getenv(key); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			return b
+		}
+	}
+	return def
+}
+
 // detectLocalIP 探测本机对外 IP（容器内返回容器 IP）。
 func detectLocalIP() string {
 	conn, err := net.Dial("udp", "8.8.8.8:80")
@@ -77,6 +86,9 @@ func main() {
 		onvifUser = flag.String("onvif-user", envOr("SIM_ONVIF_USER", "admin"), "ONVIF 用户名")
 		onvifPass = flag.String("onvif-pass", envOr("SIM_ONVIF_PASS", "admin123"), "ONVIF 密码")
 		alarmSec  = flag.Int("alarm-sec", envOrInt("SIM_ALARM_SEC", 120), "模拟告警上报周期秒（0 关闭）")
+		// 接入规范 §5.5.2 hello.localUserChanged：默认密码是否已修改。
+		// 默认 true（正常在用设备），置 false 可联调平台侧的「仍在用出厂默认密码」标黄提示
+		pwdChanged = flag.Bool("pwd-changed", envOrBool("SIM_PWD_CHANGED", true), "IDP hello 上报的 localUserChanged（设备本地默认密码是否已修改）")
 	)
 	flag.Parse()
 
@@ -134,6 +146,7 @@ func main() {
 		idpDev = &idp.Device{
 			ID: *idpID, Broker: *broker, Source: src,
 			PlatformAddr: *platform, SnapshotJPEG: snapshot,
+			PwdChanged: *pwdChanged,
 		}
 		run("idp", idpDev.Start, idpDev.Stop)
 	}

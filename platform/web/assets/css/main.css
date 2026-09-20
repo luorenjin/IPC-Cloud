@@ -1,55 +1,95 @@
-/* IpcCloud 设计令牌（对齐 PRD/TP-LINK 商云视觉基线，见 Docs/UI审计_PRD前端差异报告_v1.0.md §4） */
+/*
+ * IpcCloud 设计令牌 —— "值守台"体系（专业监控/broadcast 控制室基调，见
+ * C:\Users\user\.claude\plans\web-refactored-floyd.md）。
+ * 全局默认深色：与视频画面共存、长时间值守不刺眼；信号青替代原品牌蓝，
+ * 呼应"视频信号"本身而非任意品牌色。协议来源色/录像时间轴三色的语义方向
+ * 延续 PRD §9.1 / REC-02，具体色值为适配深底重新校准——修改前搜索
+ * src-idp/src-gb/src-onvif/src-rtsp/rec-timer/rec-event/rec-manual 确认无遗漏。
+ */
 @import 'tailwindcss';
 
 @theme {
-  /* 品牌色：主色 #1785E6，深档 #0A6BCC（截图实测） */
-  --color-primary: #1785e6;
-  --color-primary-deep: #0a6bcc;
-  --color-primary-soft: #e8f3fc;
-  --color-primary-softer: #f2f8fd;
+  /* 信号色：主操作 / 在线 / 直播实时态 */
+  --color-primary: #00b8c9;
+  --color-primary-deep: #00a2b3;
+  --color-primary-soft: #0f3338;
+  --color-primary-softer: #0a262a;
 
-  /* 侧栏：近黑 #101113（PRD 基线），文字 #a3a6ad */
-  --color-sidebar: #101113;
-  --color-sidebar-deep: #000000;
-  --color-sidebar-text: #9aa0a8;
-  --color-sidebar-hover: #1b1d21;
+  /* 基底三级进深（原深色侧栏专属，现整站共用） */
+  --color-sidebar: #0b1112;
+  --color-sidebar-deep: #050808;
+  --color-sidebar-text: #8a9797;
+  --color-sidebar-hover: #161e1e;
 
   /* 中性 */
-  --color-ink: #1f2329;       /* 标题近黑 */
-  --color-body: #333333;      /* 正文 */
-  --color-muted: #666666;     /* 次要 */
-  --color-placeholder: #999999; /* 占位/说明 */
-  --color-line: #e5e6eb;      /* 边框 */
-  --color-line-soft: #f0f0f0; /* 分隔线 */
-  --color-surface: #ffffff;   /* 卡片 */
-  --color-canvas: #f5f6f7;    /* 页面底（浅灰，替代 Element 灰蓝 #f5f7fa） */
-  --color-zone: #f2f2f2;      /* 分区/悬停浅灰 */
+  --color-ink: #eef3f3;        /* 标题——最亮 */
+  --color-body: #c7d1d1;       /* 正文 */
+  --color-muted: #93a3a3;      /* 次要 */
+  --color-placeholder: #697878; /* 占位/说明——最暗 */
+  --color-line: #263030;       /* 描边——仪表分隔缝 */
+  --color-line-soft: #1b2323;  /* 分隔线 */
+  --color-surface: #141b1c;    /* 卡片/面板 */
+  --color-surface-2: #1a2224;  /* 弹层/下拉——比面板再高一级 */
+  --color-canvas: #0f1516;     /* 页面底——比卡片更深 */
+  --color-zone: #1a2222;       /* 分区/悬停 */
 
-  /* 状态 */
-  --color-success: #2ba471;
-  --color-success-soft: #e8f7f0;
-  --color-warning: #e6a23c;
-  --color-warning-soft: #fdf3e3;
-  --color-danger: #e54d42;
-  --color-danger-soft: #fdecea;
-  --color-info: #909399;
+  /* 状态（在深底上重新校亮以保证可读性） */
+  --color-success: #3ddc84;
+  --color-success-soft: #0f2a1c;
+  --color-warning: #f5a623;
+  --color-warning-soft: #332409;
+  --color-danger: #f0483e;
+  --color-danger-soft: #33130f;
+  --color-info: #7c8a8d;
 
-  /* 录像时间轴三色（REC-02：定时蓝/事件绿/手动琥珀） */
-  --color-rec-timer: #1785e6;
-  --color-rec-event: #2ba471;
-  --color-rec-manual: #e6a23c;
+  /* 告警级别三档导轨（ALM-01/04）——刻意不复用上面的 --color-info：
+     它不是告警专用色，同时还是 RTSP 来源色与「未知来源」的落回色（PRD §9.1 规定 RTSP=灰），
+     也被离线状态标签借用。低危告警若也取它，则「提示级」与「中性/未知」在界面上同色，
+     4px 导轨会退化成一条分隔线，色块等于没有传递任何信息。
+     分级不堆色相，而靠「色相 + 亮度 + 光」三个维度：
+       error = 红 + 外发光（沿用 system/nodes 状态点「发光=最高警戒」的既有语言）
+       warn  = 琥珀（实心、无光，克制）
+       info  = 中性可见灰（明显高于分隔线，但不带警戒色相） */
+  --color-level-error: var(--color-danger);
+  --color-level-warn: var(--color-warning);
+  /* 6.6:1 @ --color-surface；原借用 --color-info #7c8a8d（4.9:1）且与 placeholder 过近，
+     改暗为可见又不动 --color-info 的 RTSP 语义 */
+  --color-level-info: #8ea3a6;
 
-  /* 设备来源标签固定色（PRD §9.1：自有蓝/国标绿/ONVIF橙/RTSP灰） */
-  --color-src-idp: #1785e6;
-  --color-src-gb: #2ba471;
-  --color-src-onvif: #e6883c;
-  --color-src-rtsp: #8a8f99;
+  /* 第三方协议专用色系（ONVIF），独立于警戒色避免语义混淆 */
+  --color-accent-onvif: #a78bfa;
+  --color-accent-onvif-soft: #241f3a;
+
+  /* 录像时间轴三色（REC-02：定时=信号青/事件=成功绿/手动=警告琥珀，语义不变） */
+  --color-rec-timer: var(--color-primary);
+  --color-rec-event: var(--color-success);
+  --color-rec-manual: var(--color-warning);
+
+  /* 设备来源标签固定色（PRD §9.1：自有=信号青/国标=成功绿/ONVIF=紫/RTSP=中性灰，语义不变） */
+  --color-src-idp: var(--color-primary);
+  --color-src-gb: var(--color-success);
+  --color-src-onvif: var(--color-accent-onvif);
+  --color-src-rtsp: var(--color-info);
 
   --font-sans: 'PingFang SC', 'Microsoft YaHei', 'Noto Sans SC', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  /* 仅用于真正的技术性数值：IP/MAC、通道 ID、码率、时间戳、审计操作 ID —— 不作通用数据标签装饰 */
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 
-  --radius-card: 4px;
-  --shadow-card: 0 1px 2px rgba(15, 23, 42, 0.04);
-  --shadow-pop: 0 6px 24px rgba(15, 23, 42, 0.12);
+  /* 圆角分工：外壳控件(按钮/弹层/对话框/下拉)用 chrome，数据/视频面(瓦片/时间轴/表格)用 signal */
+  --radius-chrome: 6px;
+  --radius-signal: 2px;
+
+  /* 壳体尺寸：此前写成 w-55 / w-58 / h-13 —— 这三个类在 Tailwind v4 默认
+     spacing 中并不存在，全靠紧随其后的 inline style 兜底，样式来源分裂。
+     改为真实令牌后 w-sidebar / h-bar / w-tree 即可直接使用。 */
+  --spacing-sidebar: 220px;   /* 侧栏展开宽 */
+  --spacing-sidebar-mini: 56px; /* 侧栏图标档宽 */
+  --spacing-bar: 52px;        /* 顶栏 / 侧栏头高 */
+  --spacing-tree: 232px;      /* 直播/回放通道树宽 */
+
+  /* 深底阴影基本不可见，改用描边 + 极轻内部高光表达层级；弹层用更强的黑色扩散阴影表达"浮起" */
+  --shadow-card: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+  --shadow-pop: 0 12px 32px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.04);
 }
 
 html,
@@ -67,17 +107,17 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-/* 细滚动条（现代 UI 基线） */
+/* 细滚动条（深色基调下调暗，避免亮灰滚动条在深底上过于抢眼） */
 * {
   scrollbar-width: thin;
-  scrollbar-color: #c9cdd4 transparent;
+  scrollbar-color: var(--color-line) transparent;
 }
 *::-webkit-scrollbar {
   width: 8px;
   height: 8px;
 }
 *::-webkit-scrollbar-thumb {
-  background: #c9cdd4;
+  background: var(--color-line);
   border-radius: 4px;
 }
 *::-webkit-scrollbar-track {
@@ -125,3 +165,105 @@ body {
 .ipc-anim-slide-right-out { animation: ipc-slide-right-out 0.18s ease-in both; }
 .ipc-anim-toast-in { animation: ipc-toast-in 0.18s ease-out; }
 .ipc-spin { animation: ipc-spin 0.8s linear infinite; }
+
+/* ---------------- 可访问性 ---------------- */
+
+/*
+ * 键盘焦点环。深色控制室场景下值班员大量使用键盘，看不见焦点即不可用，
+ * 因此这不只是合规要求。
+ *
+ * 组件普遍写了 outline-none 去掉浏览器默认焦点框（因为默认框与描边体系冲突），
+ * 但没有补替代样式。这里给所有可交互元素兜底一个信号色焦点环：
+ * 用 :focus-visible 而非 :focus，鼠标点击不会触发，只在键盘导航时出现。
+ *
+ * box-shadow 而非 outline：深底上 outline 会被相邻元素的边框裁切，
+ * 且无法跟随 rounded-chrome/rounded-signal 的圆角。
+ */
+:where(a, button, input, select, textarea, summary, [tabindex]):focus-visible,
+:where([role='button'], [role='menuitem'], [role='option'], [role='tab'], [role='switch'], [role='checkbox'], [role='radio']):focus-visible {
+  outline: none;
+  box-shadow:
+    0 0 0 1px var(--color-canvas),
+    0 0 0 3px var(--color-primary);
+  border-radius: inherit;
+}
+
+/*
+ * 显式焦点环工具类。
+ * 上面的 :where() 兜底规则优先级为 0，容易被组件自身的 focus 样式覆盖；
+ * Reka 组件渲染出的元素也不一定命中上述选择器。对确实需要焦点可见的
+ * 交互控件（复选框、开关、下拉项、标签页、滑块…）显式加这个类。
+ */
+.ipc-focus-ring:focus-visible {
+  outline: none;
+  box-shadow:
+    0 0 0 1px var(--color-canvas),
+    0 0 0 3px var(--color-primary);
+}
+/* 弹层内部条目：外层已有描边，用内嵌环避免与弹层边界叠加显得脏 */
+.ipc-focus-inset:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--color-primary);
+}
+
+/*
+ * 外层已表达焦点的输入控件（Input.vue / 登录页 / 顶栏搜索）：禁用控件自身的兜底焦点环。
+ *
+ * 这些控件都是"外层容器画描边 + 内层 input 透明无边框"的结构，而上面的 :where()
+ * 兜底规则同样命中内层 input（text 类输入在任何聚焦方式下都匹配 :focus-visible），
+ * 于是在外层描边之内又画出 1px 画布色间隙 + 3px 信号色实环——"框中有框"。
+ * 内层控件继承了外层的 6px 圆角，但只有 16px 高，圆角弧线在细高比例下发散、
+ * 与外框不同心，边角看起来是碎的（这就是"内框边角离散"的成因）。
+ * 焦点可见性由外层容器的 focus-within / focused 态统一承担。
+ */
+.ipc-focus-none:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+
+/* 跳转到主内容：键盘用户不必每次都 Tab 过整个侧栏 */
+.ipc-skip-link {
+  position: fixed;
+  top: 8px;
+  left: 8px;
+  z-index: 100;
+  transform: translateY(-200%);
+  padding: 8px 14px;
+  border-radius: var(--radius-chrome);
+  background: var(--color-primary);
+  color: #04211f;
+  font-size: 13px;
+  font-weight: 500;
+}
+.ipc-skip-link:focus {
+  transform: translateY(0);
+}
+
+/* 仅供读屏：视觉隐藏但保留在无障碍树中 */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border-width: 0;
+}
+
+/*
+ * 尊重系统的"减少动态效果"设置：前庭功能障碍用户会因位移/缩放动画不适。
+ * 保留极短时长而非 0s——完全去掉过渡会让状态切换显得突兀，
+ * 也会让某些依赖 animationend 的组件（Reka 弹层退出）无法收到事件。
+ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

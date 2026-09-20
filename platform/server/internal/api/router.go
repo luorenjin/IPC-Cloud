@@ -42,11 +42,15 @@ func Router(hub *wshub.Hub) *gin.Engine {
 		v1.GET("/projects", AuthMiddleware(), handleListProjects)
 		v1.POST("/projects", AuthMiddleware(), handleCreateProject)
 		v1.PUT("/projects/:id", AuthMiddleware(), requirePerm("config"), handleUpdateProject)
+		// 删除权限在 handler 内按目标项目校验（见 handleDeleteProject），故此处不挂 requirePerm
+		v1.DELETE("/projects/:id", AuthMiddleware(), handleDeleteProject)
 
 		// 设备接入端点（接入规范 §9）
 		v1.POST("/devices/idp/bind", AuthMiddleware(), requireProjectID(), requirePerm("config"), handleIdpBind)
 		v1.POST("/devices/idp/lookup", AuthMiddleware(), requireProjectID(), requirePerm("config"), handleIdpLookup)
 		v1.POST("/devices/batch", AuthMiddleware(), requireProjectID(), requirePerm("config"), handleDeviceBatch)
+		// 统一改密：单台与批量共用（ids 长度 1 即单台）
+		v1.POST("/devices/password", AuthMiddleware(), requireProjectID(), requirePerm("config"), handleDevicePassword)
 		v1.POST("/devices/idp/preadd", AuthMiddleware(), requireProjectID(), requirePerm("config"), handleIdpPreadd)
 		v1.GET("/devices/idp/preadd", AuthMiddleware(), requireProjectID(), requirePerm("view"), handleIdpPreaddList)
 		v1.POST("/devices/idp/preadd/:id/activate", AuthMiddleware(), requireProjectID(), requirePerm("config"), handleIdpPreaddActivate)
@@ -70,8 +74,11 @@ func Router(hub *wshub.Hub) *gin.Engine {
 		v1.POST("/devices/:id/sync", AuthMiddleware(), requireProjectID(), requirePerm("config"), handleSyncDevice)
 		v1.POST("/devices/:id/diag", AuthMiddleware(), requireProjectID(), requirePerm("config"), handleDiagDevice)
 		v1.POST("/devices/:id/reboot", AuthMiddleware(), requireProjectID(), requirePerm("config"), handleRebootDevice)
+		v1.GET("/devices/:id/reboot-plan", AuthMiddleware(), requireProjectID(), requirePerm("view"), handleGetRebootPlan)
+		v1.PUT("/devices/:id/reboot-plan", AuthMiddleware(), requireProjectID(), requirePerm("config"), handleSetRebootPlan)
 		v1.GET("/devices/:id/config", AuthMiddleware(), requireProjectID(), requirePerm("config"), handleDeviceConfigGet)
 		v1.PUT("/devices/:id/config", AuthMiddleware(), requireProjectID(), requirePerm("config"), handleDeviceConfigSet)
+		v1.POST("/devices/:id/config/reset", AuthMiddleware(), requireProjectID(), requirePerm("config"), handleDeviceConfigReset)
 		v1.GET("/devices/:id/channels", AuthMiddleware(), requireProjectID(), requirePerm("view"), handleDeviceChannels)
 		v1.PUT("/channels/:id", AuthMiddleware(), requireProjectID(), requirePerm("config"), handleUpdateChannel)
 		v1.GET("/channels", AuthMiddleware(), requireProjectID(), requirePerm("view"), handleListChannels)
@@ -126,6 +133,9 @@ func Router(hub *wshub.Hub) *gin.Engine {
 		v1.GET("/alarms/:id", AuthMiddleware(), requireProjectID(), requirePerm("view"), handleAlarmDetail)
 		v1.POST("/alarms/:id/read", AuthMiddleware(), requireProjectID(), requirePerm("view"), handleReadAlarm)
 		v1.POST("/alarms/read-all", AuthMiddleware(), requireProjectID(), requirePerm("view"), handleReadAllAlarms)
+		// 删除消息（删除所选 / 一键删除已读）。用 DELETE 而非 POST /alarms/delete：审计中间件
+		// 按 HTTP 方法归动作名，POST 会记成 create，而 "delete" 动作名原本就在角色权限项里。
+		v1.DELETE("/alarms", AuthMiddleware(), requireProjectID(), requirePerm("delete"), handleDeleteAlarms)
 
 		// 录像设置
 		v1.GET("/record-templates", AuthMiddleware(), requireProjectID(), requirePerm("view"), handleListRecordTemplates)

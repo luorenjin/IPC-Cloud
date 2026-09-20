@@ -8,6 +8,7 @@ dist/
 
 # Logs
 *.log
+*.txt
 
 # Environment files
 .env
@@ -37,3 +38,6 @@ Thumbs.db
 .idea/
 .vscode/
 
+# 打包/构建输出目录（如 firmware/docker/out、SDK 解包出的 out/）
+# 注意：只匹配名为 out 的目录，不要写成 *out*——那会连 layouts/ 一起忽略掉
+docker/out/

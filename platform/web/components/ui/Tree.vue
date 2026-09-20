@@ -9,6 +9,7 @@ export interface TreeNode {
 </script>
 
 <script setup lang="ts">
+const { t } = useI18n()
 import { CollapsibleRoot, CollapsibleContent } from 'reka-ui'
 
 const props = withDefaults(defineProps<{
@@ -50,6 +51,8 @@ function matchSearch(n: TreeNode): boolean {
               v-if="node.children && node.children.length" type="button"
               class="flex h-4 w-4 shrink-0 items-center justify-center rounded text-placeholder transition-transform hover:text-body"
               :class="isOpen(node.value) ? 'rotate-90' : ''"
+              :aria-label="isOpen(node.value) ? t('tree.collapse', { name: node.label }) : t('tree.expand', { name: node.label })"
+              :aria-expanded="isOpen(node.value)"
               @click.stop="openMap[node.value] = !isOpen(node.value)"
             ><Icon name="chevron-right" :size="12" /></button>
             <span v-else class="w-4 shrink-0" />

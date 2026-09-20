@@ -3,29 +3,12 @@
 const api = useApi()
 const toast = useToast()
 const confirm = useConfirm()
+const { t } = useI18n()
 
-const DAY_NAMES = ['周一', '周二', '周三', '周四', '周五', '周六', '周日']
-// 事件类型（ALM-02：六类，按通道能力集过滤置灰）
-const KIND_OPTIONS = [
-  { value: 'motion', label: '移动侦测' },
-  { value: 'humanoid', label: '人形侦测' },
-  { value: 'intrusion', label: '区域入侵' },
-  { value: 'linecross', label: '越界侦测' },
-  { value: 'tamper', label: '视频遮挡' },
-  { value: 'io', label: '外接IO' }
-]
-const kindName = (k: string) => KIND_OPTIONS.find((o) => o.value === k)?.label || k
-
-// schedule 摘要：{days:[1,2],ranges:[["00:00","24:00"]]} → "周一、周二 00:00-24:00"
-function fmtSchedule(s: any) {
-  if (!s || !s.days?.length) return '未布防'
-  const days = [...s.days]
-    .sort((a: number, b: number) => a - b)
-    .map((d: number) => DAY_NAMES[d - 1] || d)
-    .join('、')
-  const ranges = (s.ranges || []).map((r: string[]) => `${r[0]}-${r[1]}`).join('、')
-  return `${days} ${ranges}`
-}
+// 事件类型（ALM-02：六类，按通道能力集过滤置灰）映射见 utils/enums.ts
+const KIND_OPTIONS = ALARM_KIND_OPTIONS
+// 走词条键，随语言切换；alarmKindName 只是中文兜底
+const kindName = (k: string) => t(alarmKindKey(k))
 
 // ---------- 基础数据（设备 / 通道 / 模板映射） ----------
 const devices = ref<any[]>([])
@@ -43,7 +26,7 @@ async function loadBase() {
     channels.value = cRes.items || cRes || []
     templates.value = tRes.items || tRes || []
   } catch (e: any) {
-    toastApiError(e, '加载基础数据失败')
+    toastApiError(e, t('alarm.msg.loadBaseFailed'))
   }
 }
 
@@ -59,7 +42,7 @@ async function loadRules() {
     const res: any = await api.get('/alarm-rules')
     rules.value = res.items || []
   } catch (e: any) {
-    toastApiError(e, '加载告警规则失败')
+    toastApiError(e, t('alarm.msg.loadRulesFailed'))
   } finally {
     rulesLoading.value = false
   }
@@ -72,24 +55,24 @@ async function toggleRule(row: any, v: boolean) {
     await api.put(`/alarm-rules/${row.id}`, { enabled: !!v })
   } catch (e: any) {
     row.enabled = prev // 失败回滚
-    toastApiError(e, '操作失败')
+    toastApiError(e, t('alarm.msg.actionFailed'))
   }
 }
 
 async function delRule(row: any) {
   const ok = await confirm.ask({
-    title: '删除确认',
-    message: `确定删除通道「${channelMap.value[row.channelId] || row.channelId}」的告警规则？`,
-    detail: '删除后该通道将不再产生对应告警消息。',
-    danger: true, confirmText: '删除'
+    title: t('alarm.msg.deleteRuleTitle'),
+    message: t('alarm.msg.deleteRuleMessage', { name: channelMap.value[row.channelId] || row.channelId }),
+    detail: t('alarm.msg.deleteRuleDetail'),
+    danger: true, confirmText: t('common.delete')
   })
   if (!ok) return
   try {
     await api.del(`/alarm-rules/${row.id}`)
-    toast.success('已删除')
+    toast.success(t('common.deletedOk'))
     loadRules()
   } catch (e: any) {
-    toastApiError(e, '删除失败')
+    toastApiError(e, t('common.deleteFailed'))
   }
 }
 
@@ -101,15 +84,15 @@ function openEditRule(row: any) {
   editRuleDlg.show = true
 }
 async function saveEditRule() {
-  if (!editRuleDlg.templateId) { toast.warning('请选择布防模板'); return }
+  if (!editRuleDlg.templateId) { toast.warning(t('alarm.msg.pickTemplate')); return }
   editRuleDlg.saving = true
   try {
     await api.put(`/alarm-rules/${editRuleDlg.row.id}`, { templateId: editRuleDlg.templateId })
-    toast.success('布防已更新')
+    toast.success(t('alarm.msg.armingUpdated'))
     editRuleDlg.show = false
     loadRules()
   } catch (e: any) {
-    toastApiError(e, '保存失败')
+    toastApiError(e, t('common.saveFailed'))
   } finally {
     editRuleDlg.saving = false
   }
@@ -188,11 +171,11 @@ function openRuleDlg() {
 }
 function nextStep() {
   if (step.value === 0) {
-    if (!ruleForm.channelIds.length) { toast.warning('请选择通道'); return }
+    if (!ruleForm.channelIds.length) { toast.warning(t('alarm.msg.pickChannel')); return }
     // 进入第二步时剔除已选通道不支持的类型
     ruleForm.kinds = ruleForm.kinds.filter((k) => kindEnabled(k))
   } else if (step.value === 1) {
-    if (!ruleForm.kinds.length) { toast.warning('请选择事件类型'); return }
+    if (!ruleForm.kinds.length) { toast.warning(t('alarm.msg.pickKind')); return }
   }
   step.value++
 }
@@ -201,9 +184,9 @@ function prevStep() {
 }
 
 async function saveRule() {
-  if (!ruleForm.channelIds.length) { toast.warning('请选择通道'); return }
-  if (!ruleForm.kinds.length) { toast.warning('请选择事件类型'); return }
-  if (!ruleForm.templateId) { toast.warning('请选择布防模板'); return }
+  if (!ruleForm.channelIds.length) { toast.warning(t('alarm.msg.pickChannel')); return }
+  if (!ruleForm.kinds.length) { toast.warning(t('alarm.msg.pickKind')); return }
+  if (!ruleForm.templateId) { toast.warning(t('alarm.msg.pickTemplate')); return }
   ruleSaving.value = true
   try {
     await api.post('/alarm-rules', {
@@ -211,11 +194,11 @@ async function saveRule() {
       kinds: ruleForm.kinds,
       templateId: ruleForm.templateId
     })
-    toast.success('规则已创建')
+    toast.success(t('alarm.msg.ruleCreated'))
     ruleDlg.value = false
     loadRules()
   } catch (e: any) {
-    toastApiError(e, '创建规则失败')
+    toastApiError(e, t('alarm.msg.createRuleFailed'))
   } finally {
     ruleSaving.value = false
   }
@@ -244,7 +227,7 @@ async function loadTemplates() {
     const res: any = await api.get('/alarm-templates')
     templates.value = res.items || []
   } catch (e: any) {
-    toastApiError(e, '加载布防模板失败')
+    toastApiError(e, t('alarm.msg.loadTemplatesFailed'))
   } finally {
     tplLoading.value = false
   }
@@ -260,7 +243,7 @@ function openTplDlg(row?: any) {
 }
 
 async function saveTpl() {
-  if (!tplForm.name.trim()) { toast.warning('请填写模板名称'); return }
+  if (!tplForm.name.trim()) { toast.warning(t('alarm.msg.nameRequired')); return }
   // A7：修改自定义模板前，级联提示将同步影响引用该模板的通道
   const editing = tplEditing.value
   if (editing) {
@@ -269,12 +252,12 @@ async function saveTpl() {
       const usedChannels = rules.value
         .filter((r) => r.templateId === editing.id)
         .map((r) => channelMap.value[r.channelId] || r.channelId)
-        .join('、')
+        .join(t('alarm.list.sep'))
       const ok = await confirm.ask({
-        title: '修改布防模板',
-        message: `修改后将同步更新使用该模板的 ${n} 个通道`,
-        detail: `受影响通道：${usedChannels}`,
-        confirmText: '继续保存'
+        title: t('alarm.msg.tplCascadeTitle'),
+        message: t('alarm.msg.tplCascadeMessage', { n }),
+        detail: t('alarm.msg.tplCascadeDetail', { channels: usedChannels }),
+        confirmText: t('alarm.msg.tplCascadeConfirm')
       })
       if (!ok) return
     }
@@ -283,15 +266,15 @@ async function saveTpl() {
   try {
     if (editing) {
       await api.put(`/alarm-templates/${editing.id}`, { name: tplForm.name.trim(), schedule: tplForm.schedule })
-      toast.success('模板已更新')
+      toast.success(t('alarm.msg.tplUpdated'))
     } else {
       await api.post('/alarm-templates', { name: tplForm.name.trim(), schedule: tplForm.schedule })
-      toast.success('模板已创建')
+      toast.success(t('alarm.msg.tplCreated'))
     }
     tplDlg.value = false
     loadTemplates()
   } catch (e: any) {
-    toastApiError(e, '保存失败')
+    toastApiError(e, t('common.saveFailed'))
   } finally {
     tplSaving.value = false
   }
@@ -301,21 +284,21 @@ async function delTpl(row: any) {
   if (row.builtin) return // 内置模板不可删
   const n = tplRefCount.value[row.id] || 0
   if (n > 0) {
-    toast.warning(`该模板正被 ${n} 条规则使用，请先解绑后再删除`)
+    toast.warning(t('alarm.msg.tplInUse', { n }))
     return
   }
   const ok = await confirm.ask({
-    title: '删除确认',
-    message: `确定删除布防模板「${row.name}」？`,
-    danger: true, confirmText: '删除'
+    title: t('alarm.msg.deleteTplTitle'),
+    message: t('alarm.msg.deleteTplMessage', { name: row.name }),
+    danger: true, confirmText: t('common.delete')
   })
   if (!ok) return
   try {
     await api.del(`/alarm-templates/${row.id}`)
-    toast.success('已删除')
+    toast.success(t('common.deletedOk'))
     loadTemplates()
   } catch (e: any) {
-    toastApiError(e, '删除失败')
+    toastApiError(e, t('common.deleteFailed'))
   }
 }
 
@@ -325,6 +308,10 @@ onMounted(async () => {
 })
 
 watch(tab, (v) => { if (v === 'templates') loadTemplates() })
+
+/* 客户端分页（E7）：该列表接口一次性返回全部数据，此前全量渲染。
+   服务端分页需后端配合，属后续工作。 */
+const { page: pgPage, pageSize: pgSize, total: pgTotal, pageItems: pgItems } = useClientPage(rules)
 </script>
 
 <template>
@@ -333,27 +320,27 @@ watch(tab, (v) => { if (v === 'templates') loadTemplates() })
       <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
         <div class="flex items-center gap-2">
           <UiButton variant="primary" @click="openRuleDlg">
-            <UiIcon name="plus" :size="14" />新建规则
+            <UiIcon name="plus" :size="14" />{{ t('alarm.rules.createRule') }}
           </UiButton>
           <UiButton @click="loadRules">
-            <UiIcon name="refresh" :size="14" />刷新
+            <UiIcon name="refresh" :size="14" />{{ t('common.refresh') }}
           </UiButton>
-          <UiButton variant="secondary" @click="navigateTo('/alarms/templates')">
-            <UiIcon name="calendar" :size="14" />管理布防模板
+          <UiButton @click="navigateTo('/alarms/templates')">
+            <UiIcon name="calendar" :size="14" />{{ t('alarm.rules.manageTemplates') }}
           </UiButton>
         </div>
-        <span class="text-xs text-muted">一条规则 = 通道 × 事件类型 × 布防时间</span>
+        <span class="text-xs text-muted">{{ t('alarm.rules.formula') }}</span>
       </div>
 
       <UiTable
         :columns="[
-          { key: 'channel', label: '通道', width: '180px' },
-          { key: 'kinds', label: '事件类型', width: '260px', ellipsis: false },
-          { key: 'template', label: '布防模板', width: '200px' },
-          { key: 'enabled', label: '启用', width: '70px', align: 'center' },
-          { key: 'ops', label: '操作', width: '150px', align: 'center', ellipsis: false }
+          { key: 'channel', label: t('alarm.rules.colChannel'), width: '180px' },
+          { key: 'kinds', label: t('alarm.rules.colKinds'), width: '260px', ellipsis: false },
+          { key: 'template', label: t('alarm.rules.colTemplate'), width: '200px' },
+          { key: 'enabled', label: t('alarm.rules.colEnabled'), width: '70px', align: 'center' },
+          { key: 'ops', label: t('common.action'), width: '150px', align: 'center', ellipsis: false }
         ]"
-        :rows="rules" :loading="rulesLoading" :row-key="'id'" empty="暂无告警规则，点击「新建规则」开始配置"
+        :rows="pgItems" :loading="rulesLoading" :row-key="'id'" :empty="t('alarm.rules.empty')"
       >
         <template #channel="{ row }">{{ channelMap[row.channelId] || row.channelId }}</template>
         <template #kinds="{ row }">
@@ -364,121 +351,136 @@ watch(tab, (v) => { if (v === 'templates') loadTemplates() })
         <template #template="{ row }">
           <div>
             <div class="text-body">{{ templateMap[row.templateId] || row.templateId || '—' }}</div>
-            <div class="text-xs text-placeholder">{{ fmtSchedule(templates.find(t => t.id === row.templateId)?.schedule) }}</div>
+            <div class="text-xs text-placeholder">{{ fmtSchedule(templates.find(tpl => tpl.id === row.templateId)?.schedule, t('alarm.rules.notArmed')) }}</div>
           </div>
         </template>
         <template #enabled="{ row }">
-          <UiSwitch :model-value="!!row.enabled" size="sm" @update:model-value="toggleRule(row, $event)" />
+          <UiSwitch :model-value="!!row.enabled" size="sm" :aria-label="t('alarm.rules.toggleAria', { name: channelMap[row.channelId] || row.id })" @update:model-value="toggleRule(row, $event)" />
         </template>
         <template #ops="{ row }">
           <div class="flex items-center justify-center gap-1">
-            <UiButton variant="text" size="sm" @click="openEditRule(row)">修改布防</UiButton>
-            <UiButton variant="dangerText" size="sm" @click="delRule(row)">删除</UiButton>
+            <UiButton variant="text" size="sm" @click="openEditRule(row)">{{ t('alarm.rules.editArming') }}</UiButton>
+            <UiButton variant="dangerText" size="sm" @click="delRule(row)">{{ t('common.delete') }}</UiButton>
           </div>
         </template>
       </UiTable>
+      <div v-if="pgTotal > pgSize" class="mt-3 flex justify-end">
+        <UiPagination
+          v-model:page="pgPage"
+          v-model:page-size="pgSize"
+          :total="pgTotal"
+        />
+      </div>
     </UiCard>
 
-    <!-- 新建告警规则：三步向导（ALM-02） -->
-    <UiDialog v-model:open="ruleDlg" title="新建告警规则" width="max-w-xl">
-      <div class="mb-5 flex justify-center">
-        <UiSteps :steps="['选择通道', '选择事件类型', '选择布防时间']" :current="step" />
-      </div>
-
-      <!-- 第一步：通道多选（分组树 + 复选） -->
-      <div v-if="step === 0">
-        <div class="mb-2 flex items-center justify-between">
-          <span class="text-xs text-muted">按设备分组，可勾选设备整组或单个通道</span>
-          <span class="text-xs text-primary">已选 {{ ruleForm.channelIds.length }} 个通道</span>
-        </div>
-        <div class="max-h-72 overflow-y-auto rounded border border-line p-2">
-          <UiTree :nodes="channelTree" @select="onTreeSelect">
-            <template #node="{ node }">
-              <span class="flex items-center gap-1.5">
-                <span
-                  class="flex h-4 w-4 shrink-0 items-center justify-center rounded-sm border bg-surface"
-                  :class="String(node.value).startsWith('dev:')
-                    ? (groupChecked(node) ? 'border-primary bg-primary text-white' : 'border-line')
-                    : (ruleForm.channelIds.includes(node.value) ? 'border-primary bg-primary text-white' : 'border-line')"
-                >
-                  <UiIcon
-                    v-if="String(node.value).startsWith('dev:') ? groupChecked(node) : ruleForm.channelIds.includes(node.value)"
-                    name="check" :size="10" :stroke="3"
-                  />
-                </span>
-                <UiIcon :name="String(node.value).startsWith('dev:') ? 'video' : 'camera'" :size="13" class="text-placeholder" />
-                <span class="truncate">{{ node.label }}</span>
-                <span v-if="String(node.value).startsWith('dev:')" class="text-xs text-placeholder">({{ node.children?.length || 0 }})</span>
-              </span>
-            </template>
-          </UiTree>
-          <div v-if="!channelTree.length" class="py-6 text-center text-sm text-placeholder">暂无通道，请先在设备管理中接入设备</div>
-        </div>
-      </div>
-
-      <!-- 第二步：事件类型复选（按能力集过滤） -->
-      <div v-else-if="step === 1">
-        <p class="mb-2 text-xs text-muted">仅所选通道全部支持的事件类型可选；灰色为设备能力不支持</p>
-        <div class="grid grid-cols-2 gap-2">
-          <div
-            v-for="o in KIND_OPTIONS" :key="o.value"
-            class="flex cursor-pointer items-center gap-2 rounded border px-3 py-2.5 text-sm transition-colors"
-            :class="[
-              !kindEnabled(o.value)
-                ? 'cursor-not-allowed border-line-soft bg-zone text-placeholder'
-                : ruleForm.kinds.includes(o.value)
-                  ? 'border-primary bg-primary-soft text-primary'
-                  : 'border-line text-body hover:border-primary'
-            ]"
-            @click="toggleKind(o.value)"
-          >
-            <span
-              class="flex h-4 w-4 shrink-0 items-center justify-center rounded-sm border bg-surface"
-              :class="ruleForm.kinds.includes(o.value) ? 'border-primary bg-primary text-white' : kindEnabled(o.value) ? 'border-line' : 'border-line-soft'"
-            >
-              <UiIcon v-if="ruleForm.kinds.includes(o.value)" name="check" :size="10" :stroke="3" />
-            </span>
-            {{ o.label }}
-            <span v-if="!kindEnabled(o.value)" class="ml-auto text-xs">不支持</span>
-          </div>
-        </div>
-      </div>
-
-      <!-- 第三步：布防模板单选 -->
-      <div v-else>
-        <p class="mb-2 text-xs text-muted">选择规则生效的布防时间段（模板可在「布防模板」页维护）</p>
-        <div class="max-h-72 space-y-2 overflow-y-auto">
-          <div
-            v-for="t in templates" :key="t.id"
-            class="flex cursor-pointer items-center gap-2.5 rounded border px-3 py-2.5 transition-colors"
-            :class="ruleForm.templateId === t.id ? 'border-primary bg-primary-soft' : 'border-line hover:border-primary'"
-            @click="ruleForm.templateId = t.id"
-          >
-            <span class="flex h-4 w-4 shrink-0 items-center justify-center rounded-full border" :class="ruleForm.templateId === t.id ? 'border-primary' : 'border-line'">
-              <span v-if="ruleForm.templateId === t.id" class="h-2 w-2 rounded-full bg-primary" />
-            </span>
-            <div class="min-w-0">
-              <div class="flex items-center gap-1.5 text-sm text-ink">
-                {{ t.name }}
-                <UiTag v-if="t.builtin" color="info">内置</UiTag>
-              </div>
-              <div class="text-xs text-placeholder">{{ fmtSchedule(t.schedule) }}</div>
+    <!-- 新建告警规则（ALM-02）：触发条件/联动动作/生效时间三块内容，字段间非严格线性依赖，用 Tab 而非编号步骤器，允许自由切换 -->
+    <UiDialog v-model:open="ruleDlg" :title="t('alarm.rules.dialogTitle')" width="max-w-xl">
+      <UiTabs
+        :model-value="String(step)"
+        :items="[
+          { label: t('alarm.rules.stepTrigger'), value: '0' },
+          { label: t('alarm.rules.stepAction'), value: '1' },
+          { label: t('alarm.rules.stepSchedule'), value: '2' }
+        ]"
+        @update:model-value="step = Number($event)"
+      >
+        <div class="pt-4">
+          <!-- 触发条件：通道多选（分组树 + 复选） -->
+          <div v-if="step === 0">
+            <div class="mb-2 flex items-center justify-between">
+              <span class="text-xs text-muted">{{ t('alarm.rules.channelHint') }}</span>
+              <span class="text-xs text-primary">{{ t('alarm.rules.selectedChannels', { n: ruleForm.channelIds.length }) }}</span>
+            </div>
+            <div class="max-h-72 overflow-y-auto rounded border border-line p-2">
+              <UiTree :nodes="channelTree" @select="onTreeSelect">
+                <template #node="{ node }">
+                  <span class="flex items-center gap-1.5">
+                    <span
+                      class="flex h-4 w-4 shrink-0 items-center justify-center rounded-sm border bg-surface"
+                      :class="String(node.value).startsWith('dev:')
+                        ? (groupChecked(node) ? 'border-primary bg-primary text-white' : 'border-line')
+                        : (ruleForm.channelIds.includes(node.value) ? 'border-primary bg-primary text-white' : 'border-line')"
+                    >
+                      <UiIcon
+                        v-if="String(node.value).startsWith('dev:') ? groupChecked(node) : ruleForm.channelIds.includes(node.value)"
+                        name="check" :size="10" :stroke="3"
+                      />
+                    </span>
+                    <UiIcon :name="String(node.value).startsWith('dev:') ? 'video' : 'camera'" :size="13" class="text-placeholder" />
+                    <span class="truncate">{{ node.label }}</span>
+                    <span v-if="String(node.value).startsWith('dev:')" class="text-xs text-placeholder">({{ node.children?.length || 0 }})</span>
+                  </span>
+                </template>
+              </UiTree>
+              <div v-if="!channelTree.length" class="py-6 text-center text-sm text-placeholder">{{ t('alarm.rules.noChannels') }}</div>
             </div>
           </div>
-          <div v-if="!templates.length" class="py-6 text-center text-sm text-placeholder">暂无布防模板</div>
+
+          <!-- 联动动作：事件类型复选（按能力集过滤） -->
+          <div v-else-if="step === 1">
+            <p class="mb-2 text-xs text-muted">{{ t('alarm.rules.kindHint') }}</p>
+            <div class="grid grid-cols-2 gap-2">
+              <div
+                v-for="o in KIND_OPTIONS" :key="o.value"
+                class="flex cursor-pointer items-center gap-2 rounded border px-3 py-2.5 text-sm transition-colors"
+                :class="[
+                  !kindEnabled(o.value)
+                    ? 'cursor-not-allowed border-line-soft bg-zone text-placeholder'
+                    : ruleForm.kinds.includes(o.value)
+                      ? 'border-primary bg-primary-soft text-primary'
+                      : 'border-line text-body hover:border-primary'
+                ]"
+                @click="toggleKind(o.value)"
+              >
+                <span
+                  class="flex h-4 w-4 shrink-0 items-center justify-center rounded-sm border bg-surface"
+                  :class="ruleForm.kinds.includes(o.value) ? 'border-primary bg-primary text-white' : kindEnabled(o.value) ? 'border-line' : 'border-line-soft'"
+                >
+                  <UiIcon v-if="ruleForm.kinds.includes(o.value)" name="check" :size="10" :stroke="3" />
+                </span>
+                {{ o.label }}
+                <span v-if="!kindEnabled(o.value)" class="ml-auto text-xs">{{ t('alarm.rules.kindUnsupported') }}</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- 生效时间：布防模板单选 -->
+          <div v-else>
+            <p class="mb-2 text-xs text-muted">{{ t('alarm.rules.templateHint') }}</p>
+            <div class="max-h-72 space-y-2 overflow-y-auto">
+              <div
+                v-for="tpl in templates" :key="tpl.id"
+                class="flex cursor-pointer items-center gap-2.5 rounded border px-3 py-2.5 transition-colors"
+                :class="ruleForm.templateId === tpl.id ? 'border-primary bg-primary-soft' : 'border-line hover:border-primary'"
+                @click="ruleForm.templateId = tpl.id"
+              >
+                <span class="flex h-4 w-4 shrink-0 items-center justify-center rounded-full border" :class="ruleForm.templateId === tpl.id ? 'border-primary' : 'border-line'">
+                  <span v-if="ruleForm.templateId === tpl.id" class="h-2 w-2 rounded-full bg-primary" />
+                </span>
+                <div class="min-w-0">
+                  <div class="flex items-center gap-1.5 text-sm text-ink">
+                    {{ tpl.name }}
+                    <UiTag v-if="tpl.builtin" color="info">{{ t('alarm.rules.builtin') }}</UiTag>
+                  </div>
+                  <div class="text-xs text-placeholder">{{ fmtSchedule(tpl.schedule, t('alarm.rules.notArmed')) }}</div>
+                </div>
+              </div>
+              <div v-if="!templates.length" class="py-6 text-center text-sm text-placeholder">{{ t('alarm.rules.noTemplates') }}</div>
+            </div>
+          </div>
         </div>
-      </div>
+      </UiTabs>
 
       <template #footer>
         <div class="flex w-full items-center justify-between">
-          <UiButton :disabled="step === 0" @click="prevStep">上一步</UiButton>
+          <UiButton :disabled="step === 0" @click="prevStep">{{ t('alarm.rules.prevStep') }}</UiButton>
           <div class="flex items-center gap-2">
-            <UiButton @click="ruleDlg = false">取消</UiButton>
-            <UiButton v-if="step < 2" variant="primary" @click="nextStep">下一步</UiButton>
+            <UiButton @click="ruleDlg = false">{{ t('common.cancel') }}</UiButton>
+            <UiButton v-if="step < 2" variant="primary" @click="nextStep">{{ t('alarm.rules.nextStep') }}</UiButton>
             <UiButton v-else variant="primary" :disabled="ruleSaving" @click="saveRule">
               <UiIcon v-if="!ruleSaving" name="check" :size="14" />
               <UiIcon v-else name="refresh" :size="14" class="ipc-spin" />
-              确定
+              {{ t('common.confirm') }}
             </UiButton>
           </div>
         </div>
@@ -486,42 +488,42 @@ watch(tab, (v) => { if (v === 'templates') loadTemplates() })
     </UiDialog>
 
     <!-- 修改布防 -->
-    <UiDialog v-model:open="editRuleDlg.show" title="修改布防" width="max-w-md">
+    <UiDialog v-model:open="editRuleDlg.show" :title="t('alarm.rules.editArmingTitle')" width="max-w-md">
       <div class="space-y-3">
         <div class="flex items-center gap-2 text-sm">
-          <span class="text-muted">通道</span>
+          <span class="text-muted">{{ t('alarm.rules.channel') }}</span>
           <span class="text-ink">{{ channelMap[editRuleDlg.row?.channelId] || editRuleDlg.row?.channelId }}</span>
         </div>
         <div>
-          <p class="mb-1.5 text-sm text-muted">布防模板</p>
-          <UiSelect v-model="editRuleDlg.templateId" placeholder="选择布防模板" :options="templates.map(t => ({ label: `${t.name}（${fmtSchedule(t.schedule)}）`, value: t.id }))" />
+          <p class="mb-1.5 text-sm text-muted">{{ t('alarm.rules.template') }}</p>
+          <UiSelect v-model="editRuleDlg.templateId" :placeholder="t('alarm.rules.templatePlaceholder')" :options="templates.map(tpl => ({ label: t('alarm.rules.templateOption', { name: tpl.name, schedule: fmtSchedule(tpl.schedule, t('alarm.rules.notArmed')) }), value: tpl.id }))" />
         </div>
       </div>
       <template #footer>
-        <UiButton @click="editRuleDlg.show = false">取消</UiButton>
-        <UiButton variant="primary" :disabled="editRuleDlg.saving" @click="saveEditRule">确定</UiButton>
+        <UiButton @click="editRuleDlg.show = false">{{ t('common.cancel') }}</UiButton>
+        <UiButton variant="primary" :disabled="editRuleDlg.saving" @click="saveEditRule">{{ t('common.confirm') }}</UiButton>
       </template>
     </UiDialog>
 
     <!-- 新建 / 编辑布防模板 -->
-    <UiDialog v-model:open="tplDlg" :title="tplEditing ? '编辑布防模板' : '新建布防模板'" width="max-w-2xl">
+    <UiDialog v-model:open="tplDlg" :title="tplEditing ? t('alarm.rules.tplEditTitle') : t('alarm.rules.tplCreateTitle')" width="max-w-2xl">
       <div class="space-y-4">
         <div class="flex items-center gap-3">
-          <label class="shrink-0 text-sm text-body"><span class="text-danger">*</span> 模板名称</label>
-          <UiInput v-model="tplForm.name" placeholder="如：夜间布防" :maxlength="30" width="w-64" />
+          <label class="shrink-0 text-sm text-body"><span class="text-danger">*</span> {{ t('alarm.rules.tplName') }}</label>
+          <UiInput v-model="tplForm.name" :placeholder="t('alarm.rules.tplNamePlaceholder')" :maxlength="30" width="w-64" />
         </div>
         <div>
-          <p class="mb-1.5 text-sm text-muted">布防时间（在网格上拖选时段）</p>
+          <p class="mb-1.5 text-sm text-muted">{{ t('alarm.rules.tplSchedule') }}</p>
           <ScheduleGrid v-model="tplForm.schedule" />
         </div>
         <p v-if="tplEditing && (tplRefCount[tplEditing.id] || 0) > 0" class="flex items-center gap-1.5 rounded bg-warning-soft px-3 py-2 text-xs text-warning">
           <UiIcon name="alert-triangle" :size="13" />
-          该模板正被 {{ tplRefCount[tplEditing.id] }} 个通道使用，保存后将同步更新这些通道的布防时间
+          {{ t('alarm.rules.tplRefWarn', { n: tplRefCount[tplEditing.id] }) }}
         </p>
       </div>
       <template #footer>
-        <UiButton @click="tplDlg = false">取消</UiButton>
-        <UiButton variant="primary" :disabled="tplSaving" @click="saveTpl">确定</UiButton>
+        <UiButton @click="tplDlg = false">{{ t('common.cancel') }}</UiButton>
+        <UiButton variant="primary" :disabled="tplSaving" @click="saveTpl">{{ t('common.confirm') }}</UiButton>
       </template>
     </UiDialog>
   </div>

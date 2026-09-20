@@ -8,14 +8,14 @@ const props = withDefaults(defineProps<{
 
 const map: Record<string, string> = {
   default: 'bg-zone text-muted border-line',
-  primary: 'bg-primary-soft text-primary border-[#bcdcf7]',
-  success: 'bg-success-soft text-success border-[#bfe7d6]',
-  warning: 'bg-warning-soft text-warning border-[#f5dfba]',
-  danger: 'bg-danger-soft text-danger border-[#f7c8c4]',
+  primary: 'bg-primary-soft text-primary border-primary/30',
+  success: 'bg-success-soft text-success border-success/30',
+  warning: 'bg-warning-soft text-warning border-warning/30',
+  danger: 'bg-danger-soft text-danger border-danger/30',
   info: 'bg-zone text-info border-line',
-  idp: 'bg-primary-soft text-src-idp border-[#bcdcf7]',
-  gb: 'bg-success-soft text-src-gb border-[#bfe7d6]',
-  onvif: 'bg-warning-soft text-src-onvif border-[#f5dfba]',
+  idp: 'bg-primary-soft text-src-idp border-primary/30',
+  gb: 'bg-success-soft text-src-gb border-success/30',
+  onvif: 'bg-accent-onvif-soft text-src-onvif border-accent-onvif/30',
   rtsp: 'bg-zone text-src-rtsp border-line'
 }
 const cls = computed(() => props.plain ? `border bg-transparent ${map[props.color]}` : map[props.color])
@@ -26,7 +26,7 @@ const dotColor: Record<string, string> = {
 </script>
 
 <template>
-  <span class="inline-flex items-center gap-1 rounded border px-1.5 py-px text-xs leading-5 whitespace-nowrap" :class="cls">
+  <span class="inline-flex items-center gap-1 rounded-signal border px-1.5 py-px text-xs leading-5 whitespace-nowrap" :class="cls">
     <span v-if="dot" class="h-1.5 w-1.5 rounded-full" :class="dotColor[props.color]" />
     <slot />
   </span>

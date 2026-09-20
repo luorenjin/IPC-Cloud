@@ -2,6 +2,7 @@ package api
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/jetscam/ipccloud/server/internal/errs"
 	"github.com/jetscam/ipccloud/server/internal/models"
 	"github.com/jetscam/ipccloud/server/internal/store"
+	"github.com/jetscam/ipccloud/server/internal/timeutil"
 )
 
 // ---------- 录像计划模板 REC-05 ----------
@@ -45,9 +47,9 @@ func handleCreateRecordTemplate(c *gin.Context) {
 
 // handleUpdateRecordTemplate REC-05：修改录像计划模板（内置不可改；自定义 ≤7 个）。
 func handleUpdateRecordTemplate(c *gin.Context) {
-	var t models.RecordTemplate
-	if store.DB.First(&t, "id = ?", c.Param("id")).Error != nil {
-		fail(c, errs.ENotFound)
+	// 归属校验：模板必须属于当前项目（requirePerm 只看当前项目的权限位，不校验实体归属）
+	t, okt := recordTemplateInProject(c, c.Param("id"))
+	if !okt {
 		return
 	}
 	if t.Builtin {
@@ -73,15 +75,14 @@ func handleUpdateRecordTemplate(c *gin.Context) {
 	if req.Schedule != nil {
 		updates["schedule"] = req.Schedule
 	}
-	store.DB.Model(&t).Updates(updates)
-	store.DB.First(&t, "id = ?", c.Param("id"))
+	store.DB.Model(t).Updates(updates)
+	store.DB.First(t, "id = ?", t.ID)
 	ok(c, t)
 }
 
 func handleDeleteRecordTemplate(c *gin.Context) {
-	var t models.RecordTemplate
-	if store.DB.First(&t, "id = ?", c.Param("id")).Error != nil {
-		fail(c, errs.ENotFound)
+	t, okt := recordTemplateInProject(c, c.Param("id"))
+	if !okt {
 		return
 	}
 	if t.Builtin {
@@ -94,7 +95,7 @@ func handleDeleteRecordTemplate(c *gin.Context) {
 		fail(c, errs.EBadRequest.WithMsg("模板已被录像计划使用"))
 		return
 	}
-	store.DB.Delete(&t)
+	store.DB.Delete(t)
 	ok(c, nil)
 }
 
@@ -139,7 +140,12 @@ func handleCreateRecordPlan(c *gin.Context) {
 }
 
 func handleUpdateRecordPlan(c *gin.Context) {
+	ctx := getCtx(c)
 	id := c.Param("id")
+	// 归属校验：录像计划经所属通道判定项目归属（见 scope.go）
+	if _, okp := recordPlanInProject(c, id); !okp {
+		return
+	}
 	var req struct {
 		TemplateID string `json:"templateId"`
 		Profile    string `json:"profile"`
@@ -148,6 +154,12 @@ func handleUpdateRecordPlan(c *gin.Context) {
 	if err := c.ShouldBindJSON(&req); err != nil {
 		fail(c, errs.EBadRequest)
 		return
+	}
+	// 换绑的模板也必须属于当前项目，否则计划会指向别处的模板
+	if req.TemplateID != "" {
+		if _, okt := recordTemplateInProject(c, req.TemplateID); !okt {
+			return
+		}
 	}
 	updates := map[string]any{"updated_at": models.NowMilli()}
 	if req.TemplateID != "" {
@@ -159,12 +171,21 @@ func handleUpdateRecordPlan(c *gin.Context) {
 	if req.Enabled != nil {
 		updates["enabled"] = *req.Enabled
 	}
-	store.DB.Model(&models.RecordPlan{}).Where("id = ?", id).Updates(updates)
+	// 写条件经 channel_id 关联到本项目通道（双保险）
+	store.DB.Model(&models.RecordPlan{}).
+		Where("id = ? AND channel_id IN (SELECT id FROM channels WHERE project_id = ?)", id, ctx.ProjectID).
+		Updates(updates)
 	ok(c, nil)
 }
 
 func handleDeleteRecordPlan(c *gin.Context) {
-	store.DB.Delete(&models.RecordPlan{}, "id = ?", c.Param("id"))
+	ctx := getCtx(c)
+	id := c.Param("id")
+	if _, okp := recordPlanInProject(c, id); !okp {
+		return
+	}
+	store.DB.Where("id = ? AND channel_id IN (SELECT id FROM channels WHERE project_id = ?)", id, ctx.ProjectID).
+		Delete(&models.RecordPlan{})
 	ok(c, nil)
 }
 
@@ -180,6 +201,11 @@ func handleRecordDays(c *gin.Context) {
 		return
 	}
 	chID := c.Param("id")
+	ctx := getCtx(c)
+	// 归属校验：通道必须属于当前项目（否则能检索到别家项目的录像）
+	if _, okc := channelInProject(c, chID); !okc {
+		return
+	}
 	type row struct {
 		StartTs int64
 		EndTs   int64
@@ -191,18 +217,20 @@ func handleRecordDays(c *gin.Context) {
 		dq = dq.Where("source = ?", q.Source)
 	}
 	dq.Find(&rows)
-	// 按天展开（段可能跨天）
+	// 按天展开（段可能跨天）。日期键与推进都按项目时区求值：服务端 time.Local 通常是 UTC，
+	// 用它会把北京时间凌晨的录像记到前一天，回放页日期列表随之整体错一天。
+	loc := store.ProjectLocation(ctx.ProjectID)
 	seen := map[string]bool{}
 	days := []string{}
 	for _, r := range rows {
-		d := r.StartTs
-		for d < r.EndTs {
-			key := time.UnixMilli(d).Format("2006-01-02")
+		cur := timeutil.DayStartMillis(time.UnixMilli(r.StartTs), loc)
+		for cur < r.EndTs {
+			key := timeutil.DayKey(time.UnixMilli(cur), loc)
 			if !seen[key] {
 				seen[key] = true
 				days = append(days, key)
 			}
-			d += 86400_000
+			cur = timeutil.NextDayStart(time.UnixMilli(cur), loc).UnixMilli()
 		}
 	}
 	ok(c, gin.H{"days": days})
@@ -226,6 +254,9 @@ func handleRecordDownload(c *gin.Context) {
 		return
 	}
 	chID := c.Param("id")
+	if _, okc := channelInProject(c, chID); !okc {
+		return
+	}
 	var recs []models.RecordIndex
 	dq := store.DB.Where("channel_id = ? AND start_ts < ? AND end_ts > ?", chID, int64(req.End), int64(req.Start))
 	if req.Source == "device" || req.Source == "platform" {
@@ -267,29 +298,39 @@ func handleRecordDownload(c *gin.Context) {
 // handleStorageOverview REC-07 存储概览。
 func handleStorageOverview(c *gin.Context) {
 	ctx := getCtx(c)
+	// 表名用 GORM 的命名策略推导，不要硬编码：RecordIndex 实际建表为
+	// record_indices 而非 record_indexes，写错会让 JOIN 静默失败、用量恒为 0。
+	tbl := store.DB.NamingStrategy.TableName("RecordIndex")
 	var used int64
 	store.DB.Model(&models.RecordIndex{}).
-		Joins("JOIN channels c ON c.id = record_indexes.channel_id").
+		Joins("JOIN channels c ON c.id = "+tbl+".channel_id").
 		Where("c.project_id = ?", ctx.ProjectID).
-		Select("COALESCE(SUM(record_indexes.size),0)").Scan(&used)
+		Select("COALESCE(SUM(" + tbl + ".size),0)").Scan(&used)
 	var count int64
 	store.DB.Model(&models.RecordIndex{}).
-		Joins("JOIN channels c ON c.id = record_indexes.channel_id").
+		Joins("JOIN channels c ON c.id = "+tbl+".channel_id").
 		Where("c.project_id = ?", ctx.ProjectID).Count(&count)
-	// 总容量从设置读取，默认 500GB
+	// 总容量与保留天数从设置读取，缺省 500GB / 30 天
 	var st models.Setting
 	total := int64(500 * 1024 * 1024 * 1024)
+	keepDays := 30
 	if err := store.DB.First(&st, "scope = ? AND key = 'storage.totalBytes'", ctx.ProjectID).Error; err == nil {
 		if v, ok := st.Value["value"].(float64); ok {
 			total = int64(v)
 		}
 	}
+	if err := store.DB.First(&st, "scope = ? AND key = 'storage.keepDays'", ctx.ProjectID).Error; err == nil {
+		if v, ok := st.Value["value"].(float64); ok && v > 0 {
+			keepDays = int(v)
+		}
+	}
+	// 百分比四舍五入：原先的整数除法会把 7.66% 截断成 7%，与用户按容量反算的结果对不上。
 	pct := 0
 	if total > 0 {
-		pct = int(used * 100 / total)
+		pct = int(math.Round(float64(used) * 100 / float64(total)))
 	}
 	ok(c, gin.H{"usedBytes": used, "totalBytes": total, "percent": pct, "segments": count,
-		"keepDays": 30})
+		"keepDays": keepDays})
 	if pct >= 90 {
 		engine_CreateAlarmEvent(ctx.ProjectID, "", "", "disk_full", "warn",
 			map[string]any{"percent": pct}, "")
