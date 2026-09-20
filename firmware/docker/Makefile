@@ -3,7 +3,7 @@ SRC_VOLUME  := goke-sdk-src
 
 SDK_SRC_DIR   ?=
 SDK_PATCH_DIR ?=
-OUT_DIR       ?= $(CURDIR)/out
+OUT_DIR       ?=
 
 CHIP       ?= gk7205v200
 TARGET     ?= clean
@@ -51,9 +51,11 @@ sdk-shell: image
 		$(IMAGE_NAME) bash
 
 sdk-export: image
-	mkdir -p "$(OUT_DIR)"
+	OUT_DIR_ABS="$(OUT_DIR)"; \
+	if [ -z "$$OUT_DIR_ABS" ]; then OUT_DIR_ABS="$$(pwd)/out"; fi; \
+	mkdir -p "$$OUT_DIR_ABS"; \
 	$(DOCKER_RUN) -e CHIP=$(CHIP) \
-		-v "$(OUT_DIR)":/host-out \
+		-v "$$OUT_DIR_ABS":/host-out \
 		$(IMAGE_NAME) sdk-export.sh
 
 sdk-clean: image
