@@ -106,10 +106,18 @@ int os_mkdir_p(const char *path)
 #include <unistd.h>
 #include <errno.h>
 #include <sys/stat.h>
+#include <sys/prctl.h>
 
 struct os_mutex { pthread_mutex_t mu; };
 struct os_cond  { pthread_cond_t cv; };
-struct os_thread { pthread_t th; os_thread_fn fn; void *arg; };
+/* name：线程自报名用的缓冲区。pthread_setname_np() 是 glibc 专有扩展，
+ * uClibc（GOKE SDK 交叉编译工具链）既不声明也不导出该符号——早期把
+ * "#if defined(__linux__)" 等同于"有 pthread_setname_np" 是错的。
+ * 改用 POSIX/Linux 通用的 prctl(PR_SET_NAME, ...)，但它只能给调用它的
+ * 当前线程命名，不能像 pthread_setname_np(th, name) 那样对指定线程命名，
+ * 所以把名字先存起来，交给新线程自己在 thread_tramp 里设置。
+ * 16 字节含 NUL 是 PR_SET_NAME 的上限，更长会被内核截断。 */
+struct os_thread { pthread_t th; os_thread_fn fn; void *arg; char name[16]; };
 
 os_mutex_t *os_mutex_create(void)
 {
@@ -152,6 +160,9 @@ void os_cond_broadcast(os_cond_t *c) { pthread_cond_broadcast(&c->cv); }
 static void *thread_tramp(void *p)
 {
     os_thread_t *t = (os_thread_t *)p;
+#if defined(__linux__)
+    if (t->name[0]) prctl(PR_SET_NAME, t->name, 0, 0, 0);
+#endif
     t->fn(t->arg);
     return NULL;
 }
@@ -161,15 +172,11 @@ os_thread_t *os_thread_create(os_thread_fn fn, void *arg, const char *name, uint
     pthread_attr_t attr;
     if (!t) return NULL;
     t->fn = fn; t->arg = arg;
+    if (name) { strncpy(t->name, name, sizeof(t->name) - 1); t->name[sizeof(t->name) - 1] = '\0'; }
     pthread_attr_init(&attr);
     if (stack_kb) pthread_attr_setstacksize(&attr, (size_t)stack_kb * 1024);
     if (pthread_create(&t->th, &attr, thread_tramp, t) != 0) { pthread_attr_destroy(&attr); free(t); return NULL; }
     pthread_attr_destroy(&attr);
-#if defined(__linux__)
-    if (name) pthread_setname_np(t->th, name);
-#else
-    (void)name;
-#endif
     return t;
 }
 void os_thread_join(os_thread_t *t) { if (!t) return; pthread_join(t->th, NULL); free(t); }

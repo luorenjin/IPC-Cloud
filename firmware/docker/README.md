@@ -33,6 +33,9 @@ make -f Makefile sdk-export CHIP=gk7205v200
 
 # 5. 清理某芯片的编译中间产物
 make -f Makefile sdk-clean CHIP=gk7205v200
+
+# 6. 交叉编译固件主程序 ipc_app（ARM，静态链接）
+make -f Makefile fw-build
 ```
 
 ## Makefile 目标一览
@@ -47,6 +50,8 @@ make -f Makefile sdk-clean CHIP=gk7205v200
 | `sdk-export` | 把卷内 `out/<chip>/image/` 拷到宿主 `firmware/docker/out/<chip>/` |
 | `sdk-clean` | 按 `CHIP` 跑 `make <target>`（`TARGET` 默认 `clean`） |
 | `sdk-clean-all` | 打印确认提示，不自动执行；需要手动 `docker volume rm goke-sdk-src` 才会真正删除卷（含全部 SDK 源码与编译产物） |
+| `fw-build` | 交叉编译本仓库 `firmware/` 的 `ipc_app`（复用本镜像自带的 `arm-gcc6.3-linux-uclibceabi` 工具链），产物在 `firmware/docker/out/gk7205v200/app/ipc_app` |
+| `fw-clean` | 清理 `fw-build` 的产物目录 |
 
 可覆盖的变量：`CHIP`（默认 `gk7205v200`）、`TARGET`（默认 `clean`）、`BUILD_UID`/`BUILD_GID`（默认均 `1000`）、`FORCE`（默认 `0`）、`SDK_SRC_DIR`/`SDK_PATCH_DIR`（无默认值，`sdk-init` 时必须显式传入）、`OUT_DIR`（`sdk-export` 专用，无显式默认值；不传入时效果上等价于执行 `make` 时所在目录下的 `out/`，即通常的 `firmware/docker/out/`——这个默认值从当前版本起改为在 `sdk-export` 的 recipe 内用 shell 的 `` $$(pwd) `` 实时求值，而不是 Makefile 顶层的 `$(CURDIR)`，原因见下方「常见故障排查」）。
 
@@ -54,13 +59,21 @@ make -f Makefile sdk-clean CHIP=gk7205v200
 
 - 四款候选芯片均完成端到端编译验证，但没有实际开发板可供逐一烧录验证镜像能否真正跑通；本环境止步于"编译产出 image 文件"。
 - 若后续候选芯片范围变化（如更换 SDK 基线带来新增配置），需要新增对应的 `configs/<chip>/` 支持，本环境不预先设计。
-- `firmware/` 通用层（HAL/core/modules）与本编译环境的对接是独立的后续工作，需等待芯片选型定稿（见根 `CLAUDE.md` 与 `Docs/PRD/决策记录与待定事项.md`）。
+- `firmware/` 通用层（HAL/core/modules）与本编译环境的对接已通过 `fw-build` 目标打通（交叉编译 `ipc_app`），目前只针对 `gk7205v200` + `SP-R1-02` profile；其余候选芯片的 profile/对接仍是独立后续工作，需等待芯片选型定稿（见根 `CLAUDE.md` 与 `Docs/PRD/决策记录与待定事项.md`）。
 - SDK 版本升级（新的 SPCxxx 基线或补丁）需要同步更新 `scripts/*.sh` 里硬编码的 `SDK_NAME`/`PATCH_NAME` 变量。
 
 ## 常见故障排查
 
 - **`docker run`/`docker build` 报 `CreateFile ...: The filename ... is incorrect` 或路径出现乱码**：多半是从 Git Bash 执行 `docker` 命令时漏加 `MSYS_NO_PATHCONV=1` 前缀，或者把含中文的路径硬编码进了 `Makefile` 文件本身（GnuWin32 `make` 无法正确解析 Makefile 文件里的中文字符）——把中文路径改成命令行 `VAR=值` 显式传入即可。
-- **裸 `make sdk-xxx` 报乱码化的"没有规则可以创建目标 ... 停止"错误（退出码 2），而不是真正执行目标**：这是 GnuWin32 `make`（3.81）**隐式查找默认 Makefile 文件名**这一步本身的限制——在仓库路径含不可见特殊字符（本仓库目录名 `IpcCloud` 里嵌了一个 ZWNJ 字符）时会复现，与 Makefile 文件内容或写法无关。用 `make -f Makefile <target>` 显式指定 Makefile 文件名即可绕开，本文档「快速开始」的示例命令已统一加上，可以直接照抄。这是路径相关的问题，不是所有 Windows 机器都会触发。
+- **裸 `make sdk-xxx`（或裸 `make fw-xxx`）报乱码化的"没有规则可以创建目标 ... 停止"错误（退出码 2），而不是真正执行目标**：这是 GnuWin32 `make`（3.81）**隐式查找默认 Makefile 文件名**这一步本身的限制——在仓库路径含不可见特殊字符（本仓库目录名 `IpcCloud` 里嵌了一个 ZWNJ 字符）时会复现，与 Makefile 文件内容或写法无关；连仓库里早就存在的 `image`/`sdk-build` 等目标也同样会中招，不是某个具体目标的问题。用 `make -f Makefile <target>` 显式指定 Makefile 文件名即可绕开，本文档「快速开始」的示例命令已统一加上，可以直接照抄。实测确认以下两种调用形式都可用：
+  ```bash
+  # 形式一：先 cd 进 firmware/docker 再跑（本文档默认用这种）
+  cd firmware/docker && make -f Makefile fw-build
+
+  # 形式二：从仓库根目录用 -C，同样要带 -f（单独 -C 不够，仍会复现上面的报错）
+  make -C firmware/docker -f Makefile fw-build
+  ```
+  这是路径相关的问题，不是所有 Windows 机器都会触发（Linux/CI 环境下不存在，仓库路径不含不可见特殊字符的机器也不会触发）。
 - **`sdk-init`/`sdk-build` 报 `Permission denied`**：命名卷默认 root 属主，`entrypoint.sh` 已包含 `chown "$BUILD_UID:$BUILD_GID" /sdk` 修复此问题；若你修改过 `entrypoint.sh` 且重新出现该报错，检查该行是否还在，以及是否在 `gosu` 降权**之前**执行。
 - **`sdk-export` 报 `docker: Error response from daemon: CreateFile ...: The filename, directory name, or volume label syntax is incorrect`，且报错路径里仓库目录名后面变成了字面的 `?`（例如 `...IpcCloud?\firmware\docker\out`）**：这是 GnuWin32 `make` 自身对 `$(CURDIR)`/`$(shell pwd)` 求值时，损坏了仓库路径里那个不可见 ZWNJ 特殊字符所致（与 Docker、bash、Makefile 写法本身无关）。当前 `sdk-export` 目标已经修复：`OUT_DIR` 不显式传入时，改为在 recipe 自己的 shell 里用 `` $$(pwd) `` 实时求值，而不是让 make 在变量替换阶段（`$(CURDIR)` 或顶层 `$(shell pwd)`）计算，因此照抄「快速开始」的命令不会触发这个问题。如果你后续给这个 Makefile 新增目标、且该目标需要用宿主路径算默认值，注意避免在 make 变量替换阶段用 `$(CURDIR)`/`$(shell pwd)`，参照 `sdk-export` 目标的写法，把路径计算放到 recipe 自己的 shell 里。
 - **`make menuconfig` 卡住或报没有终端**：该目标需要交互式 TTY，必须用 `make -f Makefile sdk-menuconfig`（内部已用 `docker run -it`），不要用 `sdk-shell` 里再手动拼 `docker run` 且漏加 `-it`。
