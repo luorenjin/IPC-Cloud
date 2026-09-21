@@ -599,8 +599,14 @@ var cfgKeys = []string{
 	// 编码（主码流）
 	"video.0.main.codec", "video.0.main.w", "video.0.main.h", "video.0.main.fps",
 	"video.0.main.kbps", "video.0.main.gop", "video.0.main.rc",
-	// OSD
-	"osd.channelName.enable", "osd.time.enable",
+	// OSD 位置与字号：位置是归一化 [x, y]（文字区域左上角占画面的比例），字号是主码流分辨率下的
+	// 像素高度（12–72，固件规则表也卡了同一区间）；前端的「画面贴合」编辑器直接读写这些键，不做单位换算。
+	"osd.channelName.enable", "osd.channelName.pos", "osd.channelName.fontPx",
+	"osd.time.enable", "osd.time.pos", "osd.time.fontPx",
+	// 自定义文字叠加：**变长列表**，每条一个 OSD 区域（{text, x, y, font_px}，见
+	// firmware/core/src/config.c 的规则注释）。用数组而不是若干扁平键，是为了让“加/删一条文字”
+	// 不必每次都在三处契约里增删键：条数上限由设备区域数决定，平台按当前叠加项实时收紧。
+	"osd.text.regions",
 	// 录像
 	"record.enabled", "record.mode", "record.retention_days", "record.channel",
 	// 移动侦测（regions 对应固件的 CFG_T_JSON，值是 [[x,y,w,h], …] 归一化元组）

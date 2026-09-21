@@ -12,17 +12,24 @@ export interface CfgDepends {
   hintKey: string
 }
 
+/** 各类字段共有的声明项 */
+export interface CfgFieldBase {
+  key: string
+  labelKey: string
+  dependsOn?: CfgDepends
+}
+
 /**
  * 配置字段声明，键名 / 类型 / 取值范围与固件 `firmware/core/src/config.c` 的规则表逐字对齐。
  * 类型定义随组件一起放在这里，是因为「一个字段怎么渲染」已经收敛到本组件，
  * 页面只负责声明数据与提供状态。
  */
 export type CfgField =
-  | { key: string; labelKey: string; type: 'int'; min: number; max: number; dependsOn?: CfgDepends }
-  | { key: string; labelKey: string; type: 'bool'; dependsOn?: CfgDepends }
-  | { key: string; labelKey: string; type: 'enum'; options: { label: string; value: string }[]; dependsOn?: CfgDepends }
-  | { key: string; labelKey: string; type: 'str'; dependsOn?: CfgDepends }
-  | { key: string; labelKey: string; type: 'tz'; dependsOn?: CfgDepends }
+  | (CfgFieldBase & { type: 'int'; min: number; max: number })
+  | (CfgFieldBase & { type: 'bool' })
+  | (CfgFieldBase & { type: 'enum'; options: { label: string; value: string }[] })
+  | (CfgFieldBase & { type: 'str' })
+  | (CfgFieldBase & { type: 'tz' })
 </script>
 
 <script setup lang="ts">

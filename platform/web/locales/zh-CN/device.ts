@@ -301,6 +301,33 @@ export default {
   // ---- OSD 叠加 ----
   'device.config.osdName': '通道名叠加',
   'device.config.osdTime': '时间叠加',
+  // ---- OSD 画面贴合（位置键 osd.*.pos + 自定义文字 osd.text.regions）----
+  // 坐标是归一化 [x,y]（文字区域左上角）；font_px 是主码流分辨率下的像素高度
+  'device.config.group.osdPos': '画面叠加与自定义文字',
+  'device.config.osdOverlayHint': '拖动文字块调整位置；拖右下角圆点缩放字号（方向键可微调）；坐标是归一化比例，字号按主码流像素折算。',
+  'device.config.osdOverlayPosterHint': '底图是设备抓拍的一帧，仅用于定位；字形由设备渲染。',
+  'device.config.osdOverlayEmpty': '暂无固定叠加项：打开上方的通道名 / 时间开关即可定位；自定义文字在下方添加。',
+  'device.config.osdOverlayAria': '{name}：横向 {x}，纵向 {y}，字号 {font} px。用方向键微调。',
+  'device.config.osdSampleChannel': '通道名',
+  // OSD 区域是每通道共享资源：通道名、时间与每条自定义文字各占 1 个
+  'device.config.osdRegionUsage': 'OSD 区域',
+  'device.config.osdRegionUsageHint': '通道名、时间与每条文字各占 1 个，设备每通道上限 {n} 个',
+  'device.config.osdTextN': '文字 {n}',
+  'device.config.osdTextContentPlaceholder': '输入要叠加的文字',
+  'device.config.osdTextRemove': '删除',
+  'device.config.osdTextSize': '字号',
+  'device.config.osdTextSizeUnit': '{min}–{max} px（主码流分辨率）',
+  'device.config.osdTextAdd': '添加文字',
+  'device.config.osdTextAddHint': '添加后可在画面上拖动摆放、拖右下角圆点调字号',
+  'device.config.osdTextPlaceholder': '文字 {n}（未填写）',
+  'device.config.osdTextAria': '文字 {n}：横向 {x}，纵向 {y}，字号 {font} px。用方向键微调。',
+  'device.config.osdResizeAria': '调整「{name}」的字号：用上下方向键微调',
+  'device.config.osdTextEmptyRow': '第 {n} 条文字内容为空',
+  'device.config.osdTextTooLong': '文字超过 {max} 字节（当前 {n} 字节）',
+  // 区域用满：设备每通道区域数有限，说清楚是哪个占掉了
+  'device.config.osdTextFull': '已达设备每通道 {n} 个 OSD 区域上限（通道名与时间各占 1 个）',
+  'device.config.osdTextOverCapacity': '已用 {used} 个 OSD 区域，超过设备每通道 {max} 个的上限：请删除多余文字或关闭通道名/时间叠加',
+  'device.config.osdTextRejected': '设备拒绝了自定义文字（条数、内容长度或字号不符合设备要求）',
   // ---- 录像 ----
   'device.config.recordEnable': '启用录像',
   'device.config.recordMode': '录像模式',

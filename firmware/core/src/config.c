@@ -330,6 +330,26 @@ static void register_common_rules(void)
         { "localUser.password",      CFG_T_STR,  8, 63, NULL, false, true },
         { "osd.channelName.enable",  CFG_T_BOOL, 0, 1, NULL, false },
         { "osd.time.enable",         CFG_T_BOOL, 0, 1, NULL, false },
+        /* 固定叠加项（通道名/时间）的字号：像普通整型键那样卡区间，不必靠平台与模拟器兜底。
+         * 12–72 与自定义文字 font_px、平台界面的滑块三处同值；单位是主码流分辨率下的像素高度。*/
+        { "osd.channelName.fontPx",  CFG_T_INT,  12, 72, NULL, false },
+        { "osd.time.fontPx",         CFG_T_INT,  12, 72, NULL, false },
+        /* OSD 叠加位置与自定义文字（画面上可拖拽定位，PRD MGR-09）。
+         * 位置用归一化二元组 [x, y]，含义是**文字区域左上角**在画面中的比例坐标，
+         * 与 alarm.motion.regions 同属 CFG_T_JSON（固件只校验“是合法 JSON”，
+         * 取值范围由平台界面与模拟器负责——逐层校验强度不同是有意的：
+         * 设备端不接受的是「不是 JSON」，越界坐标在渲染时会被 HAL 夹到画面内）。*/
+        { "osd.channelName.pos",     CFG_T_JSON, 0, 0, NULL, false },
+        { "osd.time.pos",            CFG_T_JSON, 0, 0, NULL, false },
+        /* 自定义文字叠加：**变长列表**——每条一个 OSD 区域，故用一个 JSON 数组而不是
+         * 若干扁平键（同 alarm.motion.regions 的取舍）。元素形状：
+         *   {"text": "东门仓库", "x": 0.02, "y": 0.5, "font_px": 32}
+         * x/y 是文字区域左上角的归一化坐标（0–1）；font_px 是**主码流分辨率**下的像素高度，
+         * 与 hal_osd_cfg_t.font_px 同名同义。text 上限 HAL_OSD_TEXT_MAX(64 字节)。
+         * 条数受 HAL 的 hal_osd_caps_t.max_regions_per_channel 约束（参考实现为 4/通道，
+         * 通道名与时间各占 1 个区域）——固件此处只校验“是合法 JSON”，
+         * 条数与各字段范围由平台界面与模拟器把关，设备侧渲染时按区域上限截断。*/
+        { "osd.text.regions",        CFG_T_JSON, 0, 0, NULL, false },
         { "alarm.motion.enable",     CFG_T_BOOL, 0, 1, NULL, false },
         { "alarm.motion.sensitivity",CFG_T_INT,  0, 100, NULL, false },
         { "alarm.motion.regions",    CFG_T_JSON, 0, 0, NULL, false },

@@ -3,6 +3,7 @@
 import ConfigFieldRow, { type CfgField } from '~/components/device/ConfigFieldRow.vue'
 import NetworkSettings from '~/components/device/NetworkSettings.vue'
 import MotionRegionEditor from '~/components/device/MotionRegionEditor.vue'
+import OsdOverlayEditor, { type OsdPosItem, type OsdTextItem } from '~/components/device/OsdOverlayEditor.vue'
 import { onBeforeRouteLeave } from 'vue-router'
 
 const route = useRoute()
@@ -552,6 +553,10 @@ const invalidKeysByTab = computed(() => {
       .map((f) => f.key)
     if (bad.length) m[g.tab] = [...m[g.tab], ...bad]
   }
+  // OSD 自定义文字：不是 int 越界，而是「1 个数组键」的条数/内容问题（osdTextIssue 统一算）。
+  // 拦的是同一件事——下发了设备也会整键拒绝（rejected 只给键名，用户看不出是第几条错了），
+  // 所以挂到同一个 invalidKeysByTab 上，保存按钮与页签红点自动跟随，不必再开一套机制。
+  if (osdTextIssue.value) m.osd = [...m.osd, 'osd.text.regions']
   return m
 })
 
@@ -769,6 +774,124 @@ async function loadPreview() {
     preview.loading = false
   }
 }
+/**
+ * 叠加项定义：位置键 + 字号键 + 对应的开关键 + 名称文案。
+ * 顺序与「时间在前、通道名在后」的产品习惯一致；两者在设备上都是固定区域，与自定义文字共用区域预算。
+ */
+const OSD_ITEMS = [
+  { kind: 'time', posKey: 'osd.time.pos', fontKey: 'osd.time.fontPx', enableKey: 'osd.time.enable', labelKey: 'device.config.osdTime' },
+  { kind: 'channelName', posKey: 'osd.channelName.pos', fontKey: 'osd.channelName.fontPx', enableKey: 'osd.channelName.enable', labelKey: 'device.config.osdName' }
+]
+
+/**
+ * 时间样例时钟：只在「配置 Tab + OSD 子页签」停留时每秒走一格。
+ * 设备端渲染的是它自己的当前时间（HAL_OSD_TEXT_TIME 每秒自刷），预览拿真实时钟而不是固定串，
+ * 用户才能看出时间块实际会占多宽——这正是“贴合”要判断的东西。
+ */
+const osdClock = ref('')
+let osdTimer: ReturnType<typeof setInterval> | null = null
+function tickOsdClock() {
+  const d = new Date()
+  const p = (n: number) => String(n).padStart(2, '0')
+  osdClock.value = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+}
+watch([tab, cfgTab], () => {
+  const shouldRun = tab.value === 'config' && cfgTab.value === 'osd'
+  if (shouldRun && !osdTimer) {
+    tickOsdClock()
+    osdTimer = setInterval(tickOsdClock, 1000)
+  }
+  if (!shouldRun && osdTimer) { clearInterval(osdTimer); osdTimer = null }
+}, { immediate: true })
+onUnmounted(() => {
+  if (osdTimer) clearInterval(osdTimer)
+})
+
+/** 位置键回读值 → [x, y]，形状不对时按左上角，与 OsdOverlayEditor 的兜底一致 */
+function osdPos(key: string): number[] {
+  const v = cfg.data?.[key]
+  if (!Array.isArray(v) || v.length !== 2) return [0, 0]
+  return [Number(v[0]) || 0, Number(v[1]) || 0]
+}
+/** 字号回读值：缺失/非法时按默认档（与组件里的 clampFont 同一套兜底，保证两处显示一致） */
+function osdFont(key: string): number {
+  return Number(cfg.data?.[key]) || 32
+}
+
+/** 预览文字：固定项里只有“取不到通道名”是占位态，用虚线样式标出来，不假装画面上真是这个字 */
+function osdSample(kind: string): { text: string; sample?: boolean } {
+  if (kind === 'time') return { text: osdClock.value }
+  const name = channels.value[0]?.name || dev.value?.name || ''
+  return name ? { text: name } : { text: t('device.config.osdSampleChannel'), sample: true }
+}
+
+/**
+ * 可定位的固定叠加项：只列「开关已打开 + 设备确实支持位置键」的项。
+ * 关闭的项在设备上根本不渲染，让它留在画面上会误导用户以为拖一下就能生效。
+ */
+const osdPosItems = computed<OsdPosItem[]>(() => OSD_ITEMS
+  .filter((it) => cfg.supported.includes(it.posKey) && cfgNum(it.enableKey) === 1)
+  .map((it) => ({
+    key: it.posKey, fontKey: it.fontKey, label: t(it.labelKey),
+    pos: osdPos(it.posKey), fontPx: osdFont(it.fontKey), ...osdSample(it.kind)
+  })))
+/** 设备是否支持自定义文字（旧设备没这个键时不显示“添加文字”） */
+const osdTextSupported = computed(() => !cfg.supported.length || cfg.supported.includes('osd.text.regions'))
+/** 整个贴合区块的可见条件：固定项位置键与自定义文字键，设备支持任一就渲染 */
+const osdPosSupported = computed(() => OSD_ITEMS.some((it) => cfg.supported.includes(it.posKey)) || osdTextSupported.value)
+
+/**
+ * 自定义文字列表（osd.text.regions）：设备值原样读写，不做归一化——
+ * 归一化会把“设备上的值”改成“页面以为对的值”，一进页面就把脏值标志点亮。
+ */
+const osdTexts = computed<OsdTextItem[]>({
+  get: () => (Array.isArray(cfg.data['osd.text.regions']) ? cfg.data['osd.text.regions'] : []),
+  set: (v) => { cfg.data['osd.text.regions'] = v }
+})
+/**
+ * OSD 区域是每通道共享的硬资源（hal_osd_caps_t.max_regions_per_channel，参考实现 4）：
+ * 通道名、时间与每条自定义文字各占 1 个，所以“还能加几条”是算出来的，不是一个写死的条数上限。
+ */
+const OSD_REGION_MAX = 4
+/** 固定叠加项已占用的区域数（只算真正打开的项） */
+const osdChromeRegions = computed(() => osdPosItems.value.length)
+const osdTextFree = computed(() => Math.max(0, OSD_REGION_MAX - osdChromeRegions.value - osdTexts.value.length))
+/** 不能再添加时的原因：手柄灰掉必须说明白，否则用户以为是页面坏了 */
+const osdAddBlockedHint = computed(() => (osdTextFree.value > 0
+  ? ''
+  : t('device.config.osdTextFull', { n: OSD_REGION_MAX })))
+
+/** UTF-8 字节数（设备端 char[HAL_OSD_TEXT_MAX] 按字节装） */
+function osdByteLen(s: string) {
+  return new TextEncoder().encode(s || '').length
+}
+/**
+ * 提交前拦截：条数超区域上限、任一条内容为空或超过 64 字节，设备都会整键 rejected，
+ * 而 rejected 只回键名（用户看不出是哪一条错了），所以在这里就说清。
+ */
+const osdTextIssue = computed(() => {
+  const list = osdTexts.value
+  if (!list.length) return ''
+  if (osdChromeRegions.value + list.length > OSD_REGION_MAX) {
+    return t('device.config.osdTextOverCapacity', { used: osdChromeRegions.value + list.length, max: OSD_REGION_MAX })
+  }
+  const blank = list.findIndex((tx) => !String(tx?.text ?? '').trim())
+  if (blank >= 0) return t('device.config.osdTextEmptyRow', { n: blank + 1 })
+  const long = list.findIndex((tx) => osdByteLen(String(tx?.text ?? '')) > 64)
+  if (long >= 0) {
+    return t('device.config.osdTextTooLong', { n: osdByteLen(list[long].text), max: 64 })
+  }
+  return ''
+})
+/** 位置改动只写 cfg.data：这些键都不是 reboot_required，也无断网风险，随下方「保存并下发」一并提交 */
+function onOsdMove(key: string, pos: number[]) {
+  cfg.data[key] = pos
+}
+/** 固定叠加项的字号改动（拖把手缩放的输出），与位置键同样只写 cfg.data，随通用保存下发 */
+function onOsdResize(key: string, fontPx: number) {
+  cfg.data[key] = fontPx
+}
+
 async function loadCfg() {
   cfg.loading = true
   cfg.denied = []
@@ -1620,6 +1743,30 @@ onMounted(load)
                       />
                     </div>
                   </details>
+                </section>
+
+                <!-- OSD 画面贴合（位置键 osd.*.pos 与自定义文字 osd.text.regions）：定位与增删改不适合塞进字段网格，单独成块。
+                     这些键都不是 reboot_required、也无断网风险，随下方通用「保存并下发」一并提交。 -->
+                <section v-if="cfgTab === 'osd' && osdPosSupported" class="rounded-signal border border-line">
+                  <header class="flex items-center justify-between border-b border-line-soft px-3 py-2">
+                    <span class="text-sm font-medium text-ink">{{ t('device.config.group.osdPos') }}</span>
+                    <UiButton size="sm" :disabled="preview.loading" @click="loadPreview">
+                      <Icon name="refresh" :size="13" :class="preview.loading ? 'ipc-spin' : ''" />{{ t('device.config.refreshPreview') }}
+                    </UiButton>
+                  </header>
+                  <div class="space-y-3 p-3">
+                    <!-- 数组键的拒绝/拦截提示放在画布上方：用户改的就是图上这些东西，提示得落在眼睛的位置上 -->
+                    <p v-if="cfg.denied.includes('osd.text.regions')" class="text-xs text-danger">{{ t('device.config.osdTextRejected') }}</p>
+                    <p v-else-if="osdTextIssue" class="text-xs text-danger">{{ osdTextIssue }}</p>
+                    <OsdOverlayEditor
+                      v-model:texts="osdTexts"
+                      :items="osdPosItems" :poster-src="preview.src"
+                      :source-height="cfgNum('video.0.main.h') || 1080"
+                      :chrome-regions="osdChromeRegions" :region-max="OSD_REGION_MAX"
+                      :add-blocked-hint="osdAddBlockedHint" :disabled="cfgSaving"
+                      @move="onOsdMove" @resize="onOsdResize"
+                    />
+                  </div>
                 </section>
 
                 <!-- 移动侦测区域：底图取自设备抓拍（与画面信息页共用同一次抓帧状态）；

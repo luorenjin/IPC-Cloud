@@ -300,6 +300,33 @@ export default {
   // ---- OSD overlay ----
   'device.config.osdName': 'Channel name',
   'device.config.osdTime': 'Timestamp',
+  // ---- OSD on-picture positioning (osd.*.pos + osd.text.regions) ----
+  // Coordinates are normalized [x,y] (top-left of the text block); font_px is the pixel height on the main stream
+  'device.config.group.osdPos': 'Overlays & custom text',
+  'device.config.osdOverlayHint': 'Drag a text block to reposition it; drag the corner dot to resize the font (arrow keys nudge). Coordinates are normalized; font size is scaled from main-stream pixels.',
+  'device.config.osdOverlayPosterHint': 'The background is a frame captured from the device, for positioning only — the device renders the glyphs.',
+  'device.config.osdOverlayEmpty': 'No fixed overlays yet — turn on channel name or timestamp above; custom text is added below.',
+  'device.config.osdOverlayAria': '{name}: x {x}, y {y}, font {font} px. Use arrow keys to nudge.',
+  'device.config.osdSampleChannel': 'Channel name',
+  // OSD regions are shared per channel: channel name, timestamp and every custom text take one each
+  'device.config.osdRegionUsage': 'OSD regions',
+  'device.config.osdRegionUsageHint': 'Channel name, timestamp and each text take one; the device allows {n} per channel',
+  'device.config.osdTextN': 'Text {n}',
+  'device.config.osdTextContentPlaceholder': 'Text to overlay',
+  'device.config.osdTextRemove': 'Remove',
+  'device.config.osdTextSize': 'Font size',
+  'device.config.osdTextSizeUnit': '{min}–{max} px (main stream)',
+  'device.config.osdTextAdd': 'Add text',
+  'device.config.osdTextAddHint': 'Drag each text on the picture to place it, drag its corner dot to resize',
+  'device.config.osdTextPlaceholder': 'Text {n} (empty)',
+  'device.config.osdTextAria': 'Text {n}: x {x}, y {y}, font {font} px. Use arrow keys to nudge.',
+  'device.config.osdResizeAria': 'Resize {name}: use the up/down arrow keys',
+  'device.config.osdTextEmptyRow': 'Text {n} is empty',
+  'device.config.osdTextTooLong': 'Text exceeds {max} bytes ({n} bytes now)',
+  // Region budget: the device allows only a few OSD regions per channel, so name what used them up
+  'device.config.osdTextFull': 'Reached the device limit of {n} OSD regions per channel (channel name and timestamp take one each)',
+  'device.config.osdTextOverCapacity': '{used} OSD regions in use, over the device limit of {max} per channel: remove a text or turn off channel name / timestamp',
+  'device.config.osdTextRejected': 'The device rejected the custom text (count, length or font size not supported)',
   // ---- Recording ----
   'device.config.recordEnable': 'Enable recording',
   'device.config.recordMode': 'Recording mode',
