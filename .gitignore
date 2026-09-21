@@ -9,6 +9,9 @@ dist/
 # Logs
 *.log
 *.txt
+# 上面的 *.txt 本意是忽略日志，但会连 CMakeLists.txt 一起吞掉，
+# 且 git add 对被忽略的文件静默跳过——新增的构建脚本会悄悄漏提交。
+!CMakeLists.txt
 
 # Environment files
 .env
