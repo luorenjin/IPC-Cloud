@@ -29,6 +29,7 @@ static void test_err_mapping(void)
     CHECK(console_http_status(HAL_EPERM_)   == 403, "EPERM→403");
     CHECK(console_http_status(HAL_ENODEV)   == 404, "ENODEV→404");
     CHECK(console_http_status(HAL_EBUSY)    == 409, "EBUSY→409");
+    CHECK(console_http_status(HAL_ESTATE)   == 409, "ESTATE→409（已激活设备拒绝重复激活）");
     /* 能力探测基石：不可退化为 404 */
     CHECK(console_http_status(HAL_ENOTSUP)  == 501, "ENOTSUP→501（能力探测基石）");
     CHECK(console_http_status(HAL_EIO)      == 500, "EIO→500");
@@ -81,7 +82,7 @@ static void test_auth_flow(void)
 
     SECTION("鉴权流程");
     /* 首次：以出厂验证码派生凭据 */
-    CHECK(console_auth_seed("ABCD1234") == HAL_OK, "以出厂验证码播种");
+    CHECK(console_auth_seed("ABCD1234", true) == HAL_OK, "以出厂验证码播种");
 
     /* challenge 返回稳定的 salt 与一次性 nonce */
     CHECK(console_auth_challenge("admin", salt_hex, sizeof(salt_hex), nonce, sizeof(nonce)) == HAL_OK,
@@ -145,7 +146,7 @@ static void test_auth_user_enum(void)
 static void test_must_change_password(void)
 {
     SECTION("首次强制改密");
-    console_auth_seed("ABCD1234");
+    console_auth_seed("ABCD1234", true);
     CHECK(console_auth_must_change() == true, "出厂状态需强制改密");
     CHECK(console_auth_set_password("ABCD1234", "NewPass@123") == HAL_OK, "改密成功");
     CHECK(console_auth_must_change() == false, "改密后解除");
@@ -362,10 +363,10 @@ static void test_auth_endpoints(void)
 
     SECTION("鉴权端点");
     console_auth_reset_lockout();
-    /* 路由注册由 test_factory_bootstrap 那一次 console_auth_init() 完成：
+    /* 路由注册由 test_activation_bootstrap 那一次 console_auth_init() 完成：
        http_route 不去重且 ROUTE_MAX 只有 8，整个测试二进制只应调它一次，
        否则会把槽位烧给同一个前缀，坑到后续任务注册自己的路由。 */
-    CHECK(console_auth_seed("ABCD1234") == HAL_OK, "重新播种（回到出厂强制改密态）");
+    CHECK(console_auth_seed("ABCD1234", true) == HAL_OK, "重新播种（回到出厂强制改密态）");
 
     /* 未知子路径 → 404 语义；非 POST → 400 语义 */
     req_make(&req, "POST", "/api/v1/auth/bogus", "{}", NULL);
@@ -538,54 +539,104 @@ static void test_auth_endpoints(void)
 }
 
 /**
- * 出厂自举：真机上没人调 console_auth_seed，凭据必须由 console_auth_init 从
- * 安全存储的出厂验证码派生。缺了这一步，控制台在真实设备上根本登不进去。
+ * 首次激活自举（Task 8.5：取代出厂验证码自举）。产线不再烧录唯一验证码，
+ * `console_auth_init` 不再做任何自动播种；凭据必须由用户首次访问设备时通过
+ * `POST /api/v1/auth/activate` 自行设置，`GET /api/v1/auth/state` 供前端在此
+ * 之前判断该显示激活页还是登录页。
  */
-static void test_factory_bootstrap(void)
+static void test_activation_bootstrap(void)
 {
+    char body[512], set_cookie[256];
     char salt_hex[80], nonce[80], proof[160];
+    http_req_t req;
 
-    SECTION("出厂验证码自举");
+    SECTION("首次激活自举（取代出厂验证码）");
     console_auth_reset_lockout();
 
-    /* 模拟产线：把验证码烧进安全存储，清掉已有凭据 */
+    /* 回到"从未配置"的真实出厂状态。刻意留一份 verify_code 在安全存储里
+       （console_net.c 的 AP PSK 派生仍会用到它，与本次改动无关），用来证明
+       即便它存在，console_auth 也不会再拿它做任何自动播种。 */
     CHECK(hal()->crypto->secure_write(HAL_SEC_KEY_VERIFY_CODE,
-                                      (const uint8_t *)"FCT98765", 8) == HAL_OK, "烧录出厂验证码");
+                                      (const uint8_t *)"FCT98765", 8) == HAL_OK,
+          "安全存储里仍可能留有验证码（供 AP PSK 派生），与登录无关");
     hal()->crypto->secure_delete(HAL_SEC_KEY_LOCAL_USER);
     console_auth_test_reload();
 
     /* 整个测试二进制里**唯一**一次 console_auth_init()：既验证路由注册，
-       也验证真实入口确实会做出厂自举。其余用例一律走 console_auth_test_bootstrap()，
+       也验证真实入口不再做任何自动播种。其余用例一律走 console_auth_test_bootstrap()，
        否则 http_route（不去重，ROUTE_MAX=8）会被同一前缀反复占槽。 */
     CHECK(console_auth_init() == HAL_OK, "console_auth_init 成功");
     CHECK(http_route_match("/api/v1/auth/login") != NULL, "登录路径可命中路由");
     CHECK(http_route_match("/api/v1/auth/challenge") != NULL, "挑战路径可命中路由");
-    CHECK(console_auth_must_change() == true, "自举后处于强制改密态");
+    CHECK(console_auth_must_change() == true, "未激活按最严处理：视为需要强制改密");
+
+    /* 未激活：GET /auth/state 免鉴权，返回 activated:false */
+    req_make(&req, "GET", "/api/v1/auth/state", NULL, NULL);
+    CHECK(console_auth_test_dispatch(&req, "172.16.0.5", body, sizeof(body),
+                                     set_cookie, sizeof(set_cookie)) == HAL_OK,
+          "state 端点无需登录即可访问");
+    CHECK(body_flag(body, "activated", true) == false,
+          "未激活时 activated=false，实际：%s", body);
+
+    /* 即便安全存储里有验证码，也不能拿它登录——没有自动播种，凭据根本不存在 */
+    CHECK(console_auth_challenge_from("admin", salt_hex, sizeof(salt_hex),
+                                      nonce, sizeof(nonce), "172.16.0.5") == HAL_OK,
+          "无凭据时 challenge 仍返回（伪 salt，防枚举）");
+    CHECK(console_auth_make_proof("FCT98765", salt_hex, nonce, proof, sizeof(proof)) == HAL_OK, "算 proof");
+    CHECK(console_auth_verify_from("admin", nonce, proof, "172.16.0.5") == HAL_EPERM_,
+          "安全存储里的验证码不再能登录，不得静默放行");
+
+    /* 弱口令激活被拒，不改变激活状态 */
+    req_make(&req, "POST", "/api/v1/auth/activate", "{\"password\":\"short\"}", NULL);
+    CHECK(console_auth_test_dispatch(&req, "172.16.0.5", body, sizeof(body),
+                                     set_cookie, sizeof(set_cookie)) == HAL_EINVAL,
+          "弱口令激活被拒");
+
+    /* 首次激活：用户自行设置密码 */
+    req_make(&req, "POST", "/api/v1/auth/activate", "{\"password\":\"ActivatePwd1\"}", NULL);
+    CHECK(console_auth_test_dispatch(&req, "172.16.0.5", body, sizeof(body),
+                                     set_cookie, sizeof(set_cookie)) == HAL_OK,
+          "首次激活成功");
+    CHECK(console_auth_must_change() == false, "用户自设密码无需再强制改密");
+
+    /* 激活后 state 变为 true */
+    req_make(&req, "GET", "/api/v1/auth/state", NULL, NULL);
+    CHECK(console_auth_test_dispatch(&req, "172.16.0.5", body, sizeof(body),
+                                     set_cookie, sizeof(set_cookie)) == HAL_OK, "再次取 state");
+    CHECK(body_flag(body, "activated", false) == true,
+          "激活后 activated=true，实际：%s", body);
+
+    /* 用刚设置的密码可以直接登录 */
     CHECK(console_auth_challenge_from("admin", salt_hex, sizeof(salt_hex),
                                       nonce, sizeof(nonce), "172.16.0.5") == HAL_OK, "取 challenge");
-    CHECK(console_auth_make_proof("FCT98765", salt_hex, nonce, proof, sizeof(proof)) == HAL_OK,
-          "以出厂验证码算 proof");
+    CHECK(console_auth_make_proof("ActivatePwd1", salt_hex, nonce, proof, sizeof(proof)) == HAL_OK,
+          "以激活口令算 proof");
     CHECK(console_auth_verify_from("admin", nonce, proof, "172.16.0.5") == HAL_OK,
-          "出厂设备开箱即可用出厂验证码登录");
+          "用户自设的激活口令可直接登录，且无需先改密");
 
-    /* 反面：安全存储里既无凭据也无验证码时，不得静默放行 */
-    hal()->crypto->secure_delete(HAL_SEC_KEY_LOCAL_USER);
-    hal()->crypto->secure_delete(HAL_SEC_KEY_VERIFY_CODE);
-    console_auth_test_reload();
-    console_auth_test_bootstrap();
-    CHECK(console_auth_challenge_from("admin", salt_hex, sizeof(salt_hex),
-                                      nonce, sizeof(nonce), "172.16.0.6") == HAL_OK,
-          "无凭据时 challenge 仍返回（伪 salt，防枚举）");
-    CHECK(console_auth_make_proof("FCT98765", salt_hex, nonce, proof, sizeof(proof)) == HAL_OK,
-          "算 proof");
-    CHECK(console_auth_verify_from("admin", nonce, proof, "172.16.0.6") == HAL_EPERM_,
-          "无凭据时任何登录都必须失败，不得静默放行");
+    /* 安全红线：已激活设备拒绝重复激活，否则任何人都能在局域网内重置密码 */
+    req_make(&req, "POST", "/api/v1/auth/activate", "{\"password\":\"AnotherPwd2\"}", NULL);
+    CHECK(console_auth_test_dispatch(&req, "172.16.0.6", body, sizeof(body),
+                                     set_cookie, sizeof(set_cookie)) == HAL_ESTATE,
+          "已激活设备拒绝重复激活");
+    CHECK(console_http_status(HAL_ESTATE) == 409, "HAL_ESTATE 映射为 HTTP 409");
+
+    /* 方法校验：state 只认 GET，activate 只认 POST（CSRF 防护对新增端点依然生效） */
+    req_make(&req, "POST", "/api/v1/auth/state", NULL, NULL);
+    CHECK(console_auth_test_dispatch(&req, "172.16.0.5", body, sizeof(body),
+                                     set_cookie, sizeof(set_cookie)) == HAL_EINVAL,
+          "state 非 GET 被拒");
+    req_make(&req, "GET", "/api/v1/auth/activate", NULL, NULL);
+    CHECK(console_auth_test_dispatch(&req, "172.16.0.5", body, sizeof(body),
+                                     set_cookie, sizeof(set_cookie)) == HAL_EINVAL,
+          "activate 非 POST 被拒");
 }
 
 /**
- * 凭据损坏 / 版本不匹配**绝不能**被当成"从未配置"而触发出厂自举——那会把一台
- * 已设过口令的设备静默重置回标签上印的验证码。最难受的触发路径是将来 bump
- * CRED_VERSION 却没带迁移逻辑就 OTA 出去，会一次性重置整批设备。
+ * 凭据损坏 / 版本不匹配**绝不能**被当成"从未配置"而允许被 `/auth/activate`
+ * 覆盖——那会把一台已设过口令的设备静默重置成攻击者提交的新密码。最难受的
+ * 触发路径是将来 bump CRED_VERSION 却没带迁移逻辑就 OTA 出去，会让整批设备
+ * 的"损坏"记录都可以被第一个访问者的 activate 请求接管。
  */
 static void test_corrupt_cred_not_reset(void)
 {
@@ -593,35 +644,40 @@ static void test_corrupt_cred_not_reset(void)
     uint8_t future[96];
     uint8_t back[96];
     size_t len = 0;
-    char salt_hex[80], nonce[80], proof[160];
+    char body[512], set_cookie[256];
+    http_req_t req;
 
-    SECTION("凭据损坏不得静默重置回出厂口令");
+    SECTION("凭据损坏不得被 activate 静默覆盖");
     console_auth_reset_lockout();
 
     memset(future, 0xA7, sizeof(future));
     future[0] = 'I'; future[1] = 'C'; future[2] = 'L'; future[3] = 'U';
     future[4] = 0; future[5] = 0; future[6] = 0; future[7] = 2;   /* version = 2 */
 
-    CHECK(hal()->crypto->secure_write(HAL_SEC_KEY_VERIFY_CODE,
-                                      (const uint8_t *)"FCT98765", 8) == HAL_OK, "烧录出厂验证码");
     CHECK(hal()->crypto->secure_write(HAL_SEC_KEY_LOCAL_USER, future, sizeof(future)) == HAL_OK,
           "写入一条未来版本的凭据记录");
     console_auth_test_reload();
     console_auth_test_bootstrap();
+    CHECK(console_auth_must_change() == true, "损坏记录下按最严处理：视为需要强制改密");
 
-    /* 1) 不得用出厂验证码把设备"救活" —— 那等于远程可用标签码接管 */
-    CHECK(console_auth_challenge_from("admin", salt_hex, sizeof(salt_hex),
-                                      nonce, sizeof(nonce), "172.16.0.7") == HAL_OK, "取 challenge");
-    CHECK(console_auth_make_proof("FCT98765", salt_hex, nonce, proof, sizeof(proof)) == HAL_OK,
-          "算 proof");
-    CHECK(console_auth_verify_from("admin", nonce, proof, "172.16.0.7") == HAL_EPERM_,
-          "损坏记录下出厂验证码不得能登录（否则等于静默重置）");
+    /* 1) state 端点必须把"损坏"判定为已占用，不能引导用户以为设备可以激活 */
+    req_make(&req, "GET", "/api/v1/auth/state", NULL, NULL);
+    CHECK(console_auth_test_dispatch(&req, "172.16.0.7", body, sizeof(body),
+                                     set_cookie, sizeof(set_cookie)) == HAL_OK, "取 state");
+    CHECK(body_flag(body, "activated", false) == true,
+          "损坏记录必须算作已占用，不得让前端展示激活页，实际：%s", body);
 
-    /* 2) 存储里的原记录必须原样保留，不得被覆盖 */
+    /* 2) activate 必须被拒——不得用任意密码把设备"救活"，等于远程可任意重置 */
+    req_make(&req, "POST", "/api/v1/auth/activate", "{\"password\":\"Attacker@123\"}", NULL);
+    CHECK(console_auth_test_dispatch(&req, "172.16.0.7", body, sizeof(body),
+                                     set_cookie, sizeof(set_cookie)) == HAL_ESTATE,
+          "损坏记录下 activate 必须拒绝");
+
+    /* 3) 存储里的原记录必须原样保留，不得被覆盖 */
     CHECK(hal()->crypto->secure_read(HAL_SEC_KEY_LOCAL_USER, back, sizeof(back), &len) == HAL_OK,
           "读回存储记录");
     CHECK(len == sizeof(future) && memcmp(back, future, sizeof(future)) == 0,
-          "损坏记录未被出厂自举覆盖");
+          "损坏记录未被 activate 覆盖");
 }
 
 static void test_cred_not_in_config(void)
@@ -632,7 +688,7 @@ static void test_cred_not_in_config(void)
 
     SECTION("凭据不得进入配置导出");
     CHECK(cfg_init(NULL, "console_test_cfg.json") == HAL_OK, "配置中心就绪");
-    CHECK(console_auth_seed("ABCD1234") == HAL_OK, "播种凭据");
+    CHECK(console_auth_seed("ABCD1234", true) == HAL_OK, "播种凭据");
     CHECK(console_auth_challenge("admin", salt_hex, sizeof(salt_hex), nonce, sizeof(nonce)) == HAL_OK,
           "取到公开的 salt");
     dump = (char *)malloc(cap);
@@ -693,7 +749,7 @@ static void test_cred_fallback_store(void)
     CHECK(hal_deinit() == HAL_OK, "卸载 HAL，模拟平台不提供 crypto 模块");
     CHECK(hal_has(HAL_MOD_CRYPTO) == false, "crypto 能力不可用");
 
-    CHECK(console_auth_seed("FALLBK99") == HAL_OK, "凭据落到软存储文件");
+    CHECK(console_auth_seed("FALLBK99", true) == HAL_OK, "凭据落到软存储文件");
     /* 路径必须在私有数据目录下，而不是进程工作目录里的裸文件名 */
     CHECK(strchr(console_auth_cred_path(), '/') != NULL, "软存储位于私有数据目录下");
     console_auth_test_reload();  /* 丢弃内存缓存，强制从存储读回 */
@@ -812,7 +868,7 @@ static void test_api_config_endpoints(void)
     CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_EUNAUTH_,
           "未登录访问 config 返回未登录");
 
-    CHECK(console_auth_seed("ABCD1234") == HAL_OK, "播种凭据（出厂态）");
+    CHECK(console_auth_seed("ABCD1234", true) == HAL_OK, "播种凭据（出厂态）");
     CHECK(do_login("admin", "ABCD1234", "192.168.50.10", cookie, sizeof(cookie), &must_change) == HAL_OK,
           "登录成功");
 
@@ -904,7 +960,7 @@ static void test_api_system_endpoints(void)
 
     SECTION("REST 系统信息与动作端点");
     console_auth_reset_lockout();
-    CHECK(console_auth_seed("ABCD1234") == HAL_OK, "播种凭据（出厂态）");
+    CHECK(console_auth_seed("ABCD1234", true) == HAL_OK, "播种凭据（出厂态）");
 
     /* system/info 豁免的是"强制改密"，不是"登录"本身 */
     req_make(&req, "GET", "/api/v1/system/info", NULL, NULL);
@@ -991,7 +1047,7 @@ static void test_reboot_handler_order(void)
 
     SECTION("console_api_handler：必须先入队响应、再登记延后动作");
     console_auth_reset_lockout();
-    CHECK(console_auth_seed("ABCD1234") == HAL_OK, "播种凭据（出厂态）");
+    CHECK(console_auth_seed("ABCD1234", true) == HAL_OK, "播种凭据（出厂态）");
     CHECK(console_auth_set_password("ABCD1234", "NewPass@123") == HAL_OK, "改密解除强制改密");
     CHECK(do_login("admin", "NewPass@123", "192.168.50.12", cookie, sizeof(cookie), &must_change) == HAL_OK,
           "登录成功");
@@ -1648,7 +1704,7 @@ static void test_net_init_and_routes(void)
      * 参与竞争，断言照样通过。要真正验证生产环境下 /api/v1/net/status 会
      * 命中比 /api/v1/ 更长、更具体的 /api/v1/net/，必须让两个前缀同时
      * 注册。console_api_init()（Task 7）在整个测试二进制里也是唯一一次
-     * 调用，与 console_net_init 各占一个路由槽（+ test_factory_bootstrap
+     * 调用，与 console_net_init 各占一个路由槽（+ test_activation_bootstrap
      * 已经注册的 /api/v1/auth/，共 3/8，预算充足）。
      */
     CHECK(console_api_init() == HAL_OK, "console_api_init 成功（注册 /api/v1/，唯一一次）");
@@ -1681,7 +1737,7 @@ static void test_net_status_endpoint(void)
     SECTION("REST 网络状态端点 GET /api/v1/net/status");
     console_net_test_reset();
     console_auth_reset_lockout();
-    CHECK(console_auth_seed("ABCD1234") == HAL_OK, "播种凭据（出厂态）");
+    CHECK(console_auth_seed("ABCD1234", true) == HAL_OK, "播种凭据（出厂态）");
 
     req_make(&req, "GET", "/api/v1/net/status", NULL, NULL);
     CHECK(console_net_test_dispatch(&req, body, sizeof(body), &http_status) == HAL_EUNAUTH_,
@@ -1738,7 +1794,7 @@ static void test_net_wifi_scan_endpoint(void)
     SECTION("REST WiFi 扫描端点 GET /api/v1/net/wifi/scan");
     console_net_test_reset();
     console_auth_reset_lockout();
-    CHECK(console_auth_seed("ABCD1234") == HAL_OK, "播种凭据（出厂态）");
+    CHECK(console_auth_seed("ABCD1234", true) == HAL_OK, "播种凭据（出厂态）");
     CHECK(console_auth_set_password("ABCD1234", "NewPass@123") == HAL_OK, "改密解除强制改密");
     CHECK(do_login("admin", "NewPass@123", "192.168.60.11", cookie, sizeof(cookie), &must_change) == HAL_OK,
           "登录成功");
@@ -1785,7 +1841,7 @@ static void test_net_wifi_connect_endpoint(void)
     SECTION("REST WiFi 配网提交端点 POST /api/v1/net/wifi/connect：参数校验与 202 立即响应");
     console_net_test_reset();
     console_auth_reset_lockout();
-    CHECK(console_auth_seed("ABCD1234") == HAL_OK, "播种凭据（出厂态）");
+    CHECK(console_auth_seed("ABCD1234", true) == HAL_OK, "播种凭据（出厂态）");
     CHECK(console_auth_set_password("ABCD1234", "NewPass@123") == HAL_OK, "改密解除强制改密");
     CHECK(do_login("admin", "NewPass@123", "192.168.60.13", cookie, sizeof(cookie), &must_change) == HAL_OK,
           "登录成功");
@@ -1855,7 +1911,7 @@ static void test_net_wifi_no_capability(void)
     SECTION("无 WiFi 能力时 scan/connect 均返回 ENOTSUP(501)，status 仍可用");
     console_net_test_reset();
     console_auth_reset_lockout();
-    CHECK(console_auth_seed("ABCD1234") == HAL_OK, "播种凭据（出厂态）");
+    CHECK(console_auth_seed("ABCD1234", true) == HAL_OK, "播种凭据（出厂态）");
     CHECK(console_auth_set_password("ABCD1234", "NewPass@123") == HAL_OK, "改密");
     CHECK(do_login("admin", "NewPass@123", "192.168.60.12", cookie, sizeof(cookie), &must_change) == HAL_OK,
           "登录成功");
@@ -1914,7 +1970,7 @@ static void test_net_connect_handler_order(void)
     SECTION("console_net_handler：必须先入队 202 响应、再登记延后动作交给工作线程");
     console_net_test_reset();
     console_auth_reset_lockout();
-    CHECK(console_auth_seed("ABCD1234") == HAL_OK, "播种凭据（出厂态）");
+    CHECK(console_auth_seed("ABCD1234", true) == HAL_OK, "播种凭据（出厂态）");
     CHECK(console_auth_set_password("ABCD1234", "NewPass@123") == HAL_OK, "改密解除强制改密");
     CHECK(do_login("admin", "NewPass@123", "192.168.60.14", cookie, sizeof(cookie), &must_change) == HAL_OK,
           "登录成功");
@@ -1968,7 +2024,7 @@ int main(void)
     test_auth_lockout();
     test_auth_user_enum();
     test_must_change_password();
-    test_factory_bootstrap();       /* 唯一一次 console_auth_init()，顺带注册路由 */
+    test_activation_bootstrap();    /* 唯一一次 console_auth_init()，顺带注册路由 */
     test_corrupt_cred_not_reset();
     test_auth_endpoints();
     test_cred_not_in_config();

@@ -66,8 +66,13 @@ hal_err_t console_pbkdf2_sha256(const char *pwd, size_t pwd_len,
 hal_err_t console_hmac_sha256(const uint8_t *key, size_t key_len,
                               const uint8_t *msg, size_t msg_len, uint8_t out[32]);
 
-/** 以出厂验证码播种凭据（首次启动或恢复出厂后调用） */
-hal_err_t console_auth_seed(const char *factory_code);
+/**
+ * 播种本地账号凭据。`must_change` 由调用方决定，不再由本函数假定来源
+ * （Task 8.5：出厂验证码自举已被否决，改为用户首次访问时自行设置密码，
+ * 见 `POST /api/v1/auth/activate`）：出厂验证码场景传 true（登录后强制改密）；
+ * 用户自行设置的激活口令传 false；将来 IDP 远程重置按平台下发的值决定。
+ */
+hal_err_t console_auth_seed(const char *password, bool must_change);
 /** 取挑战：salt 十六进制串 + 一次性 nonce（60s 过期） */
 hal_err_t console_auth_challenge(const char *user, char *salt_hex, size_t salt_cap,
                                  char *nonce, size_t nonce_cap);
@@ -112,7 +117,8 @@ hal_err_t console_auth_check(const http_req_t *req);
 void console_auth_reset_lockout(void);
 /** 测试桩：丢弃凭据内存缓存，强制下次访问重新从存储读回 */
 void console_auth_test_reload(void);
-/** 测试桩：只跑"装载凭据 + 出厂自举"这两步，不注册路由。
+/** 测试桩：只跑"装载凭据 + 激活状态提示"这两步（不再做任何自动播种，
+ *  见 console_auth.c 的 cred_activation_hint），不注册路由。
  *  `http_route` 无脑追加、不去重，而 `ROUTE_MAX` 只有 8——测试里反复调
  *  `console_auth_init()` 会把槽位烧给同一个前缀，后续任务在同一测试二进制里
  *  注册自己的路由时会莫名其妙拿到 HAL_ENOMEM。 */

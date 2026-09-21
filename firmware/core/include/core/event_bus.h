@@ -45,6 +45,11 @@ enum evt_domain {
 #define EVT_STREAM_LIMIT           EVT_MAKE(EVT_DOM_STREAM, 3)   /**< 订阅被拒：超限 */
 #define EVT_STREAM_STARTED         EVT_MAKE(EVT_DOM_STREAM, 4)   /**< 编码通道按需启动 */
 #define EVT_STREAM_STOPPED         EVT_MAKE(EVT_DOM_STREAM, 5)   /**< 编码通道按需停止 */
+/** 本地账号首次激活完成（Web 自设密码或将来 APP/IDP 绑定，两条路径独立、先到先得）。
+ *  Task 8.5 为将来接入 IDP 预留的契约：本期无人订阅，事件发出去无人听，是有意为之；
+ *  R4 要求模块间不得直接调用对方函数，将来 IDP 模块应订阅本事件而不是直接调
+ *  console_auth_*。 */
+#define EVT_BIND_ACTIVATED         EVT_MAKE(EVT_DOM_BIND, 1)
 
 typedef struct {
     uint32_t type;        /**< EVT_MAKE(domain, action) */

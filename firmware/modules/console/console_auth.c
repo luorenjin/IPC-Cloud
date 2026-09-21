@@ -36,6 +36,7 @@
 
 #include "console_internal.h"
 #include "core/config.h"
+#include "core/event_bus.h"
 #include "core/json.h"
 #include "core/log.h"
 #include "core/os.h"
@@ -481,8 +482,8 @@ _Static_assert(CRED_ITER_MAX >= CONSOLE_ITER, "迭代上限必须容纳本模块
 static cred_t s_cred;
 static bool   s_cred_loaded;
 /** 上次装载的结果。**必须区分 HAL_ENODEV（从未配置）与 HAL_ECORRUPT/HAL_EIO
- *  （记录存在但读不出来）**：只有前者才允许出厂自举去覆盖存储，见
- *  `cred_bootstrap_from_factory_code`。 */
+ *  （记录存在但读不出来）**：只有前者才允许 `POST /api/v1/auth/activate` 去
+ *  覆盖存储，见该端点实现 `ep_activate`。 */
 static hal_err_t s_cred_load_rc = HAL_ENODEV;
 /** 未播种时伪 salt 的派生密钥（仅本次运行有效，见 decoy_salt 注释） */
 static uint8_t s_decoy_key[CONSOLE_KEY_LEN];
@@ -628,16 +629,19 @@ static void cred_ensure_loaded(void)
 
     memset(&s_cred, 0, sizeof(s_cred));
     if (s_cred_load_rc == HAL_ENODEV) {
-        LOGI(MOD, "尚无本地账号凭据，等待以出厂验证码播种");
+        /* 从未配置：正常的出厂初始状态，等待用户首次访问时自行激活
+           （详见下面的 cred_activation_hint，那里会再打一条更具体的提示）。 */
+        LOGI(MOD, "尚无本地账号凭据");
     } else {
         /* 记录存在但读不出来（魔数错、**版本不匹配**、短读、I/O 失败）。
-           这与"从未配置"必须区分：若混为一谈，出厂自举会拿验证码重新播种并
-           覆盖原记录，把一台已设过口令的设备静默重置回标签上印的那个码。
-           最难受的触发路径是将来 bump CRED_VERSION 却没带迁移逻辑就 OTA 出去
-           ——那会一次性重置整批设备。此处保持 valid=false（登录一律失败），
-           不覆盖存储，把处置权交给人。 */
-        LOGE(MOD, "本地账号凭据读取失败（rc=%d）：为避免把已配置设备静默重置回出厂口令，"
-                  "**不会**以出厂验证码覆盖。控制台将无法登录，请检查安全存储或执行恢复出厂",
+           这与"从未配置"必须区分：若混为一谈，/api/v1/auth/activate 会误判为
+           可激活，允许任意来源提交新密码覆盖原记录，把一台已设过口令的设备
+           静默重置。最难受的触发路径是将来 bump CRED_VERSION 却没带迁移逻辑
+           就 OTA 出去——那会让整批设备的"损坏"记录都能被第一个访问者接管。
+           此处保持 valid=false（登录一律失败），不覆盖存储，把处置权交给人。 */
+        LOGE(MOD, "本地账号凭据读取失败（rc=%d）：为避免被静默覆盖，"
+                  "**不会**允许 /api/v1/auth/activate 接管。控制台将无法登录，"
+                  "请检查安全存储或执行恢复出厂",
              (int)s_cred_load_rc);
     }
 }
@@ -911,21 +915,21 @@ static void lock_ok(const char *ip)
  * 九、对外鉴权 API
  * ========================================================================== */
 
-hal_err_t console_auth_seed(const char *factory_code)
+hal_err_t console_auth_seed(const char *password, bool must_change)
 {
     cred_t c;
     hal_err_t rc;
 
-    if (!factory_code || !factory_code[0]) return HAL_EINVAL;
+    if (!password || !password[0]) return HAL_EINVAL;
 
     memset(&c, 0, sizeof(c));
     auth_user_name(c.user, sizeof(c.user));
     c.iter = CONSOLE_ITER;
     if ((rc = rand_bytes(c.salt, sizeof(c.salt))) != HAL_OK) goto fail;
-    rc = console_pbkdf2_sha256(factory_code, strlen(factory_code), c.salt, sizeof(c.salt),
+    rc = console_pbkdf2_sha256(password, strlen(password), c.salt, sizeof(c.salt),
                                c.iter, c.key, sizeof(c.key));
     if (rc != HAL_OK) goto fail;
-    c.must_change = true;   /* 出厂态：登录后必须先改密 */
+    c.must_change = must_change;
     c.valid = true;
 
     if ((rc = cred_persist(&c)) != HAL_OK) {
@@ -939,8 +943,8 @@ hal_err_t console_auth_seed(const char *factory_code)
     sessions_clear();
     nonces_clear();
     secure_wipe(&c, sizeof(c));
-    LOGI(MOD, "本地账号凭据已按出厂验证码初始化（用户 %s，迭代 %u，需强制改密）",
-         s_cred.user, (unsigned)s_cred.iter);
+    LOGI(MOD, "本地账号凭据已初始化（用户 %s，迭代 %u，%s强制改密）",
+         s_cred.user, (unsigned)s_cred.iter, must_change ? "需" : "无需");
     return HAL_OK;
 
 fail:
@@ -1257,7 +1261,8 @@ hal_err_t console_auth_check(const http_req_t *req)
 }
 
 /* ==========================================================================
- * 十、HTTP 端点：POST /api/v1/auth/{challenge,login,password,logout}
+ * 十、HTTP 端点：POST /api/v1/auth/{challenge,login,password,logout,activate}、
+ *                GET  /api/v1/auth/state（唯一免鉴权、允许 GET 的端点）
  *
  * 成功响应一律 200 + JSON；失败交给 console_reply_err 输出
  * {"code":<hal_err>,"msg":"中文说明"} 并映射状态码。
@@ -1385,7 +1390,93 @@ static hal_err_t ep_logout(const http_req_t *req, char *out, size_t cap,
 }
 
 /**
- * 分发 /api/v1/auth/ 下的四个端点。
+ * POST /api/v1/auth/activate：用户首次访问设备时自行设置管理员密码，取代
+ * 产线出厂验证码（Task 8.5：产线为每台设备生成唯一验证码、写安全存储、
+ * 印标签、维护对应关系的成本过高，方案已被否决）。
+ *
+ * 仅在**从未配置**时可用：`s_cred_load_rc != HAL_ENODEV`（含"已激活"与"记录
+ * 存在但损坏"两种情形，理由与 cred_ensure_loaded 一致——损坏记录不确定是否
+ * 已被配置过，不能当成"从未配置"覆盖）一律拒绝，返回 HAL_ESTATE（HTTP 409）。
+ * 这是安全红线：否则任何人在局域网内都能重置一台已经设好密码的设备。
+ *
+ * 请求体 {"user": "...（可选）", "password": "..."}：password 必填，按
+ * CONSOLE_PWD_MIN/MAX 校验；user 缺省沿用 auth_user_name() 的现有逻辑
+ * （config 的 localUser.name，再缺省 "admin"）。用户自己设的密码不再强制
+ * 登录后改密（must_change=false）——与出厂验证码播种（必须先改密）语义不同，
+ * 靠 console_auth_seed 新增的 must_change 形参区分。
+ *
+ * 与登录/改密端点不同，这里是**唯一**允许明文口令上线的端点：设备刚开箱、
+ * 没有任何既有凭据可用来做挑战-响应，零知识方案在此无解，属设计已接受的
+ * 窗口期风险（见设计文档 §2.2 残留风险）。
+ *
+ * 为将来 APP 激活（IDP 绑定）预留的契约（R4：模块间不得直接调用对方函数，
+ * 只能经 config/event_bus 交互）：
+ *  - 写 localUser.name 到 config，供 IDP 模块判断本地账号是否已激活；
+ *  - 发 EVT_BIND_ACTIVATED，供 IDP 模块订阅后上报平台状态机。
+ * 两者都只是尽力而为：本期没有 IDP 订阅者，config 写入失败也不影响凭据本身
+ * 已经落盘这一事实，因此失败只记日志、不影响本次激活的响应结果。
+ */
+static hal_err_t ep_activate(const json_t *j, char *out, size_t cap)
+{
+    char user[CONSOLE_USER_MAX];
+    char password[CONSOLE_PWD_MAX + 1];
+    const char *user_in;
+    size_t pwd_len;
+    hal_err_t rc;
+
+    cred_ensure_loaded();
+    if (s_cred_load_rc != HAL_ENODEV) return HAL_ESTATE;
+
+    if ((rc = body_str(j, "password", password, sizeof(password))) != HAL_OK) return rc;
+    pwd_len = strlen(password);
+    if (pwd_len < CONSOLE_PWD_MIN || pwd_len > CONSOLE_PWD_MAX) {
+        secure_wipe(password, sizeof(password));
+        return HAL_EINVAL;
+    }
+
+    user_in = json_string(json_get(j, "user"), NULL);
+    if (user_in && user_in[0]) {
+        if (strlen(user_in) >= sizeof(user)) { secure_wipe(password, sizeof(password)); return HAL_EINVAL; }
+        snprintf(user, sizeof(user), "%s", user_in);
+    } else {
+        auth_user_name(user, sizeof(user));   /* 缺省沿用现有逻辑：config 的 localUser.name，再缺省 admin */
+    }
+
+    /* 先写 config 再播种：console_auth_seed 内部经 auth_user_name() 复读这个键
+       决定凭据里的用户名，必须先落盘才能让自定义 user 生效。写入失败（例如
+       config 尚未初始化）不阻断激活本身——凭据不依赖 config，日志里的用户名
+       以播种后 s_cred.user 的实际值为准，不会出现"响应说改了但其实没改"。 */
+    rc = cfg_set_str("localUser.name", user);
+    if (rc != HAL_OK)
+        LOGW(MOD, "写入 localUser.name 失败（rc=%d），本次激活将使用 config 现有值/缺省值",
+             (int)rc);
+
+    rc = console_auth_seed(password, false);
+    secure_wipe(password, sizeof(password));
+    if (rc != HAL_OK) return rc;
+
+    /* 契约预留（本期无人订阅，是有意为之，见文件头/设计文档 §2.2） */
+    event_bus_emit(EVT_BIND_ACTIVATED, -1);
+
+    LOGI(MOD, "本地账号已完成首次激活（用户 %s）", s_cred.user);
+    return fmt_safe(out, cap, "{\"code\":0,\"msg\":\"激活成功，请使用新密码登录\"}");
+}
+
+/**
+ * GET /api/v1/auth/state：免鉴权的只读状态探测，供前端在加载时决定展示
+ * 激活页还是登录页。"activated" 与 ep_activate 的准入判据保持一致
+ * （`s_cred_load_rc != HAL_ENODEV`）：记录存在但损坏时也算"已占用"，
+ * 避免把无法自愈的损坏态误判成可激活状态。
+ */
+static hal_err_t ep_state(char *out, size_t cap)
+{
+    cred_ensure_loaded();
+    return fmt_safe(out, cap, "{\"code\":0,\"activated\":%s}",
+                    s_cred_load_rc != HAL_ENODEV ? "true" : "false");
+}
+
+/**
+ * 分发 /api/v1/auth/ 下的六个端点。
  * 返回 HAL_OK 时 out 为 200 响应体、cookie 为 Set-Cookie 值（无则空串）；
  * 其他返回值由调用方交给 console_reply_err。
  */
@@ -1407,11 +1498,19 @@ static hal_err_t auth_dispatch(const http_req_t *req, const char *ip_override,
     if (strncmp(req->path, CONSOLE_AUTH_PREFIX, plen) != 0) return HAL_ENODEV;
     sub = req->path + plen;
     if (strcmp(sub, "challenge") != 0 && strcmp(sub, "login") != 0 &&
-        strcmp(sub, "password") != 0 && strcmp(sub, "logout") != 0)
+        strcmp(sub, "password") != 0 && strcmp(sub, "logout") != 0 &&
+        strcmp(sub, "activate") != 0 && strcmp(sub, "state") != 0)
         return HAL_ENODEV;
 
-    /* 四个端点均为 POST：写操作不应可由 <img src> 之类的跨站 GET 触发 */
-    if (strcmp(req->method, "POST") != 0) return HAL_EINVAL;
+    /* state 是免鉴权的只读探测：未激活时设备上根本没有凭据可验，必须能在登录
+       之前访问，天然只能是 GET。其余五个端点都是写操作，仍然只认 POST——
+       不应可由 <img src> 之类的跨站 GET 触发，这条 CSRF 防护理由对它们依然
+       成立，不能因为新增了一个 GET 端点就整体放开。 */
+    if (strcmp(sub, "state") == 0) {
+        if (strcmp(req->method, "GET") != 0) return HAL_EINVAL;
+    } else if (strcmp(req->method, "POST") != 0) {
+        return HAL_EINVAL;
+    }
     if (req->body_len > CONSOLE_BODY_MAX) return HAL_EINVAL;
     if (req->body_len) {
         j = json_parse(req->body, req->body_len, NULL, 0);
@@ -1421,7 +1520,9 @@ static hal_err_t auth_dispatch(const http_req_t *req, const char *ip_override,
     if (strcmp(sub, "challenge") == 0)     rc = ep_challenge(j, ip, out, cap);
     else if (strcmp(sub, "login") == 0)    rc = ep_login(j, ip, out, cap, cookie, cookie_cap);
     else if (strcmp(sub, "password") == 0) rc = ep_password(j, req, ip, out, cap, cookie, cookie_cap);
-    else                                   rc = ep_logout(req, out, cap, cookie, cookie_cap);
+    else if (strcmp(sub, "logout") == 0)   rc = ep_logout(req, out, cap, cookie, cookie_cap);
+    else if (strcmp(sub, "activate") == 0) rc = ep_activate(j, out, cap);
+    else                                   rc = ep_state(out, cap);
 
     json_free(j);
     return rc;
@@ -1447,60 +1548,32 @@ static int console_auth_handler(http_req_t *req, void *user)
 }
 
 /**
- * 首次启动 / 恢复出厂后自动播种：从安全存储读产线烧录的出厂验证码
- * （HAL 为此预留了 HAL_SEC_KEY_VERIFY_CODE），派生凭据并置 must_change。
+ * 首次启动 / 恢复出厂后的激活提示（Task 8.5：取代出厂验证码自举）。
  *
- * 没有这一步，`s_cred.valid` 在真机上永远为假，每次登录都返回 HAL_EPERM_——
- * 控制台根本进不去。两条纪律：
- *  - 取不到验证码时**绝不静默放行**，打明确的 ERROR，登录继续失败；
- *  - 但也**不让 console_init 失败**，否则整个 console 模块起不来，连诊断页都没了。
+ * 此前这里会从安全存储读产线烧录的出厂验证码自动播种凭据——产线为每台设备
+ * 生成唯一验证码、写安全存储、印标签、维护对应关系的成本过大，该方案已被
+ * 否决。现改为用户首次访问设备时自行设置管理员密码（见新增端点
+ * `POST /api/v1/auth/activate`），本函数**不再做任何自动播种**，只在设备真正
+ * 处于"从未配置"这一正常初始状态时留一条 INFO，方便运维确认"登录不了"是
+ * 预期中的未激活态，而不是故障。
+ *
+ * 不在此重复提示的场景：凭据已存在（`s_cred.valid`）；记录存在但损坏/读失败
+ * （`s_cred_load_rc` 不是 `HAL_ENODEV`）——后者属另一类问题，`cred_ensure_loaded`
+ * 已经打过 ERROR，此处不应用"未激活"这种误导性措辞覆盖它。
  */
-static void cred_bootstrap_from_factory_code(void)
+static void cred_activation_hint(void)
 {
-    uint8_t raw[64];
-    char code[sizeof(raw) + 1];
-    size_t len = 0;
-    hal_err_t rc;
-
     if (s_cred.valid) return;
-
-    /* 只有"从未配置"才允许自举。记录存在但损坏/读失败时绝不覆盖，
-       原因与日志见 cred_ensure_loaded。 */
     if (s_cred_load_rc != HAL_ENODEV) return;
 
-    if (!crypto_store_available()) {
-        LOGE(MOD, "无安全存储可读出厂验证码：本地控制台将无法登录，"
-                  "该平台需实现 hal_crypto 或预置凭据");
-        return;
-    }
-    rc = hal()->crypto->secure_read(HAL_SEC_KEY_VERIFY_CODE, raw, sizeof(raw), &len);
-    if (rc != HAL_OK || len == 0 || len > sizeof(raw)) {
-        LOGE(MOD, "安全存储中没有出厂验证码（键 %s，rc=%d）：本地控制台将无法登录，"
-                  "需产线烧录后重启或恢复出厂", HAL_SEC_KEY_VERIFY_CODE, (int)rc);
-        secure_wipe(raw, sizeof(raw));
-        return;
-    }
-
-    memcpy(code, raw, len);
-    code[len] = '\0';
-    /* 产线写入可能带尾随换行/空白，去掉后再派生 */
-    while (len > 0 && (code[len - 1] == '\n' || code[len - 1] == '\r' ||
-                       code[len - 1] == ' '  || code[len - 1] == '\t')) code[--len] = '\0';
-
-    if (len == 0) {
-        LOGE(MOD, "出厂验证码为空：本地控制台将无法登录");
-    } else if ((rc = console_auth_seed(code)) != HAL_OK) {
-        LOGE(MOD, "以出厂验证码播种本地账号失败：%s（控制台将无法登录）", hal_strerror(rc));
-    }
-    secure_wipe(code, sizeof(code));
-    secure_wipe(raw, sizeof(raw));
+    LOGI(MOD, "尚未激活，等待首次设置管理员密码");
 }
 
 hal_err_t console_auth_init(void)
 {
     /* 启动期读一次凭据：请求路径上因此不会出现读安全存储/文件的阻塞动作 */
     cred_ensure_loaded();
-    cred_bootstrap_from_factory_code();
+    cred_activation_hint();
     return http_route(CONSOLE_AUTH_PREFIX, console_auth_handler, NULL);
 }
 
@@ -1508,7 +1581,7 @@ hal_err_t console_auth_init(void)
 void console_auth_test_bootstrap(void)
 {
     cred_ensure_loaded();
-    cred_bootstrap_from_factory_code();
+    cred_activation_hint();
 }
 #endif
 
