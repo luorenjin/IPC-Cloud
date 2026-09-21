@@ -15,7 +15,7 @@ DOCKER_RUN := MSYS_NO_PATHCONV=1 docker run --rm \
 	-e BUILD_UID=$(BUILD_UID) -e BUILD_GID=$(BUILD_GID) \
 	-v $(SRC_VOLUME):/sdk
 
-.PHONY: image sdk-init sdk-build sdk-menuconfig sdk-shell sdk-export sdk-clean sdk-clean-all
+.PHONY: image sdk-init sdk-build sdk-menuconfig sdk-shell sdk-export sdk-clean sdk-clean-all fw-build fw-clean
 
 image:
 	MSYS_NO_PATHCONV=1 docker build -t $(IMAGE_NAME) .
@@ -64,3 +64,20 @@ sdk-clean: image
 sdk-clean-all:
 	@echo "About to delete volume $(SRC_VOLUME) (all SDK source and build output). This cannot be undone."
 	@echo "To confirm, run: docker volume rm $(SRC_VOLUME)"
+
+## fw-build: 交叉编译本仓库固件主程序 ipc_app（产物在 out/gk7205v200/app/）
+# DOCKER_RUN 只挂了 SDK 卷（/sdk），这里额外挂载仓库 firmware/ 目录到 /work/firmware，
+# 因此单独写完整的 docker run 命令，不复用 DOCKER_RUN。
+# 挂载源用 $$(pwd)/.. 现算（firmware/docker 的上一级即 firmware/），不要把仓库绝对路径
+# 硬编码进 Makefile——本仓库路径含 U+200C 零宽字符，Make 的 $(CURDIR)/$(shell pwd) 会将其
+# 转写损坏，只有在 recipe 内让子 shell 自己 $$(pwd) 才能拿到未损坏的路径。
+fw-build: image
+	MSYS_NO_PATHCONV=1 docker run --rm \
+		-e BUILD_UID=$(BUILD_UID) -e BUILD_GID=$(BUILD_GID) \
+		-v $(SRC_VOLUME):/sdk \
+		-v "$$(pwd)/..":/work/firmware \
+		$(IMAGE_NAME) sh /work/firmware/docker/scripts/build-app.sh /work/firmware /work/firmware/docker/out/gk7205v200/app
+
+## fw-clean: 清理交叉编译产物
+fw-clean:
+	rm -rf out/gk7205v200/app

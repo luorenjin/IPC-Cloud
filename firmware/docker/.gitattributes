@@ -1,0 +1,5 @@
+# 本目录下的脚本会被复制进 Linux 容器执行（shebang 解释器），Windows 的
+# core.autocrlf=true 会把它们签出为 CRLF，导致容器内 "#!/bin/bash\r" 无法
+# 识别解释器（表现为 "no such file or directory"）。强制这些脚本始终以 LF
+# 签出，与平台无关。
+*.sh text eol=lf
