@@ -40,6 +40,9 @@ add_subdirectory(core)
 # L3 功能模块与共享部件
 add_subdirectory(modules)
 
+# 主程序（依赖 modules 与 platform）
+add_subdirectory(app)
+
 # 门禁：core/ 与 modules/ 禁止包含 platform 头与平台宏（存在源码时启用）
 file(GLOB_RECURSE IPC_GENERIC_SOURCES CONFIGURE_DEPENDS core/*.c core/*.h modules/*.c modules/*.h)
 foreach(src ${IPC_GENERIC_SOURCES})
