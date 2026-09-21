@@ -118,6 +118,48 @@ static void test_sys_ops(void)
     CHECK(gk_sys_ops.ota_confirm() == HAL_ENOTSUP, "ota_confirm 应为 ENOTSUP");
 }
 
+#include "hal/hal_net.h"
+extern const hal_net_ops_t gk_net_ops;
+
+static void test_net_ops(void)
+{
+    hal_net_caps_t caps;
+    hal_netif_status_t st;
+    hal_wifi_ap_t aps[4];
+    uint32_t n = 0;
+
+    SECTION("net_ops");
+
+    memset(&caps, 0, sizeof(caps));
+    CHECK(gk_net_ops.get_caps(&caps) == HAL_OK, "get_caps 不得失败");
+    CHECK(caps.eth == true, "以太网应为 true");
+    /* WiFi 模块型号未冻结（决策记录 §2.3），本期一律报不支持 */
+    CHECK(caps.wifi == false, "本期 WiFi 应为 false");
+    CHECK(caps.wifi_ap == false, "本期 AP 应为 false");
+
+    /* 以太网状态：x86 上没有 eth0，必须返回 HAL_OK 且 ip 为空串，
+       而不是失败——console_net.c 依赖非失败路径 */
+    memset(&st, 0, sizeof(st));
+    CHECK(gk_net_ops.get_status(HAL_NETIF_ETH, &st) == HAL_OK,
+          "get_status 在无网卡时也不得失败");
+    CHECK(st.type == HAL_NETIF_ETH, "type 应回填");
+    CHECK(st.ifname[0] != '\0', "ifname 不得为空");
+
+    /* WiFi 查询必须是 ENOTSUP */
+    CHECK(gk_net_ops.get_status(HAL_NETIF_WIFI, &st) == HAL_ENOTSUP,
+          "WiFi 状态应为 ENOTSUP");
+    CHECK(gk_net_ops.wifi_scan(aps, 4, &n, 1000) == HAL_ENOTSUP, "wifi_scan 应为 ENOTSUP");
+    CHECK(gk_net_ops.wifi_connect("ssid", "password", HAL_WIFI_SEC_WPA2) == HAL_ENOTSUP,
+          "wifi_connect 应为 ENOTSUP");
+
+    CHECK(gk_net_ops.get_caps(NULL) == HAL_EINVAL, "NULL 应返回 EINVAL");
+    CHECK(gk_net_ops.get_status(HAL_NETIF_ETH, NULL) == HAL_EINVAL, "NULL 应返回 EINVAL");
+
+    /* 无事件时必须是 EAGAIN，否则 console 的轮询会误判为故障 */
+    hal_net_event_t evt;
+    CHECK(gk_net_ops.poll_event(&evt, 0) == HAL_EAGAIN, "无事件应为 EAGAIN");
+}
+
 static void test_read_file(void)
 {
     char buf[128];
@@ -173,6 +215,7 @@ int main(void)
     test_parse_uptime();
     test_parse_cpuinfo();
     test_sys_ops();
+    test_net_ops();
     printf("RESULT: platform_gk pass=%d fail=%d\n", g_pass, g_fail);
     return g_fail;
 }
