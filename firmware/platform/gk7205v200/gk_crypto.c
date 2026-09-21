@@ -58,8 +58,14 @@ static void ensure_dir(void)
 
 static bool sec_path(const char *key, char *out, size_t cap)
 {
+    int n;
     if (!key_is_safe(key)) return false;
-    snprintf(out, cap, "%s/%s", sec_dir(), key);
+    n = snprintf(out, cap, "%s/%s", sec_dir(), key);
+    /* snprintf 返回“若缓冲区足够本应写入的长度”；截断（>= cap）不会引入新的
+       “..”，不构成目录逃逸，但会把两个仅后缀不同的超长键悄悄拼成同一路径，
+       造成键混淆/互相覆盖——必须当失败处理。负数同样视为失败（与
+       console_auth.c 的 fmt_safe 用同一判定方式）。 */
+    if (n < 0 || (size_t)n >= cap) return false;
     return true;
 }
 
@@ -108,11 +114,15 @@ static hal_err_t c_write(const char *key, const uint8_t *data, size_t len)
     fp = fopen(tmp, "wb");
     if (!fp) return HAL_EIO;
     if (fwrite(data, 1, len, fp) != len) { fclose(fp); remove(tmp); return HAL_EIO; }
-    fflush(fp);
+    /* fflush/fsync/fclose 任一失败都说明数据未必已落盘（介质写满、I/O 错误等），
+       绝不能继续走 rename——否则会把“写失败”报成 HAL_OK，掉电后凭据静默丢失
+       且调用方毫无察觉。对照 core/src/os.c 的 os_file_write_atomic，同样显式
+       检查 fflush 返回值。 */
+    if (fflush(fp) != 0) { fclose(fp); remove(tmp); return HAL_EIO; }
 #ifndef _WIN32
-    fsync(fileno(fp));
+    if (fsync(fileno(fp)) != 0) { fclose(fp); remove(tmp); return HAL_EIO; }
 #endif
-    fclose(fp);
+    if (fclose(fp) != 0) { remove(tmp); return HAL_EIO; }
 
 #ifndef _WIN32
     chmod(tmp, 0600);

@@ -257,6 +257,17 @@ static void test_crypto_ops(void)
 
     CHECK(gk_crypto_ops.secure_write(NULL, data, 1) == HAL_EINVAL, "NULL 键应为 EINVAL");
     CHECK(gk_crypto_ops.random(NULL, 8) == HAL_EINVAL, "NULL 缓冲应为 EINVAL");
+
+    /* 超长键名：字符集合合法（无 / \ ..），但拼出的路径会超过内部 256 字节
+       缓冲区。sec_path 必须检测 snprintf 截断并拒绝，否则两个仅尾部不同的
+       超长键会被截断成同一路径，造成键混淆/互相覆盖。 */
+    {
+        char long_key[300];
+        memset(long_key, 'a', sizeof(long_key) - 1);
+        long_key[sizeof(long_key) - 1] = '\0';
+        CHECK(gk_crypto_ops.secure_write(long_key, data, sizeof(data)) == HAL_EINVAL,
+              "超长键名应被拒绝（防止 snprintf 截断导致键混淆）");
+    }
 }
 
 static void test_read_file(void)
