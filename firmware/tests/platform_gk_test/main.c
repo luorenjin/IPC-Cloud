@@ -78,6 +78,46 @@ static void test_parse_cpuinfo(void)
     CHECK(strlen(tiny) < sizeof(tiny), "小缓冲区不得溢出");
 }
 
+#include "hal/hal_sys.h"
+extern const hal_sys_ops_t gk_sys_ops;
+void gk_sys_set_profile_platform(const char *id);
+
+static void test_sys_ops(void)
+{
+    hal_sys_info_t info;
+    hal_sys_stats_t st;
+    uint64_t t1, t2;
+
+    SECTION("sys_ops");
+
+    /* 单调时钟必须真的单调递增 */
+    t1 = gk_sys_ops.monotonic_us();
+    t2 = gk_sys_ops.monotonic_us();
+    CHECK(t1 > 0, "单调时钟不应为 0");
+    CHECK(t2 >= t1, "单调时钟必须非递减");
+
+    /* get_info 在任何平台都不得失败——解析不到就回退，绝不返回错误 */
+    gk_sys_set_profile_platform("gk7205v200");
+    memset(&info, 0, sizeof(info));
+    CHECK(gk_sys_ops.get_info(&info) == HAL_OK, "get_info 不得失败");
+    CHECK(info.platform_id[0] != '\0', "platform_id 不得为空");
+    CHECK(strcmp(info.platform_id, "gk7205v200") == 0,
+          "platform_id 应为注入值，实际 [%s]", info.platform_id);
+    CHECK(info.soc_name[0] != '\0', "soc_name 不得为空（解析失败时应回退）");
+    CHECK(info.hal_version == HAL_API_VERSION, "hal_version 应为 HAL_API_VERSION");
+
+    /* get_stats 同样不得因为 x86 上没有 /proc/meminfo 而失败 */
+    memset(&st, 0, sizeof(st));
+    CHECK(gk_sys_ops.get_stats(&st) == HAL_OK, "get_stats 不得失败");
+
+    CHECK(gk_sys_ops.get_info(NULL) == HAL_EINVAL, "NULL 应返回 EINVAL");
+    CHECK(gk_sys_ops.get_stats(NULL) == HAL_EINVAL, "NULL 应返回 EINVAL");
+
+    /* OTA 本期不支持，必须是 ENOTSUP 而非崩溃 */
+    CHECK(gk_sys_ops.ota_begin(0, 1024) == HAL_ENOTSUP, "ota_begin 应为 ENOTSUP");
+    CHECK(gk_sys_ops.ota_confirm() == HAL_ENOTSUP, "ota_confirm 应为 ENOTSUP");
+}
+
 static void test_read_file(void)
 {
     char buf[128];
@@ -132,6 +172,7 @@ int main(void)
     test_parse_meminfo();
     test_parse_uptime();
     test_parse_cpuinfo();
+    test_sys_ops();
     printf("RESULT: platform_gk pass=%d fail=%d\n", g_pass, g_fail);
     return g_fail;
 }
