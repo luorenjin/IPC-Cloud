@@ -47,12 +47,33 @@ static bool key_is_safe(const char *key)
     return true;
 }
 
+/* 逐级创建 dir 的每一段路径。真机 rootfs 打包时 /etc/ipc/sec 已预建
+   （Task 11 的 mkdir -p），但 hal_conformance 等测试直接以默认路径
+   "/etc/ipc/sec" 跑在一次性环境里，父目录 /etc/ipc 未必存在；
+   单层 mkdir 遇到缺失的父目录会直接失败，之后的 fopen 也会连带失败
+   （ENOENT），c_write 会把本应能成功的写入错误地报成 HAL_EIO。 */
 static void ensure_dir(void)
 {
+    char buf[HAL_PATH_MAX];
+    char *p;
+    size_t n = snprintf(buf, sizeof(buf), "%s", sec_dir());
+    if (n == 0 || n >= sizeof(buf)) return;
+
+    for (p = buf + 1; *p; p++) {
+        if (*p == '/' || *p == '\\') {
+            *p = '\0';
 #ifdef _WIN32
-    _mkdir(sec_dir());
+            _mkdir(buf);
 #else
-    mkdir(sec_dir(), 0700);
+            mkdir(buf, 0700);
+#endif
+            *p = '/';
+        }
+    }
+#ifdef _WIN32
+    _mkdir(buf);
+#else
+    mkdir(buf, 0700);
 #endif
 }
 

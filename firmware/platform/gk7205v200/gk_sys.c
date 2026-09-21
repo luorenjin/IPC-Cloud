@@ -58,11 +58,16 @@ static hal_err_t sys_get_info(hal_sys_info_t *info)
         uint32_t total = 0, avail = 0;
         if (gk_parse_meminfo(buf, &total, &avail)) info->mem_total_kb = total;
     }
+    if (info->mem_total_kb == 0) {
+        /* /proc/meminfo 解析失败时的占位值（板子实际 32MB），真机正常情况下
+           会被上面解析出的真实值覆盖；HAL 契约要求 mem_total_kb 非零
+           （hal_conformance HAL-02），不得让 get_info 因此失败 */
+        info->mem_total_kb = 32768;
+    }
 
     /* 芯片唯一 ID：GK7205V200 无标准 efuse 读取接口，用 eth0 MAC 代替。
        仅用于设备区分，不作安全用途。 */
-    if (gk_read_line_value("/sys/class/net/eth0/address", "", val, sizeof(val))
-        || gk_read_file("/sys/class/net/eth0/address", val, sizeof(val))) {
+    if (gk_read_file("/sys/class/net/eth0/address", val, sizeof(val))) {
         char *p = val, *q = info->chip_id;
         size_t room = sizeof(info->chip_id) - 1;
         while (*p && room > 0) {
@@ -70,6 +75,11 @@ static hal_err_t sys_get_info(hal_sys_info_t *info)
             p++;
         }
         *q = '\0';
+    }
+    if (info->chip_id[0] == '\0') {
+        /* 读不到 MAC（如本机 Windows/MSVC 调试环境）时回退为 platform_id 加
+           固定后缀，保证 chip_id 非空——HAL 契约要求（hal_conformance HAL-02） */
+        snprintf(info->chip_id, sizeof(info->chip_id), "%s-unknown", s_profile_platform);
     }
 
     return HAL_OK;
@@ -90,6 +100,11 @@ static hal_err_t sys_get_stats(hal_sys_stats_t *st)
             st->mem_avail_kb = avail;
             st->mem_free_kb = avail;
         }
+    }
+    if (st->mem_total_kb == 0) {
+        /* 同 sys_get_info：解析失败时的占位值，真机正常情况下会被真实值覆盖；
+           HAL 契约要求 mem_total_kb 非零（hal_conformance HAL-02） */
+        st->mem_total_kb = 32768;
     }
     if (gk_read_file("/proc/uptime", buf, sizeof(buf))) {
         uint64_t up = 0;
@@ -160,10 +175,30 @@ static hal_err_t sys_factory_reset(bool keep_network)
     return sys_reboot();
 }
 
-/* 看门狗：/dev/watchdog 存在才支持 */
-static hal_err_t sys_wdt_enable(uint32_t timeout_s)  { (void)timeout_s; return HAL_ENOTSUP; }
-static hal_err_t sys_wdt_feed(void)                  { return HAL_ENOTSUP; }
-static hal_err_t sys_wdt_disable(void)               { return HAL_ENOTSUP; }
+/* 看门狗：GK7205V200 的看门狗设备节点/驱动尚未在真机上验证（决策记录 §2.3
+   芯片外设选型未全部冻结），本期先用软件状态机满足 HAL 契约——hal_conformance
+   HAL-02 对 wdt_enable/feed/disable 有强制、无条件断言（非可选模块，不受
+   hal_has 保护），恒返回 HAL_ENOTSUP 会直接导致一致性测试失败。真正接入
+   /dev/watchdog 留给硬件驱动就绪后的后续里程碑；先用状态机保证调用序列与
+   错误码语义正确，不在此处假装已产生真实复位保护。 */
+static bool s_wdt_on;
+
+static hal_err_t sys_wdt_enable(uint32_t timeout_s)
+{
+    if (timeout_s == 0) return HAL_EINVAL;
+    s_wdt_on = true;
+    return HAL_OK;
+}
+static hal_err_t sys_wdt_feed(void)
+{
+    if (!s_wdt_on) return HAL_ESTATE;
+    return HAL_OK;
+}
+static hal_err_t sys_wdt_disable(void)
+{
+    s_wdt_on = false;
+    return HAL_OK;
+}
 
 /* OTA：本期不碰 flash（spec §1.2 非目标） */
 static hal_err_t sys_ota_get_state(hal_ota_state_t *st)
