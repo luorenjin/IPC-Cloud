@@ -175,30 +175,21 @@ static hal_err_t sys_factory_reset(bool keep_network)
     return sys_reboot();
 }
 
-/* 看门狗：GK7205V200 的看门狗设备节点/驱动尚未在真机上验证（决策记录 §2.3
-   芯片外设选型未全部冻结），本期先用软件状态机满足 HAL 契约——hal_conformance
-   HAL-02 对 wdt_enable/feed/disable 有强制、无条件断言（非可选模块，不受
-   hal_has 保护），恒返回 HAL_ENOTSUP 会直接导致一致性测试失败。真正接入
-   /dev/watchdog 留给硬件驱动就绪后的后续里程碑；先用状态机保证调用序列与
-   错误码语义正确，不在此处假装已产生真实复位保护。 */
-static bool s_wdt_on;
-
-static hal_err_t sys_wdt_enable(uint32_t timeout_s)
-{
-    if (timeout_s == 0) return HAL_EINVAL;
-    s_wdt_on = true;
-    return HAL_OK;
-}
-static hal_err_t sys_wdt_feed(void)
-{
-    if (!s_wdt_on) return HAL_ESTATE;
-    return HAL_OK;
-}
-static hal_err_t sys_wdt_disable(void)
-{
-    s_wdt_on = false;
-    return HAL_OK;
-}
+/* 看门狗：GK7205V200 的 /dev/watchdog 尚未在真机上验证（硬件驱动是否就绪、
+   设备节点路径均未确认），本期不提供看门狗能力，恒返回 HAL_ENOTSUP。
+   （Ruling 8）此前一度改成软件状态机让 wdt_enable/feed/disable 恒报告
+   HAL_OK 以凑 hal_conformance HAL-02 的断言，但 core/include/core/module.h
+   明确"模块置 FAILED 应触发看门狗"，Task 7 的主循环会据此调用
+   module_health_check——一个报告成功却从不复位设备的假看门狗，会让系统
+   误以为具备挂死恢复能力而实际没有，真出现挂死时反而永久失联。这与拒绝为
+   gk_sign 提供伪签名是同一条原则："伪造的能力会让上层误以为已具备该能力"。
+   hal_conformance 的 HAL-02 由此会新增 4 条已知失败（wdt_enable(0)->EINVAL
+   的参数校验、wdt_enable/feed/disable 的正常路径），已由控制者裁决为已知、
+   可接受的失败，不在本里程碑门禁范围内（见 Ruling 7）。真正接入
+   /dev/watchdog 留给硬件驱动就绪后的后续里程碑。 */
+static hal_err_t sys_wdt_enable(uint32_t timeout_s)  { (void)timeout_s; return HAL_ENOTSUP; }
+static hal_err_t sys_wdt_feed(void)                  { return HAL_ENOTSUP; }
+static hal_err_t sys_wdt_disable(void)               { return HAL_ENOTSUP; }
 
 /* OTA：本期不碰 flash（spec §1.2 非目标） */
 static hal_err_t sys_ota_get_state(hal_ota_state_t *st)
