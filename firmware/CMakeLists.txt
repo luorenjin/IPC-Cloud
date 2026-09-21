@@ -51,9 +51,16 @@ endforeach()
 
 enable_testing()
 add_subdirectory(tests/hal_conformance)
-add_subdirectory(tests/core_test)
-add_subdirectory(tests/http_server_test)
-add_subdirectory(tests/console_test)
+
+# core_test / console_test 硬编码加载 profiles/mock-x86.json（core_test/main.c:126、
+# console_test/main.c:1956），在非 mock 平台上取不到 profile 后会继续执行直至段错误。
+# 它们是 mock 平台专用测试，只在 mock 构建注册；非 mock 平台的通用层行为由 mock
+# 构建保证。http_server_test 一并归入，保持三者的运行环境一致。
+if(IPC_PLATFORM STREQUAL "mock")
+    add_subdirectory(tests/core_test)
+    add_subdirectory(tests/http_server_test)
+    add_subdirectory(tests/console_test)
+endif()
 
 if(IPC_PLATFORM STREQUAL "gk7205v200")
     add_subdirectory(tests/platform_gk_test)
