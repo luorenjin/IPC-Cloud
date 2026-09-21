@@ -160,6 +160,47 @@ static void test_net_ops(void)
     CHECK(gk_net_ops.poll_event(&evt, 0) == HAL_EAGAIN, "无事件应为 EAGAIN");
 }
 
+#include "hal/hal_storage.h"
+extern const hal_storage_ops_t gk_storage_ops;
+bool gk_find_mmc_mount(const char *mounts_content, char *dev, size_t dev_cap,
+                       char *path, size_t path_cap, char *fstype, size_t fs_cap);
+
+static void test_storage_ops(void)
+{
+    hal_storage_stat_t st;
+    char dev[64], path[128], fs[32];
+
+    SECTION("storage_ops");
+
+    /* 典型的已插卡 /proc/mounts */
+    const char *with_card =
+        "rootfs / rootfs rw 0 0\n"
+        "proc /proc proc rw,relatime 0 0\n"
+        "/dev/mmcblk0p1 /mnt/sd vfat rw,relatime 0 0\n";
+    CHECK(gk_find_mmc_mount(with_card, dev, sizeof(dev), path, sizeof(path), fs, sizeof(fs)),
+          "应找到 mmc 挂载");
+    CHECK(strcmp(path, "/mnt/sd") == 0, "挂载点实际为 [%s]", path);
+    CHECK(strcmp(fs, "vfat") == 0, "文件系统实际为 [%s]", fs);
+
+    /* 无卡：必须找不到，且不得误匹配 mmcblk 以外的设备 */
+    const char *no_card =
+        "rootfs / rootfs rw 0 0\n"
+        "/dev/mtdblock3 / jffs2 rw,relatime 0 0\n";
+    CHECK(!gk_find_mmc_mount(no_card, dev, sizeof(dev), path, sizeof(path), fs, sizeof(fs)),
+          "无卡时不应匹配");
+
+    /* stat 在无卡时必须返回 HAL_OK 且 present=false，不是错误 */
+    memset(&st, 0, sizeof(st));
+    CHECK(gk_storage_ops.stat(&st) == HAL_OK, "无卡时 stat 仍应返回 OK");
+    CHECK(st.present == false, "x86 上无 TF 卡，present 应为 false");
+
+    CHECK(gk_storage_ops.stat(NULL) == HAL_EINVAL, "NULL 应返回 EINVAL");
+    CHECK(gk_storage_ops.format(HAL_FS_FAT32) == HAL_ENOTSUP, "format 本期应为 ENOTSUP");
+
+    hal_storage_event_t evt;
+    CHECK(gk_storage_ops.poll_event(&evt, 0) == HAL_EAGAIN, "无事件应为 EAGAIN");
+}
+
 static void test_read_file(void)
 {
     char buf[128];
@@ -216,6 +257,7 @@ int main(void)
     test_parse_cpuinfo();
     test_sys_ops();
     test_net_ops();
+    test_storage_ops();
     printf("RESULT: platform_gk pass=%d fail=%d\n", g_pass, g_fail);
     return g_fail;
 }
