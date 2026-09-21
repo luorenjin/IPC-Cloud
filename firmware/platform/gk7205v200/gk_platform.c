@@ -4,9 +4,15 @@
  *
  * 结构与 platform/mock/mock_platform.c 一致。audio/osd/ivs 置 NULL
  * （hal.h 允许可选模块为 NULL）；video/gpio 为必选，用 ENOTSUP 桩填充。
+ *
+ * 不使用 core/json 做完整 JSON 解析（Ruling 11）：platform/ 是 HAL 分层
+ * 架构的 L0，core/ 是 L2，《IPC固件平台化架构_HAL适配方案.md》明确
+ * "依赖方向：L4 → L3 → L2 → L1 → L0，严格单向"——链 ipc_core 会构成
+ * L0 反向依赖 L2。这里只需要对 profile 的 identity.platform 做存在性/
+ * 一致性校验（见 gk_init 注释），strstr 的最小字符串检查足够，不需要
+ * 完整解析，做法与 platform/mock/mock_platform.c 的既有 strstr 检查一致。
  */
 #include "hal/hal.h"
-#include "core/json.h"
 #include <string.h>
 #include <stdio.h>
 
@@ -17,25 +23,23 @@ extern const hal_storage_ops_t gk_storage_ops;
 extern const hal_sys_ops_t     gk_sys_ops;
 extern const hal_crypto_ops_t  gk_crypto_ops;
 
-void gk_sys_set_profile_platform(const char *id);
-
 static bool g_inited;
 
 static hal_err_t gk_init(const char *profile_json)
 {
-    char err[128];
-    json_t *j;
-
     if (g_inited) return HAL_ESTATE;
     if (!profile_json) return HAL_EINVAL;
 
-    /* 从 profile 取 identity.platform，供 sys 在 cpuinfo 解析失败时回退。
-       解析失败不阻断启动——sys 自带默认值（spec §8 通用原则） */
-    j = json_parse(profile_json, 0, err, sizeof(err));
-    if (j) {
-        const char *plat = json_string(json_path(j, "identity.platform"), NULL);
-        if (plat) gk_sys_set_profile_platform(plat);
-        json_free(j);
+    /* platform_id 以平台自身为准，不从 profile 读取并注入（Ruling 9）：
+       gk_sys.c 的 chip_id/platform_id 一律用编译期常量 "gk7205v200"，
+       不受 profile 内容影响。这里只做一致性校验——profile 的
+       identity.platform 与本平台不符时打印告警但忽略，不阻断启动
+       （spec §8 通用原则），也不修改任何状态。这避免了"忘了传
+       -DIPC_PROFILE 落到默认 mock-x86.json"这类配置失误让设备把自己
+       上报成别的平台（曾经的实现是用 profile 的值覆盖 platform_id，
+       构成一个真实的身份污染缺陷）。 */
+    if (strstr(profile_json, "\"platform\"") && !strstr(profile_json, "\"gk7205v200\"")) {
+        fprintf(stderr, "[gk7205v200] 警告：profile.identity.platform 与本平台不一致，已忽略\n");
     }
 
     g_inited = true;

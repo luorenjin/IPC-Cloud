@@ -23,7 +23,15 @@
 #include <sys/reboot.h>
 #endif
 
-/* profile 中的 identity.platform，cpuinfo 解析失败时作为回退值 */
+/* 平台标识常量，用于 platform_id/soc_name/chip_id 的回退值。曾经由
+   gk_platform.c 在 init 时从 profile 的 identity.platform 注入，但那样
+   会让配错的 profile（如忘了传 -DIPC_PROFILE 而落到默认 mock-x86.json）
+   污染设备身份（Ruling 9）——真机会把自己上报成 "mock"。现在
+   gk_platform.c 只对 profile 做一致性校验（不符就告警、不采用），
+   platform_id 恒为本平台自身值，不再被外部注入。
+   gk_sys_set_profile_platform 仍保留（Task 2 声明的产物接口），供
+   tests/platform_gk_test/main.c 在不经过 gk_platform.c 的情况下单独
+   测试 gk_sys_ops；生产路径不再调用它。 */
 static char s_profile_platform[HAL_NAME_MAX] = "gk7205v200";
 
 void gk_sys_set_profile_platform(const char *id)
@@ -61,7 +69,12 @@ static hal_err_t sys_get_info(hal_sys_info_t *info)
     if (info->mem_total_kb == 0) {
         /* /proc/meminfo 解析失败时的占位值（板子实际 32MB），真机正常情况下
            会被上面解析出的真实值覆盖；HAL 契约要求 mem_total_kb 非零
-           （hal_conformance HAL-02），不得让 get_info 因此失败 */
+           （hal_conformance HAL-02），不得让 get_info 因此失败。
+           不用 core/log（分层约束，platform/ 不得反向依赖 core/，见
+           gk_platform.c 的说明），改用 fprintf(stderr, ...)，串口上一样
+           看得见，与 platform/mock/mock_platform.c 的既有做法一致——
+           "失败不阻断启动"不等于"失败不留痕"。 */
+        fprintf(stderr, "[gk7205v200] 警告：/proc/meminfo 解析失败，mem_total_kb 使用占位值 32768\n");
         info->mem_total_kb = 32768;
     }
 
@@ -79,6 +92,7 @@ static hal_err_t sys_get_info(hal_sys_info_t *info)
     if (info->chip_id[0] == '\0') {
         /* 读不到 MAC（如本机 Windows/MSVC 调试环境）时回退为 platform_id 加
            固定后缀，保证 chip_id 非空——HAL 契约要求（hal_conformance HAL-02） */
+        fprintf(stderr, "[gk7205v200] 警告：读取 eth0 MAC 失败，chip_id 使用占位值\n");
         snprintf(info->chip_id, sizeof(info->chip_id), "%s-unknown", s_profile_platform);
     }
 
@@ -103,8 +117,14 @@ static hal_err_t sys_get_stats(hal_sys_stats_t *st)
     }
     if (st->mem_total_kb == 0) {
         /* 同 sys_get_info：解析失败时的占位值，真机正常情况下会被真实值覆盖；
-           HAL 契约要求 mem_total_kb 非零（hal_conformance HAL-02） */
+           HAL 契约要求 mem_total_kb 非零（hal_conformance HAL-02）。
+           mem_avail_kb/mem_free_kb 同步给一个非零占位（total 的一半），
+           而不是留 0——留 0 会让 console 状态页把"数据缺失"误显示成
+           "内存 100% 占用"，比显示一个粗略估计值更误导。 */
+        fprintf(stderr, "[gk7205v200] 警告：/proc/meminfo 解析失败，mem_total/avail/free_kb 使用占位值\n");
         st->mem_total_kb = 32768;
+        st->mem_avail_kb = 32768 / 2;
+        st->mem_free_kb = 32768 / 2;
     }
     if (gk_read_file("/proc/uptime", buf, sizeof(buf))) {
         uint64_t up = 0;
