@@ -3,6 +3,10 @@ build*/
 *.log
 mock_state/
 
+# platform_gk_test 的安全存储沙箱（IPC_SEC_DIR 注入的测试目录，测试内会
+# 自行清理，这里作为兜底避免中途失败时残留文件被误提交）
+gk_test_sec/
+
 # IDE
 .vs/
 .vscode/

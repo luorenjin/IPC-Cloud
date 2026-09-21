@@ -201,6 +201,64 @@ static void test_storage_ops(void)
     CHECK(gk_storage_ops.poll_event(&evt, 0) == HAL_EAGAIN, "无事件应为 EAGAIN");
 }
 
+#include "hal/hal_crypto.h"
+extern const hal_crypto_ops_t gk_crypto_ops;
+
+static void test_crypto_ops(void)
+{
+    uint8_t buf[64], r1[32], r2[32];
+    size_t len = 0;
+    bool exists = false;
+
+    SECTION("crypto_ops");
+
+    /* 测试期间把存储根目录指向当前目录，避免写 /etc */
+#ifdef _WIN32
+    _putenv_s("IPC_SEC_DIR", "gk_test_sec");
+#else
+    setenv("IPC_SEC_DIR", "gk_test_sec", 1);
+#endif
+
+    /* 写入后应能原样读回 */
+    const uint8_t data[] = { 0x01, 0x02, 0x03, 0x04 };
+    CHECK(gk_crypto_ops.secure_write("test_key", data, sizeof(data)) == HAL_OK, "写入应成功");
+    CHECK(gk_crypto_ops.secure_exists("test_key", &exists) == HAL_OK && exists,
+          "写入后 exists 应为 true");
+    memset(buf, 0, sizeof(buf));
+    CHECK(gk_crypto_ops.secure_read("test_key", buf, sizeof(buf), &len) == HAL_OK, "读取应成功");
+    CHECK(len == sizeof(data) && memcmp(buf, data, sizeof(data)) == 0, "内容应一致");
+
+    /* 覆盖写必须完整替换，不得残留旧内容尾部 */
+    const uint8_t shorter[] = { 0xAA };
+    CHECK(gk_crypto_ops.secure_write("test_key", shorter, 1) == HAL_OK, "覆盖写应成功");
+    CHECK(gk_crypto_ops.secure_read("test_key", buf, sizeof(buf), &len) == HAL_OK, "再次读取");
+    CHECK(len == 1 && buf[0] == 0xAA, "覆盖写后长度应为 1，实际 %u", (unsigned)len);
+
+    CHECK(gk_crypto_ops.secure_delete("test_key") == HAL_OK, "删除应成功");
+    CHECK(gk_crypto_ops.secure_exists("test_key", &exists) == HAL_OK && !exists,
+          "删除后 exists 应为 false");
+    CHECK(gk_crypto_ops.secure_read("test_key", buf, sizeof(buf), &len) == HAL_ENODEV,
+          "读取不存在的键应为 ENODEV");
+
+    /* 私钥不可读（hal_crypto.h 契约，hal_conformance 也会校验） */
+    CHECK(gk_crypto_ops.secure_read(HAL_SEC_KEY_DEVICE_KEY, buf, sizeof(buf), &len) == HAL_ENOTSUP,
+          "设备私钥必须不可读");
+
+    /* 路径穿越必须被拒绝，否则可写任意文件 */
+    CHECK(gk_crypto_ops.secure_write("../escape", data, sizeof(data)) == HAL_EINVAL,
+          "路径穿越应被拒绝");
+    CHECK(gk_crypto_ops.secure_write("a/b", data, sizeof(data)) == HAL_EINVAL,
+          "含斜杠的键应被拒绝");
+
+    /* 随机数必须不同——鉴权挑战值的不可预测性依赖它 */
+    CHECK(gk_crypto_ops.random(r1, sizeof(r1)) == HAL_OK, "random 应成功");
+    CHECK(gk_crypto_ops.random(r2, sizeof(r2)) == HAL_OK, "random 应成功");
+    CHECK(memcmp(r1, r2, sizeof(r1)) != 0, "两次随机数不应相同");
+
+    CHECK(gk_crypto_ops.secure_write(NULL, data, 1) == HAL_EINVAL, "NULL 键应为 EINVAL");
+    CHECK(gk_crypto_ops.random(NULL, 8) == HAL_EINVAL, "NULL 缓冲应为 EINVAL");
+}
+
 static void test_read_file(void)
 {
     char buf[128];
@@ -258,6 +316,7 @@ int main(void)
     test_sys_ops();
     test_net_ops();
     test_storage_ops();
+    test_crypto_ops();
     printf("RESULT: platform_gk pass=%d fail=%d\n", g_pass, g_fail);
     return g_fail;
 }
