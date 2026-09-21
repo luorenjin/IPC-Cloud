@@ -55,4 +55,8 @@ add_subdirectory(tests/core_test)
 add_subdirectory(tests/http_server_test)
 add_subdirectory(tests/console_test)
 
+if(IPC_PLATFORM STREQUAL "gk7205v200")
+    add_subdirectory(tests/platform_gk_test)
+endif()
+
 message(STATUS "IPC_PLATFORM=${IPC_PLATFORM}  IPC_PROFILE=${IPC_PROFILE}")
