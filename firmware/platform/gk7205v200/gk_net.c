@@ -121,11 +121,9 @@ static hal_err_t net_wifi_connect(const char *ssid, const char *psk, hal_wifi_se
     (void)ssid; (void)psk; (void)sec; return HAL_ENOTSUP;
 }
 static hal_err_t net_wifi_disconnect(void) { return HAL_ENOTSUP; }
-static hal_err_t net_wifi_ap_start(const char *ssid, const char *psk, uint8_t ch)
-{
-    (void)ssid; (void)psk; (void)ch; return HAL_ENOTSUP;
-}
-static hal_err_t net_wifi_ap_stop(void) { return HAL_ENOTSUP; }
+/* AP（热点）模式为可选能力：本平台不实现，函数表中对应指针置 NULL，
+   并在 net_get_caps 中同步置 wifi_ap=false——两者必须一致，这是
+   hal_net.h 明文约定的契约（hal_conformance 的 HAL-07 会校验）。 */
 
 static hal_err_t net_poll_event(hal_net_event_t *evt, uint32_t timeout_ms)
 {
@@ -143,7 +141,7 @@ const hal_net_ops_t gk_net_ops = {
     net_wifi_scan,
     net_wifi_connect,
     net_wifi_disconnect,
-    net_wifi_ap_start,
-    net_wifi_ap_stop,
+    NULL,   /* wifi_ap_start：不支持，caps.wifi_ap 已置 false */
+    NULL,   /* wifi_ap_stop */
     net_poll_event
 };
