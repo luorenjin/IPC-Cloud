@@ -7,8 +7,11 @@ target_include_directories(ipc_http_server PUBLIC ${CMAKE_SOURCE_DIR})
 target_link_libraries(ipc_http_server PUBLIC ipc_hal ipc_core)
 
 # IPC_TESTING：编译进 http_ws_test_conn_new 等测试桩函数（定义见 http_ws.c）。
-# 生产构建应移除该定义；后续可考虑改用 option(IPC_BUILD_TESTING ...) 收敛控制。
-target_compile_definitions(ipc_http_server PUBLIC IPC_TESTING)
+# 只在测试构建（顶层 enable_testing() 会置位 BUILD_TESTING）下生效，
+# 生产固件不应带上——测试桩暴露内部函数，不是生产该有的攻击面。
+if(BUILD_TESTING)
+    target_compile_definitions(ipc_http_server PUBLIC IPC_TESTING)
+endif()
 
 # Windows 下 socket API（WSAStartup/socket/bind/...）由 ws2_32 提供；PUBLIC 是因为
 # http_server_test 需要在测试里发起真实 client 端 socket 连接，借由链接

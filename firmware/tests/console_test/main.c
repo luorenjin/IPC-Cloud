@@ -6,6 +6,7 @@
  * 退出码 = 失败数。
  */
 #include "modules/console/console_internal.h"
+#include "modules/console/console_assets.h"
 #include "core/config.h"
 #include "core/profile.h"
 #include "core/json.h"
@@ -2257,6 +2258,31 @@ static void test_net_connect_handler_order(void)
     console_net_test_reset();
 }
 
+static void test_static_assets(void)
+{
+    const console_asset_t *a;
+
+    SECTION("static_assets");
+
+    /* 首页必须存在，否则浏览器打开是空白 */
+    a = console_asset_find("/index.html");
+    CHECK(a != NULL, "/index.html 应存在");
+    if (a) {
+        CHECK(a->len > 0, "内容不得为空");
+        CHECK(a->gzipped == 1, "应为 gzip 压缩");
+        CHECK(a->etag && a->etag[0], "ETag 不得为空");
+        CHECK(strstr(a->content_type, "text/html") != NULL,
+              "content_type 实际为 [%s]", a->content_type);
+        /* gzip 魔数 0x1f 0x8b */
+        CHECK(a->data[0] == 0x1f && a->data[1] == 0x8b, "应有 gzip 魔数");
+    }
+
+    CHECK(console_asset_find("/app.js") != NULL, "/app.js 应存在");
+    CHECK(console_asset_find("/style.css") != NULL, "/style.css 应存在");
+    CHECK(console_asset_find("/no_such_file") == NULL, "不存在的资源应返回 NULL");
+    CHECK(console_asset_find(NULL) == NULL, "NULL 应返回 NULL");
+}
+
 int main(void)
 {
     if (profile_load("profiles/mock-x86.json") != HAL_OK) {
@@ -2311,6 +2337,7 @@ int main(void)
     test_net_wifi_connect_endpoint();
     test_net_wifi_no_capability();
     test_net_connect_handler_order();
+    test_static_assets();
 
     printf("RESULT: console pass=%d fail=%d\n", g_pass, g_fail);
     return g_fail;

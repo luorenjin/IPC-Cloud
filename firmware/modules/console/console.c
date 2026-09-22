@@ -73,6 +73,8 @@ static hal_err_t console_init(void)
     if ((e = console_auth_init()) != HAL_OK) return e;
     if ((e = console_api_init()) != HAL_OK) return e;
     if ((e = console_net_init()) != HAL_OK) return e;
+    /* 兜底路由最后注册，避免遮蔽上面的 API 路由 */
+    if ((e = console_static_init()) != HAL_OK) return e;
     s_routes_registered = true;
     return HAL_OK;
 }

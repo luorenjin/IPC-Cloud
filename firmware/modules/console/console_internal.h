@@ -30,6 +30,10 @@ const char *console_err_msg(hal_err_t e);
 /* 各子模块的路由注册入口（在 console_init 中调用） */
 hal_err_t console_auth_init(void);
 hal_err_t console_api_init(void);
+/** 注册 "/" 兜底路由，暴露 Task 9 内嵌的前端静态资源（console_assets.c）。
+ *  必须在其余路由注册之后调用——route_lookup 虽是最长前缀匹配，不依赖
+ *  注册顺序，但把兜底路由放在最后仍是防御性写法，可读性也更好。 */
+hal_err_t console_static_init(void);
 
 /* ---- 鉴权 ---- */
 #define CONSOLE_SALT_LEN     16

@@ -4,6 +4,7 @@ add_library(ipc_console STATIC
     console_api.c
     console_net.c
     console_assets.c
+    console_static.c
 )
 target_include_directories(ipc_console PUBLIC ${CMAKE_SOURCE_DIR})
 target_link_libraries(ipc_console PUBLIC ipc_hal ipc_core ipc_http_server)
