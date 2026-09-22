@@ -602,14 +602,19 @@ static void test_activation_bootstrap(void)
     CHECK(console_auth_verify_from("admin", nonce, proof, "172.16.0.5") == HAL_EPERM_,
           "安全存储里的验证码不再能登录，不得静默放行");
 
-    /* 弱口令激活被拒，不改变激活状态 */
+    /* 弱口令激活被拒，不改变激活状态。评审 Ruling 18 之后 /auth/activate 要求
+       Content-Type: application/json，否则会在到达密码强度校验之前就被 CSRF
+       网关拒绝——这里补上该头，确保本用例仍然在校验"弱口令"这条路径，而不是
+       巧合地撞上同一个 HAL_EINVAL。 */
     req_make(&req, "POST", "/api/v1/auth/activate", "{\"password\":\"short\"}", NULL);
+    req_add_header(&req, "Content-Type", "application/json");
     CHECK(console_auth_test_dispatch(&req, "172.16.0.5", body, sizeof(body),
                                      set_cookie, sizeof(set_cookie)) == HAL_EINVAL,
           "弱口令激活被拒");
 
-    /* 首次激活：用户自行设置密码 */
+    /* 首次激活：用户自行设置密码（同样需要 Content-Type 才能通过 Ruling 18 的网关） */
     req_make(&req, "POST", "/api/v1/auth/activate", "{\"password\":\"ActivatePwd1\"}", NULL);
+    req_add_header(&req, "Content-Type", "application/json");
     CHECK(console_auth_test_dispatch(&req, "172.16.0.5", body, sizeof(body),
                                      set_cookie, sizeof(set_cookie)) == HAL_OK,
           "首次激活成功");
@@ -630,8 +635,11 @@ static void test_activation_bootstrap(void)
     CHECK(console_auth_verify_from("admin", nonce, proof, "172.16.0.5") == HAL_OK,
           "用户自设的激活口令可直接登录，且无需先改密");
 
-    /* 安全红线：已激活设备拒绝重复激活，否则任何人都能在局域网内重置密码 */
+    /* 安全红线：已激活设备拒绝重复激活，否则任何人都能在局域网内重置密码。
+       带上 Content-Type 让请求越过 Ruling 18 网关，真正测到 HAL_ESTATE 这条
+       "已激活"判定，而不是被 CSRF 检查提前短路成 HAL_EINVAL。 */
     req_make(&req, "POST", "/api/v1/auth/activate", "{\"password\":\"AnotherPwd2\"}", NULL);
+    req_add_header(&req, "Content-Type", "application/json");
     CHECK(console_auth_test_dispatch(&req, "172.16.0.6", body, sizeof(body),
                                      set_cookie, sizeof(set_cookie)) == HAL_ESTATE,
           "已激活设备拒绝重复激活");
@@ -683,8 +691,11 @@ static void test_corrupt_cred_not_reset(void)
     CHECK(body_flag(body, "activated", false) == true,
           "损坏记录必须算作已占用，不得让前端展示激活页，实际：%s", body);
 
-    /* 2) activate 必须被拒——不得用任意密码把设备"救活"，等于远程可任意重置 */
+    /* 2) activate 必须被拒——不得用任意密码把设备"救活"，等于远程可任意重置。
+       带上 Content-Type 以越过 Ruling 18 网关，确保测到的是"损坏记录拒绝"
+       这条 HAL_ESTATE 判定本身，而非提前被 CSRF 检查短路。 */
     req_make(&req, "POST", "/api/v1/auth/activate", "{\"password\":\"Attacker@123\"}", NULL);
+    req_add_header(&req, "Content-Type", "application/json");
     CHECK(console_auth_test_dispatch(&req, "172.16.0.7", body, sizeof(body),
                                      set_cookie, sizeof(set_cookie)) == HAL_ESTATE,
           "损坏记录下 activate 必须拒绝");

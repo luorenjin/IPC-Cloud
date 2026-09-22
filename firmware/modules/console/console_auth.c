@@ -41,6 +41,7 @@
 #include "core/log.h"
 #include "core/os.h"
 #include "hal/hal.h"
+#include <ctype.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1235,6 +1236,63 @@ static hal_err_t cookie_get(const char *hdr, const char *name, char *out, size_t
     return HAL_ENODEV;
 }
 
+/** 大小写不敏感的前缀匹配：Content-Type 形如 "application/json; charset=utf-8"，
+ *  只需匹配前缀，且 HTTP 头字段值理论上不区分大小写。不是敏感数据，无需恒定时间。 */
+static bool ci_starts_with(const char *s, const char *prefix)
+{
+    if (!s || !prefix) return false;
+    while (*prefix) {
+        if (!*s || tolower((unsigned char)*s) != tolower((unsigned char)*prefix)) return false;
+        s++; prefix++;
+    }
+    return true;
+}
+
+/** 大小写不敏感的整串比较：RFC 3986 authority（含域名）本身不区分大小写；
+ *  同样不是敏感数据。 */
+static bool ci_str_equal(const char *a, const char *b)
+{
+    if (!a || !b) return false;
+    while (*a && *b) {
+        if (tolower((unsigned char)*a) != tolower((unsigned char)*b)) return false;
+        a++; b++;
+    }
+    return *a == '\0' && *b == '\0';
+}
+
+/** 从 Origin 头（形如 "http://host[:port]"）里取出 authority（host[:port]）部分，
+ *  与 Host 头直接比较。Origin 头本身不带路径，但仍防御性地在首个 '/' 处截断。
+ *  找不到 "://" 视为格式错误（HAL_EINVAL），authority 为空或超出 cap 同样如此。 */
+static hal_err_t origin_authority(const char *origin, char *out, size_t cap)
+{
+    const char *p, *start, *end;
+    size_t len;
+
+    if (!origin || !out || cap == 0) return HAL_EINVAL;
+    p = strstr(origin, "://");
+    if (!p) return HAL_EINVAL;
+    start = p + 3;
+    end = start;
+    while (*end && *end != '/') end++;
+    len = (size_t)(end - start);
+    if (len == 0 || len >= cap) return HAL_EINVAL;
+    memcpy(out, start, len);
+    out[len] = '\0';
+    return HAL_OK;
+}
+
+/**
+ * 判断请求的 Origin 头与 Host 头是否同源（评审 Ruling 18 用）。
+ * Origin 缺失或格式错误、或其 authority 与 Host 头不一致，返回 false。
+ */
+static bool same_origin(const char *origin, const char *host)
+{
+    char auth[256];
+    if (!origin || !host || !host[0]) return false;
+    if (origin_authority(origin, auth, sizeof(auth)) != HAL_OK) return false;
+    return ci_str_equal(auth, host);
+}
+
 /** 强制改密期间仍可访问的路径：鉴权端点本身与设备信息（前端渲染菜单要用） */
 static bool path_exempt_from_must_change(const char *path)
 {
@@ -1555,6 +1613,53 @@ static hal_err_t auth_dispatch(const http_req_t *req, const char *ip_override,
     } else if (strcmp(req->method, "POST") != 0) {
         return HAL_EINVAL;
     }
+
+    /*
+     * 评审 Ruling 18（C-1）：/api/v1/auth/activate 专属的 CSRF 加固。
+     *
+     * 其余写操作端点（login/password/logout）鉴权都建立在已有会话 Cookie
+     * （`SameSite=Strict`）之上，跨站请求天然带不上那个 Cookie；但
+     * activate 恰恰发生在**还没有任何会话**的时刻——设备刚开箱、没有凭据，
+     * SameSite Cookie 这层防线在这里不存在。若攻击者诱导受害者的浏览器
+     * （在同一局域网内）访问一个恶意页面，页面用隐藏表单自动 POST 到
+     * 设备的 /api/v1/auth/activate，就能抢在受害者之前把设备激活成攻击者
+     * 自己的口令——单纯"要求 POST"挡不住这个，跨站表单一样能发 POST。
+     *
+     * 因此叠加两层：
+     *  1) Content-Type 必须以 application/json 开头：浏览器原生 <form>
+     *     的 POST 只能发 application/x-www-form-urlencoded / multipart/
+     *     form-data / text/plain 之一，发不出 application/json（除非显式
+     *     用 JS fetch/XHR 设置头部——那正是下面第 2 层要处理的场景），
+     *     天然挡掉最简单的隐藏表单攻击。
+     *  2) Origin 与 Host 同源校验，且**只在 Origin 头存在时才校验**——
+     *     **提交前已核实这条规则不会误伤同源前端请求**：现代浏览器
+     *     （Fetch 标准）对同源的 fetch/XHR POST 请求**同样会带 Origin 头**，
+     *     不是只有跨源请求才带；OWASP CSRF Prevention Cheat Sheet 的
+     *     "Verifying Origin with Standard Headers" 一节正是基于这个前提，
+     *     建议服务端在 Origin 存在时校验其与 Host 是否一致，而不是"存在
+     *     Origin 就拒绝"。若直接实现成后者，会把 Task 9 前端激活页自己的
+     *     合法同源请求一起拒绝掉。故规则是：Origin 存在且与 Host 不同源
+     *     → 拒绝（HAL_EPERM_ → 403）；Origin 不存在（老旧客户端、curl、
+     *     部分非浏览器 HTTP 客户端）不受这层限制，仍受第 1 层与
+     *     "仅从未配置时可用"的状态判据约束。
+     *     （说明：本环境内 curl 之类的命令行工具不会重现浏览器 fetch/XHR
+     *     的 Origin 附带行为——Origin 的自动附带是浏览器实现的行为契约，
+     *     不是 HTTP 协议本身或 curl 会做的事，无法用 curl 直接复现"验证"；
+     *     上述结论引自 Fetch 标准与 OWASP 的既有文档，不是本次在本机用
+     *     curl 实测浏览器得出的。）
+     */
+    if (strcmp(sub, "activate") == 0) {
+        const char *ctype = http_header(req, "Content-Type");
+        const char *origin = http_header(req, "Origin");
+        const char *host = http_header(req, "Host");
+
+        if (!ci_starts_with(ctype, "application/json")) return HAL_EINVAL;
+        if (origin && origin[0] && !same_origin(origin, host)) {
+            LOGW(MOD, "拒绝激活请求：Origin 与 Host 不同源（疑似跨站请求伪造）");
+            return HAL_EPERM_;
+        }
+    }
+
     if (req->body_len > CONSOLE_BODY_MAX) return HAL_EINVAL;
     if (req->body_len) {
         j = json_parse(req->body, req->body_len, NULL, 0);
