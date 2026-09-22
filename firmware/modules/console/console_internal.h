@@ -12,6 +12,13 @@
 #define HAL_EPERM_        (-100)
 /** 未登录（区别于已登录但权限不足） */
 #define HAL_EUNAUTH_      (-101)
+/**
+ * 评审 M-4：/auth/activate 的 CSRF 网关（Ruling 18）拒绝请求时不复用
+ * HAL_EPERM_——后者固定文案"无权限：请先修改初始密码"，但 CSRF 拒绝只可能
+ * 发生在设备**从未激活**、根本不存在"初始密码"这一概念的时刻，沿用该文案
+ * 会误导用户去找一个不存在的初始密码。单独定义一个错误码，配独立文案。
+ */
+#define HAL_ECSRF_        (-102)
 
 /** hal_err_t → HTTP 状态码 */
 int console_http_status(hal_err_t e);

@@ -20,6 +20,7 @@ extern const hal_sys_ops_t     mock_sys_ops;
 extern const hal_crypto_ops_t  mock_crypto_ops;
 
 void mock_sys_boot(void);
+void mock_state_ensure_dir(void);
 
 static bool g_inited;
 
@@ -32,6 +33,11 @@ static hal_err_t mock_init(const char *profile_json)
         fprintf(stderr, "[mock] warning: profile.identity.platform is not \"mock\"\n");
     }
     mock_sys_boot();
+    /* 评审 I-3：幂等预建 mock_state 目录（该目录未随仓库签入，见
+       firmware/.gitignore），建立"平台初始化完成之后目录必然存在"的
+       恒定前提，让 mock_sys.c 的 c_read 能把"目录整体缺失"（HAL_EIO）
+       与"目录在但 key 未写过"（HAL_ENODEV，真未配置）区分开。 */
+    mock_state_ensure_dir();
     g_inited = true;
     return HAL_OK;
 }

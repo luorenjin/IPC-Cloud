@@ -23,6 +23,7 @@ int console_http_status(hal_err_t e)
     case HAL_EINVAL:    return 400;
     case HAL_EUNAUTH_:  return 401;
     case HAL_EPERM_:    return 403;
+    case HAL_ECSRF_:    return 403;
     case HAL_ENODEV:    return 404;
     case HAL_EBUSY:     return 409;
     /* 已激活设备再次调用 /api/v1/auth/activate 等状态冲突场景，与 EBUSY 同归 409：
@@ -41,6 +42,7 @@ const char *console_err_msg(hal_err_t e)
     case HAL_EINVAL:    return "参数非法";
     case HAL_EUNAUTH_:  return "未登录或会话已过期";
     case HAL_EPERM_:    return "无权限：请先修改初始密码";
+    case HAL_ECSRF_:    return "请求被拒绝：来源校验未通过，请在设备本机页面完成激活";
     case HAL_ENODEV:    return "资源不存在";
     case HAL_EBUSY:     return "资源被占用，请稍后重试";
     case HAL_ESTATE:    return "当前状态不允许该操作";

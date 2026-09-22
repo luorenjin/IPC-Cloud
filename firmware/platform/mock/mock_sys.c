@@ -12,12 +12,12 @@
 #include <string.h>
 #include <stdlib.h>
 #include <limits.h>
+#include <sys/stat.h>
 
 #ifdef _WIN32
 #  include <direct.h>
 #  define MKDIR(p) _mkdir(p)
 #else
-#  include <sys/stat.h>
 #  define MKDIR(p) mkdir(p, 0700)
 #endif
 
@@ -41,6 +41,25 @@ static int   g_ota_slot = -1;
 static uint32_t g_ota_total, g_ota_written;
 
 static void ensure_dir(void) { MKDIR(STATE_DIR); }
+
+/* 评审 I-3：与 gk_crypto.c 的 sec_dir_exists() 同一用途——c_read 用它区分
+   "整个 mock_state 目录都不在"（HAL_EIO，模拟分区未挂载）与"目录在但这个
+   key 从未写过"（HAL_ENODEV，真未配置）。 */
+static bool sec_dir_exists(void)
+{
+    struct stat st;
+    if (stat(STATE_DIR, &st) != 0) return false;
+    return (st.st_mode & S_IFDIR) != 0;
+}
+
+/* 供 mock_platform.c 的 mock_init() 在平台初始化时调用一次，幂等预建
+   mock_state 目录——与 gk_crypto_ensure_dir() 对称，建立"平台初始化完成
+   之后目录必然存在"的恒定前提，让首次运行（mock_state/ 未随仓库签入，见
+   .gitignore）也不会被 c_read 的目录探测误判为"分区未挂载"。 */
+void mock_state_ensure_dir(void)
+{
+    ensure_dir();
+}
 
 static void ota_state_save(void)
 {
@@ -246,8 +265,17 @@ static hal_err_t c_read(const char *key, uint8_t *buf, size_t cap, size_t *len)
         /* 评审 Ruling 19（C-2）：与 gk_crypto.c 的 c_read 同一处理——区分
            ENOENT（真未播种，HAL_ENODEV）与其它 fopen 失败（HAL_EIO），
            不再把"文件被替换成同名目录"等场景误判为"从未配置"。errno 必须
-           紧跟 fopen 失败立即读取。 */
-        return (errno == ENOENT) ? HAL_ENODEV : HAL_EIO;
+           紧跟 fopen 失败立即读取。
+
+           评审 I-3：ENOENT 进一步区分"目录在、文件没写过"（真未配置）与
+           "整个 mock_state 目录都不在"（初始化后被删，等同分区未挂载，
+           必须 fail-closed 为 HAL_EIO）。mock_init 已通过
+           mock_state_ensure_dir() 幂等预建过目录，正常运行中目录应恒定
+           存在。 */
+        if (errno == ENOENT) {
+            return sec_dir_exists() ? HAL_ENODEV : HAL_EIO;
+        }
+        return HAL_EIO;
     }
     n = fread(buf, 1, cap, fp);
     fclose(fp);

@@ -22,6 +22,7 @@ extern const hal_net_ops_t     gk_net_ops;
 extern const hal_storage_ops_t gk_storage_ops;
 extern const hal_sys_ops_t     gk_sys_ops;
 extern const hal_crypto_ops_t  gk_crypto_ops;
+extern void gk_crypto_ensure_dir(void);
 
 static bool g_inited;
 
@@ -41,6 +42,13 @@ static hal_err_t gk_init(const char *profile_json)
     if (strstr(profile_json, "\"platform\"") && !strstr(profile_json, "\"gk7205v200\"")) {
         fprintf(stderr, "[gk7205v200] 警告：profile.identity.platform 与本平台不一致，已忽略\n");
     }
+
+    /* 评审 I-3：幂等预建安全存储目录，建立"固件运行起来之后目录必然存在"
+       的恒定前提——真机 rootfs 打包（Task 11）理论上也会做这件事，这里
+       是双保险，确保即使打包步骤遗漏，gk_crypto.c 的 c_read 仍能正确把
+       "目录整体缺失"（此刻探测不到 → 分区未挂载/被删，HAL_EIO）与
+       "目录在但 key 未写过"（HAL_ENODEV，真未配置）区分开。 */
+    gk_crypto_ensure_dir();
 
     g_inited = true;
     return HAL_OK;

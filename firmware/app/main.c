@@ -183,9 +183,13 @@ int main(int argc, char **argv)
 fail_modules:
     module_stop_all();
 fail_event_bus:
-    /* event_bus_deinit 在总线未初始化时安全返回 HAL_ESTATE（不会崩溃，见
-       core/event_bus.c 对 g.inited 的判断），因此即便是从 event_bus_init 自身
-       失败的分支 goto 过来，这里也可以无脑调用，不需要额外判断是否已初始化。 */
+    /* 评审 M-6 订正：这里只会被 event_bus_init 成功之后的后续步骤
+       （module_register/module_start_all/http_server_start）失败带到——
+       event_bus_init 自身失败时直接 goto fail_cfg，跳过本标签，因为那时
+       总线根本没有初始化成功，无需释放。走到这里时事件总线必然已处于
+       已初始化态，是正常的成对释放，不存在"总线未初始化时被调用"这种
+       分支（此前的注释误以为 event_bus_init 自身失败也会 goto 到这里，
+       与实际控制流不符）。 */
     event_bus_deinit();
 fail_cfg:
     cfg_deinit();

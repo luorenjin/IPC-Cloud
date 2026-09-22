@@ -29,6 +29,7 @@ static void test_err_mapping(void)
     CHECK(console_http_status(HAL_OK)       == 200, "OK→200");
     CHECK(console_http_status(HAL_EINVAL)   == 400, "EINVAL→400");
     CHECK(console_http_status(HAL_EPERM_)   == 403, "EPERM→403");
+    CHECK(console_http_status(HAL_ECSRF_)   == 403, "ECSRF→403（评审 M-4：CSRF 拒绝专属错误码）");
     CHECK(console_http_status(HAL_ENODEV)   == 404, "ENODEV→404");
     CHECK(console_http_status(HAL_EBUSY)    == 409, "EBUSY→409");
     CHECK(console_http_status(HAL_ESTATE)   == 409, "ESTATE→409（已激活设备拒绝重复激活）");
@@ -657,6 +658,126 @@ static void test_activation_bootstrap(void)
 }
 
 /**
+ * 评审 I-1（opus 二次评审）：Ruling 18 的 CSRF 网关此前没有任何专项用例——
+ * test_activation_bootstrap 里的每个 activate 请求都只是顺带补上
+ * Content-Type 头以绕过网关，从未直接断言网关本身四条分支各自的行为。
+ * 本函数补齐：缺 Content-Type、Content-Type 不对、Origin 与 Host 跨源、
+ * Origin 与 Host 同源。跨源/同源两个用例都必须用弱口令（"short"）触发
+ * 密码强度校验的 HAL_EINVAL 而不能用合法口令——合法口令会真的把设备激活
+ * 掉，消耗"仅限从未配置时可用"这个一次性窗口，干扰后续用例对初始状态的
+ * 假设。放在 test_activation_bootstrap 之后、test_corrupt_cred_not_reset
+ * 之前，自行把状态复位到"从未配置"，不依赖也不影响相邻用例。
+ */
+static void test_activate_csrf_gate(void)
+{
+    char body[512], set_cookie[256];
+    http_req_t req;
+
+    SECTION("Ruling 18：CSRF 网关四条分支");
+    console_auth_reset_lockout();
+    hal()->crypto->secure_delete(HAL_SEC_KEY_LOCAL_USER);
+    console_auth_test_reload();
+
+    /* 1) 缺 Content-Type：第 1 层直接拒绝，尚未走到密码校验 */
+    req_make(&req, "POST", "/api/v1/auth/activate", "{\"password\":\"ActivatePwd1\"}", NULL);
+    CHECK(console_auth_test_dispatch(&req, "172.16.1.1", body, sizeof(body),
+                                     set_cookie, sizeof(set_cookie)) == HAL_EINVAL,
+          "缺 Content-Type 被第 1 层网关拒绝");
+
+    /* 2) Content-Type 非 application/json：浏览器原生 <form> 只能发出
+       x-www-form-urlencoded / multipart/form-data / text/plain 之一，
+       这里取其一即可代表整类 */
+    req_make(&req, "POST", "/api/v1/auth/activate", "{\"password\":\"ActivatePwd1\"}", NULL);
+    req_add_header(&req, "Content-Type", "application/x-www-form-urlencoded");
+    CHECK(console_auth_test_dispatch(&req, "172.16.1.1", body, sizeof(body),
+                                     set_cookie, sizeof(set_cookie)) == HAL_EINVAL,
+          "表单 Content-Type 被第 1 层网关拒绝");
+
+    /* 3) Content-Type 正确但 Origin 与 Host 跨源：第 2 层拒绝，返回专属的
+       HAL_ECSRF_（评审 M-4），不再复用"请先改密"文案的 HAL_EPERM_ */
+    req_make(&req, "POST", "/api/v1/auth/activate", "{\"password\":\"short\"}", NULL);
+    req_add_header(&req, "Content-Type", "application/json");
+    req_add_header(&req, "Origin", "http://evil.example.com");
+    req_add_header(&req, "Host", "192.168.1.1:8080");
+    CHECK(console_auth_test_dispatch(&req, "172.16.1.1", body, sizeof(body),
+                                     set_cookie, sizeof(set_cookie)) == HAL_ECSRF_,
+          "跨源 Origin 被第 2 层网关拒绝");
+    CHECK(console_http_status(HAL_ECSRF_) == 403, "HAL_ECSRF_ 映射为 HTTP 403");
+
+    /* 4) Origin 与 Host 同源：不应被第 2 层拦截，请求应放行到密码强度
+       校验——用弱口令验证收到的是 HAL_EINVAL（长度不足）而非 HAL_ECSRF_，
+       证明这条请求确实穿过了 CSRF 网关，而不是恰好在网关处也返回同一个
+       错误码 */
+    req_make(&req, "POST", "/api/v1/auth/activate", "{\"password\":\"short\"}", NULL);
+    req_add_header(&req, "Content-Type", "application/json");
+    req_add_header(&req, "Origin", "http://192.168.1.1:8080");
+    req_add_header(&req, "Host", "192.168.1.1:8080");
+    CHECK(console_auth_test_dispatch(&req, "172.16.1.1", body, sizeof(body),
+                                     set_cookie, sizeof(set_cookie)) == HAL_EINVAL,
+          "同源 Origin 未被网关拦截，请求穿透到密码强度校验");
+
+    /* 全程 4 个用例没有一次真正调用 console_auth_seed（要么被网关挡下，
+       要么用的是弱口令），设备应仍处于未激活状态 */
+    req_make(&req, "GET", "/api/v1/auth/state", NULL, NULL);
+    CHECK(console_auth_test_dispatch(&req, "172.16.1.1", body, sizeof(body),
+                                     set_cookie, sizeof(set_cookie)) == HAL_OK, "取 state");
+    CHECK(body_flag(body, "activated", true) == false,
+          "本用例全程未激活，实际：%s", body);
+}
+
+/**
+ * 评审 I-1：Ruling 19 第二判据（config 与凭据矛盾）此前没有专门的用例——
+ * 已有的 test_corrupt_cred_not_reset 覆盖的是"凭据记录本身损坏"（第一判据，
+ * 即 ACTIVATION_BLOCKED_CRED），不是"config 显示已激活、但凭据读取却是
+ * HAL_ENODEV"这种两者矛盾的场景（ACTIVATION_BLOCKED_MISMATCH）。用
+ * cfg_set_str 直接写入 localUser.name 模拟"曾经激活过、config 已落盘"，
+ * 同时清空凭据存储使其读取结果为 HAL_ENODEV，制造第二判据要拦的矛盾态。
+ */
+static void test_activate_second_gate_mismatch(void)
+{
+    char body[512], set_cookie[256];
+    char probe[CONSOLE_USER_MAX];
+    http_req_t req;
+
+    SECTION("Ruling 19 第二判据：config 与凭据矛盾（M-3 共享判据 activation_gate）");
+    console_auth_reset_lockout();
+    CHECK(cfg_init(NULL, "console_test_cfg_ruling19.json") == HAL_OK, "配置中心就绪");
+
+    hal()->crypto->secure_delete(HAL_SEC_KEY_LOCAL_USER);
+    console_auth_test_reload();
+    CHECK(cfg_set_str("localUser.name", "ghostuser") == HAL_OK,
+          "模拟 config 显示曾经激活过（localUser.name 已写入）");
+
+    /* 凭据读取单独看是 HAL_ENODEV（真的从未配置），必须靠第二判据才能
+       拦下——若第二判据被误删，这里会退化成真的允许激活 */
+    req_make(&req, "POST", "/api/v1/auth/activate", "{\"password\":\"ActivatePwd1\"}", NULL);
+    req_add_header(&req, "Content-Type", "application/json");
+    CHECK(console_auth_test_dispatch(&req, "172.16.2.1", body, sizeof(body),
+                                     set_cookie, sizeof(set_cookie)) == HAL_ESTATE,
+          "config 与凭据矛盾时 activate 必须拒绝（第二判据）");
+
+    /* ep_state 与 ep_activate 共用同一份 activation_gate()（评审 M-3），
+       矛盾态下也必须报 activated:true，不能让前端展示激活页 */
+    req_make(&req, "GET", "/api/v1/auth/state", NULL, NULL);
+    CHECK(console_auth_test_dispatch(&req, "172.16.2.1", body, sizeof(body),
+                                     set_cookie, sizeof(set_cookie)) == HAL_OK, "取 state");
+    CHECK(body_flag(body, "activated", false) == true,
+          "矛盾态下 state 必须报 activated=true，实际：%s", body);
+
+    /* config 侧未被上面被拒绝的请求意外覆盖 */
+    CHECK(cfg_get_str("localUser.name", probe, sizeof(probe)) == HAL_OK &&
+          strcmp(probe, "ghostuser") == 0,
+          "config 侧的 localUser.name 未被覆盖，实际：%s", probe);
+
+    cfg_deinit();
+    remove("console_test_cfg_ruling19.json");
+
+    /* 收尾：恢复"从未配置"状态，不影响后续用例 */
+    hal()->crypto->secure_delete(HAL_SEC_KEY_LOCAL_USER);
+    console_auth_test_reload();
+}
+
+/**
  * 凭据损坏 / 版本不匹配**绝不能**被当成"从未配置"而允许被 `/auth/activate`
  * 覆盖——那会把一台已设过口令的设备静默重置成攻击者提交的新密码。最难受的
  * 触发路径是将来 bump CRED_VERSION 却没带迁移逻辑就 OTA 出去，会让整批设备
@@ -705,6 +826,44 @@ static void test_corrupt_cred_not_reset(void)
           "读回存储记录");
     CHECK(len == sizeof(future) && memcmp(back, future, sizeof(future)) == 0,
           "损坏记录未被 activate 覆盖");
+}
+
+/**
+ * 评审 I-3：ENOENT 本身有歧义——可能是"这个 key 从未写过"（目录在，真未
+ * 配置），也可能是"整个安全存储目录都不在"（分区未挂载/被误删，目录里
+ * 原有的文件自然也读不到，errno 同样是 ENOENT）。此前两者都折叠成
+ * HAL_ENODEV，与"从未配置"等价放行 /auth/activate；但后者本质上是
+ * Ruling 19 要 fail-closed 的"凭据消失"场景。mock_state_ensure_dir()/
+ * gk_crypto_ensure_dir() 已在平台初始化时幂等预建过目录，建立"目录在
+ * 固件运行起来之后恒定存在"的前提，运行期间目录消失只能是"曾经存在、
+ * 后来被拿走"——用 rename() 整体挪走/挪回 mock_state 目录模拟这一过程
+ * （不逐个删除里面的文件，避免影响其它用例已写入的键）。
+ */
+static void test_missing_storage_dir_fails_closed(void)
+{
+    uint8_t buf[96];
+    size_t len = 0;
+    hal_err_t rc;
+
+    SECTION("评审 I-3：安全存储目录整体缺失须 fail-closed，不同于文件未写过");
+
+    hal()->crypto->secure_delete(HAL_SEC_KEY_LOCAL_USER);
+    rc = hal()->crypto->secure_read(HAL_SEC_KEY_LOCAL_USER, buf, sizeof(buf), &len);
+    CHECK(rc == HAL_ENODEV, "目录存在、文件未写过：真未配置 → HAL_ENODEV，实际 rc=%d", rc);
+
+    CHECK(rename("mock_state", "mock_state_i3_moved") == 0,
+          "挪走整个安全存储目录（模拟分区未挂载/被删）");
+
+    rc = hal()->crypto->secure_read(HAL_SEC_KEY_LOCAL_USER, buf, sizeof(buf), &len);
+    CHECK(rc == HAL_EIO,
+          "目录整体缺失必须 fail-closed 为 HAL_EIO，不得等同于“从未配置”，实际 rc=%d", rc);
+
+    CHECK(rename("mock_state_i3_moved", "mock_state") == 0,
+          "挪回目录（模拟分区恢复挂载），内容应原样保留");
+
+    rc = hal()->crypto->secure_read(HAL_SEC_KEY_LOCAL_USER, buf, sizeof(buf), &len);
+    CHECK(rc == HAL_ENODEV,
+          "目录恢复后应回到 HAL_ENODEV（真未配置），不应停留在 HAL_EIO，实际 rc=%d", rc);
 }
 
 static void test_cred_not_in_config(void)
@@ -2116,7 +2275,10 @@ int main(void)
     test_auth_user_enum();
     test_must_change_password();
     test_activation_bootstrap();    /* 唯一一次 console_auth_init()，顺带注册路由 */
+    test_activate_csrf_gate();      /* I-1：Ruling 18 CSRF 网关专项 */
+    test_activate_second_gate_mismatch();  /* I-1：Ruling 19 第二判据专项 */
     test_corrupt_cred_not_reset();
+    test_missing_storage_dir_fails_closed();   /* I-3：目录整体缺失 vs 文件未写过 */
     test_auth_endpoints();
     test_cred_not_in_config();
     test_activation_wires_config_and_event_bus();   /* Ruling 21：event_bus_init 接入 + 成功路径覆盖 */

@@ -22,11 +22,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #ifdef _WIN32
 #include <direct.h>
 #else
-#include <sys/stat.h>
 #include <unistd.h>
 #endif
 
@@ -36,6 +36,16 @@ static const char *sec_dir(void)
 {
     const char *d = getenv("IPC_SEC_DIR");
     return (d && d[0]) ? d : SEC_DIR_DEFAULT;
+}
+
+/* 判断 sec_dir() 本身是否存在且是目录（不是普通文件）。用于 c_read 区分
+   “目录整体缺失”（分区未挂载/rootfs 打包缺失，HAL_EIO）与“目录在但这个
+   key 从未写过”（HAL_ENODEV，真未配置）——见 c_read 内的调用处。 */
+static bool sec_dir_exists(void)
+{
+    struct stat st;
+    if (stat(sec_dir(), &st) != 0) return false;
+    return (st.st_mode & S_IFDIR) != 0;
 }
 
 /* key 必须是纯文件名：拒绝分隔符与 ".."，否则可写到存储目录之外 */
@@ -52,7 +62,11 @@ static bool key_is_safe(const char *key)
    （Task 11 的 mkdir -p），但 hal_conformance 等测试直接以默认路径
    "/etc/ipc/sec" 跑在一次性环境里，父目录 /etc/ipc 未必存在；
    单层 mkdir 遇到缺失的父目录会直接失败，之后的 fopen 也会连带失败
-   （ENOENT），c_write 会把本应能成功的写入错误地报成 HAL_EIO。 */
+   （ENOENT），c_write 会把本应能成功的写入错误地报成 HAL_EIO。
+   评审 I-3：现在还由 gk_crypto_ensure_dir()（gk_init 中调用）在平台初始化
+   时幂等地预建一次，确保"目录存在"是固件运行起来之后的恒定前提——c_read
+   据此才能把"目录整体缺失"（分区未挂载/后来被删）与"目录在但文件从未写
+   过"（真未配置）区分开，见 c_read 与 sec_dir_exists()。 */
 static void ensure_dir(void)
 {
     char buf[HAL_PATH_MAX];
@@ -76,6 +90,13 @@ static void ensure_dir(void)
 #else
     mkdir(buf, 0700);
 #endif
+}
+
+/* 评审 I-3：供 gk_platform.c 的 gk_init() 在平台初始化时调用一次，幂等
+   预建安全存储目录。已存在时 mkdir 静默无操作，不会覆盖/清空已有内容。 */
+void gk_crypto_ensure_dir(void)
+{
+    ensure_dir();
 }
 
 static bool sec_path(const char *key, char *out, size_t cap)
@@ -123,8 +144,19 @@ static hal_err_t c_read(const char *key, uint8_t *buf, size_t cap, size_t *len)
            HAL_ENODEV，攻击者只需让 fopen 以任何方式失败（例如把凭据文件替换成
            同名目录，触发 EISDIR）就能让一台已激活设备重新呈现"从未配置"，
            进而用自己的口令重新激活——fail-open。errno 必须紧跟 fopen 失败
-           立即读取，不能在其后插入任何可能改写 errno 的调用。 */
-        return (errno == ENOENT) ? HAL_ENODEV : HAL_EIO;
+           立即读取，不能在其后插入任何可能改写 errno 的调用。
+
+           评审 I-3：ENOENT 本身仍有歧义——它既可能是"这个 key 从未写过"
+           （目录在，真未配置），也可能是"整个安全存储目录都不在"（分区未挂载
+           /被误删，目录里原有的文件自然也读不到，errno 同样是 ENOENT）。
+           后者与 Ruling 19 要 fail-closed 的场景（凭据"消失"）本质相同，不能
+           被当成"从未配置"而放行 activate。gk_crypto_ensure_dir() 已在
+           gk_init() 里幂等预建过目录，所以运行到这里时目录理应已存在；若此刻
+           探测不到，说明是初始化之后目录被拿走，必须 HAL_EIO。 */
+        if (errno == ENOENT) {
+            return sec_dir_exists() ? HAL_ENODEV : HAL_EIO;
+        }
+        return HAL_EIO;
     }
     n = fread(buf, 1, cap, fp);
     fclose(fp);

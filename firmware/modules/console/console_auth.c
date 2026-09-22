@@ -1449,6 +1449,43 @@ static hal_err_t ep_logout(const http_req_t *req, char *out, size_t cap,
     return fmt_safe(out, cap, "{\"code\":0,\"msg\":\"已注销\"}");
 }
 
+/** activation_gate() 的判定结果：见该函数注释（评审 M-3）。 */
+typedef enum {
+    ACTIVATION_ALLOWED = 0,       /**< 从未配置，允许首次激活 */
+    ACTIVATION_BLOCKED_CRED,      /**< 凭据已存在或已损坏 */
+    ACTIVATION_BLOCKED_MISMATCH,  /**< config 与凭据矛盾，判定为异常态 */
+} activation_gate_result_t;
+
+/**
+ * 判定"当前是否允许首次激活 / 凭据槽位是否已占用"。ep_activate（POST，
+ * 实际执行激活）与 ep_state（GET，只读状态探测）共用同一份判据实现
+ * （评审 M-3）：此前两处各自重复判据逻辑，ep_state 的文档注释仅以文字声明
+ * "与 ep_activate 保持一致"，一旦某一侧未来单独改动就会静默失配而不会有
+ * 任何编译期或测试信号——两个端点都改成调用本函数，判据只有一处，结构上
+ * 不可能再次漂移。
+ *
+ * 两层判据（评审 Ruling 19，详见 ep_activate 下方注释）：
+ *  1) 凭据存储读取结果非 HAL_ENODEV（已配置或已损坏）→ ACTIVATION_BLOCKED_CRED；
+ *  2) 上一层独立生效之外，config 中 localUser.name 曾写入成功（HAL_OK）而
+ *     凭据读取却是 HAL_ENODEV，两者矛盾 → ACTIVATION_BLOCKED_MISMATCH。
+ *
+ * 是否记录日志由调用方决定：ep_activate 在拒绝一次真实的激活尝试时记录，
+ * ep_state 是前端加载时的高频轮询探测，若在此处也记录会在矛盾态下持续刷屏，
+ * 因此只取判定结果、不记录。
+ */
+static activation_gate_result_t activation_gate(void)
+{
+    char probe[CONSOLE_USER_MAX];
+
+    cred_ensure_loaded();
+    if (s_cred_load_rc != HAL_ENODEV) return ACTIVATION_BLOCKED_CRED;
+
+    if (cfg_get_str("localUser.name", probe, sizeof(probe)) == HAL_OK)
+        return ACTIVATION_BLOCKED_MISMATCH;
+
+    return ACTIVATION_ALLOWED;
+}
+
 /**
  * POST /api/v1/auth/activate：用户首次访问设备时自行设置管理员密码，取代
  * 产线出厂验证码（Task 8.5：产线为每台设备生成唯一验证码、写安全存储、
@@ -1501,21 +1538,16 @@ static hal_err_t ep_activate(const json_t *j, char *out, size_t cap)
     size_t pwd_len;
     hal_err_t rc;
 
-    cred_ensure_loaded();
-    if (s_cred_load_rc != HAL_ENODEV) return HAL_ESTATE;
-
-    /* 第二判据（评审 Ruling 19）：与上面的网关相互独立，任何一层单独生效
-       都能挡住攻击。config 尚未初始化时 cfg_get_str 返回 HAL_EINVAL，
-       键不存在时返回 HAL_ENODEV，两者都自然落不进下面的 if；只有真正
-       "曾经写成功过 localUser.name"（HAL_OK）才会命中。 */
-    {
-        char probe[CONSOLE_USER_MAX];
-        if (cfg_get_str("localUser.name", probe, sizeof(probe)) == HAL_OK) {
-            LOGE(MOD, "拒绝激活：config 显示曾经激活过（localUser.name 已写入），"
-                      "但凭据读取判定为从未配置，两者矛盾，判定为异常状态而非首次激活，"
-                      "请检查凭据存储是否被篡改或误删");
-            return HAL_ESTATE;
-        }
+    switch (activation_gate()) {
+    case ACTIVATION_BLOCKED_CRED:
+        return HAL_ESTATE;
+    case ACTIVATION_BLOCKED_MISMATCH:
+        LOGE(MOD, "拒绝激活：config 显示曾经激活过（localUser.name 已写入），"
+                  "但凭据读取判定为从未配置，两者矛盾，判定为异常状态而非首次激活，"
+                  "请检查凭据存储是否被篡改或误删");
+        return HAL_ESTATE;
+    case ACTIVATION_ALLOWED:
+        break;
     }
 
     if ((rc = body_str(j, "password", password, sizeof(password))) != HAL_OK) return rc;
@@ -1566,15 +1598,16 @@ static hal_err_t ep_activate(const json_t *j, char *out, size_t cap)
 
 /**
  * GET /api/v1/auth/state：免鉴权的只读状态探测，供前端在加载时决定展示
- * 激活页还是登录页。"activated" 与 ep_activate 的准入判据保持一致
- * （`s_cred_load_rc != HAL_ENODEV`）：记录存在但损坏时也算"已占用"，
- * 避免把无法自愈的损坏态误判成可激活状态。
+ * 激活页还是登录页。"activated" 直接复用 activation_gate()（评审 M-3）：
+ * ACTIVATION_ALLOWED 才是"未激活"，其余两种（凭据已占用/已损坏、或
+ * config 与凭据矛盾）都算"已占用"，避免把无法自愈的损坏态或异常态误判
+ * 成可激活状态——与 ep_activate 共享同一判据函数，不会再因各自维护一份
+ * 逻辑而漂移。
  */
 static hal_err_t ep_state(char *out, size_t cap)
 {
-    cred_ensure_loaded();
     return fmt_safe(out, cap, "{\"code\":0,\"activated\":%s}",
-                    s_cred_load_rc != HAL_ENODEV ? "true" : "false");
+                    activation_gate() != ACTIVATION_ALLOWED ? "true" : "false");
 }
 
 /**
@@ -1647,6 +1680,10 @@ static hal_err_t auth_dispatch(const http_req_t *req, const char *ip_override,
      *     不是 HTTP 协议本身或 curl 会做的事，无法用 curl 直接复现"验证"；
      *     上述结论引自 Fetch 标准与 OWASP 的既有文档，不是本次在本机用
      *     curl 实测浏览器得出的。）
+     *
+     * 评审 M-4：拒绝时返回 HAL_ECSRF_ 而非 HAL_EPERM_——后者固定文案"请先
+     * 修改初始密码"在此处会误导用户（此刻设备尚未激活，根本没有"初始密码"
+     * 这个概念），单独错误码配独立文案，语义与 HTTP 状态码（403）不变。
      */
     if (strcmp(sub, "activate") == 0) {
         const char *ctype = http_header(req, "Content-Type");
@@ -1656,7 +1693,7 @@ static hal_err_t auth_dispatch(const http_req_t *req, const char *ip_override,
         if (!ci_starts_with(ctype, "application/json")) return HAL_EINVAL;
         if (origin && origin[0] && !same_origin(origin, host)) {
             LOGW(MOD, "拒绝激活请求：Origin 与 Host 不同源（疑似跨站请求伪造）");
-            return HAL_EPERM_;
+            return HAL_ECSRF_;
         }
     }
 
