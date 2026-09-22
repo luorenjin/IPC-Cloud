@@ -27,6 +27,34 @@ else()
     add_compile_options(-Wall -Wextra -Wpedantic -Werror=implicit-function-declaration)
 endif()
 
+# BUILD_TESTING 默认值按平台区分：CTest 模块的 option(BUILD_TESTING ... ON)
+# 默认全平台开启，但本仓库的 docker/scripts/build-app.sh 交叉编译到 ARM
+# （gk7205v200）时复用的正是这同一份顶层文件、且不会显式传
+# -DBUILD_TESTING=OFF——若放任默认值，modules/common/http_server/CMakeLists.txt
+# 依附 BUILD_TESTING 的 IPC_TESTING 定义就会被动带进 ARM 生产固件，
+# 把测试桩函数（如 http_ws_test_conn_new）暴露进产线镜像，这正是该宏
+# 拆分为按需开启要避免的事。因此在 include(CTest) 之前，只在还没有人显式
+# 传值时，按平台设一个更安全的默认：mock（x86 测试构建）开，其余平台关。
+# 命令行仍可用 -DBUILD_TESTING=ON/OFF 显式覆盖（NOT DEFINED 只在没有人
+# 设过时生效，覆盖不了显式传参）。
+if(NOT DEFINED BUILD_TESTING)
+    if(IPC_PLATFORM STREQUAL "mock")
+        set(BUILD_TESTING ON CACHE BOOL "构建测试树（含 ctest 用例与 IPC_TESTING 测试桩）")
+    else()
+        set(BUILD_TESTING OFF CACHE BOOL "构建测试树（含 ctest 用例与 IPC_TESTING 测试桩）")
+    endif()
+endif()
+# 用 include(CTest) 而非裸 enable_testing()：后者不会创建 BUILD_TESTING
+# 这个 cache 变量（它是 CTest 模块自己 option() 出来的），include(CTest)
+# 内部会顺带调用 enable_testing()，两者语义因此完全保留；上面预先写好的
+# cache 值会被 option() 直接沿用（cache 条目已存在时 option() 不做任何事）。
+# 必须放在 add_subdirectory(modules) 之前：modules/common/http_server/
+# CMakeLists.txt 求值 if(BUILD_TESTING) 时该变量必须已经存在于 cache，
+# 否则等价于关闭，测试桩符号缺失导致链接失败（且这个坑不会在后续
+# configure 中自愈——一旦 cache 里写过一次 BUILD_TESTING，下次 configure
+# 提前可见，会掩盖干净构建时已经出现过的错）。
+include(CTest)
+
 # L1 HAL：接口 + 聚合层
 add_library(ipc_hal STATIC hal/hal.c)
 target_include_directories(ipc_hal PUBLIC ${CMAKE_SOURCE_DIR})
@@ -52,7 +80,6 @@ foreach(src ${IPC_GENERIC_SOURCES})
     endif()
 endforeach()
 
-enable_testing()
 add_subdirectory(tests/hal_conformance)
 
 # http_server_test 不碰 profile 与 HAL（纯 socket/协议层），任何平台都能跑
