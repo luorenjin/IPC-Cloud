@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>摄像机管理</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div id="app">
+  <header id="hdr" hidden>
+    <span class="brand">摄像机管理</span>
+    <nav>
+      <button data-view="info">系统信息</button>
+      <button data-view="net">网络</button>
+      <button data-view="cfg">配置</button>
+      <button id="btn-logout" type="button">退出</button>
+    </nav>
+  </header>
+
+  <main>
+    <section id="view-activate" class="view" hidden>
+      <h1>首次使用：设置管理密码</h1>
+      <form id="form-activate">
+        <label>管理密码<input name="pwd" type="password" autocomplete="new-password" minlength="8" maxlength="63" required></label>
+        <label>确认密码<input name="pwd2" type="password" autocomplete="new-password" minlength="8" maxlength="63" required></label>
+        <button type="submit">激活设备</button>
+      </form>
+      <p class="hint">设备尚未设置管理密码，用户名固定为 admin，密码长度需为 8-63 位。</p>
+    </section>
+
+    <section id="view-login" class="view" hidden>
+      <h1>登录</h1>
+      <form id="form-login">
+        <label>用户名<input name="user" value="admin" autocomplete="username"></label>
+        <label>密码<input name="pass" type="password" autocomplete="current-password"></label>
+        <button type="submit">登录</button>
+      </form>
+      <p class="hint">忘记密码请联系设备管理员，通过恢复出厂设置重新激活。</p>
+    </section>
+
+    <section id="view-chpwd" class="view" hidden>
+      <h1>请修改密码</h1>
+      <form id="form-chpwd">
+        <label>当前密码<input name="op" type="password" autocomplete="current-password"></label>
+        <label>新密码<input name="np" type="password" autocomplete="new-password" minlength="8" maxlength="63"></label>
+        <label>确认新密码<input name="np2" type="password" autocomplete="new-password" minlength="8" maxlength="63"></label>
+        <button type="submit">提交</button>
+      </form>
+      <p class="hint">初次登录或收到安全策略要求时需修改密码，密码长度需为 8-63 位。</p>
+    </section>
+
+    <section id="view-info" class="view" hidden>
+      <h1>系统信息</h1>
+      <dl id="dl-info"></dl>
+      <div class="actions">
+        <button id="btn-reboot" class="danger" type="button">重启设备</button>
+      </div>
+    </section>
+
+    <section id="view-net" class="view" hidden>
+      <h1>网络状态</h1>
+      <dl id="dl-net"></dl>
+      <h2>无线网络</h2>
+      <div id="wifi-area">
+        <button id="btn-wifi-scan" type="button">扫描附近网络</button>
+        <div id="wifi-result"></div>
+      </div>
+    </section>
+
+    <section id="view-cfg" class="view" hidden>
+      <h1>配置</h1>
+      <form id="form-cfg-filter">
+        <label>前缀过滤（可选）<input name="prefix" placeholder="如 video.0.main"></label>
+        <button type="submit">查询</button>
+      </form>
+      <div id="cfg-area"></div>
+    </section>
+  </main>
+
+  <div id="toast" hidden></div>
+</div>
+<script src="/app.js"></script>
+</body>
+</html>
