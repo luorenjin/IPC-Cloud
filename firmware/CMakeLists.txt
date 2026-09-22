@@ -82,8 +82,20 @@ endforeach()
 
 add_subdirectory(tests/hal_conformance)
 
-# http_server_test 不碰 profile 与 HAL（纯 socket/协议层），任何平台都能跑
-add_subdirectory(tests/http_server_test)
+# http_server_test 本身不碰 profile 与 HAL（纯 socket/协议层），理论上任何平台
+# 都能跑；但它无条件 target_compile_definitions(... PRIVATE IPC_TESTING)，需要
+# ipc_http_server 导出的 IPC_TESTING 测试桩符号（如 http_ws_test_conn_new）—
+# 而 modules/common/http_server/CMakeLists.txt 只在 BUILD_TESTING 为真时才编译
+# 进那些符号。BUILD_TESTING 在非 mock 平台默认关闭（见上面按平台设默认值的
+# 那段），若这里仍然无条件注册该子目录，会在非 mock 平台（如交叉编译到
+# gk7205v200 的生产构建）上因符号缺失出现 LNK2019/undefined reference 链接
+# 失败。用 if(BUILD_TESTING) 门控后：mock 平台默认 BUILD_TESTING=ON，行为不变
+# 仍会注册并跑这个测试；非 mock 平台默认 BUILD_TESTING=OFF，跳过注册避免链接
+# 失败；命令行显式 -DBUILD_TESTING=ON 时任何平台都会注册它（此时
+# ipc_http_server 也会同步带上 IPC_TESTING，符号双边一致，不会链接失败）。
+if(BUILD_TESTING)
+    add_subdirectory(tests/http_server_test)
+endif()
 
 # core_test / console_test 硬编码加载 profiles/mock-x86.json（core_test/main.c:126、
 # console_test/main.c:1956），在非 mock 平台上取不到 profile 后会继续执行直至段错误。

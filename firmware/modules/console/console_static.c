@@ -22,11 +22,14 @@ static int console_static_handler(http_req_t *req, void *user)
     const console_asset_t *a;
     const char *inm;
     char headers[256];
+    bool is_head;
+    int n;
 
     (void)user;
 
     /* 只处理 GET/HEAD；其余方法落到这里说明路径确实不存在 */
-    if (strcmp(req->method, "GET") != 0 && strcmp(req->method, "HEAD") != 0) {
+    is_head = (strcmp(req->method, "HEAD") == 0);
+    if (!is_head && strcmp(req->method, "GET") != 0) {
         return console_reply_err(req->conn, HAL_ENODEV);
     }
 
@@ -35,19 +38,27 @@ static int console_static_handler(http_req_t *req, void *user)
     if (!a) a = console_asset_find("/index.html");
     if (!a) return console_reply_err(req->conn, HAL_ENODEV);
 
-    /* 内容未变则回 304，省掉一次全量传输 */
+    /* 内容未变则回 304，省掉一次全量传输（304 本就没有 body，GET/HEAD 一致） */
     inm = http_header(req, "If-None-Match");
     if (inm && strstr(inm, a->etag) != NULL) {
-        snprintf(headers, sizeof(headers), "ETag: \"%s\"\r\n", a->etag);
+        n = snprintf(headers, sizeof(headers), "ETag: \"%s\"\r\n", a->etag);
+        if (n < 0 || (size_t)n >= sizeof(headers)) return HAL_EINVAL;
         return http_respond_ex(req->conn, 304, NULL, headers, NULL, 0);
     }
 
-    snprintf(headers, sizeof(headers),
-             "Content-Encoding: gzip\r\n"
-             "ETag: \"%s\"\r\n"
-             "Cache-Control: no-cache\r\n",
-             a->etag);
-    return http_respond_ex(req->conn, 200, a->content_type, headers, a->data, a->len);
+    n = snprintf(headers, sizeof(headers),
+                 "Content-Encoding: gzip\r\n"
+                 "ETag: \"%s\"\r\n"
+                 "Cache-Control: no-cache\r\n",
+                 a->etag);
+    if (n < 0 || (size_t)n >= sizeof(headers)) return HAL_EINVAL;
+
+    /* HEAD 只发响应头、不发 body：Content-Length 仍需反映资源真实长度，
+     * 所以 len 一律传 a->len；http_respond_ex 只在 body 非 NULL 时才会把
+     * 正文字节入队（见其实现），这里把 body 显式传 NULL 即可得到“头部完整、
+     * 正文为空”的 HEAD 语义，不必改动 http_respond_ex 本身。 */
+    return http_respond_ex(req->conn, 200, a->content_type, headers,
+                            is_head ? NULL : a->data, a->len);
 }
 
 hal_err_t console_static_init(void)
