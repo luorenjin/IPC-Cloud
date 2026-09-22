@@ -915,15 +915,17 @@ static void lock_ok(const char *ip)
  * 九、对外鉴权 API
  * ========================================================================== */
 
-hal_err_t console_auth_seed(const char *password, bool must_change)
+hal_err_t console_auth_seed(const char *password, const char *user, bool must_change)
 {
     cred_t c;
     hal_err_t rc;
 
     if (!password || !password[0]) return HAL_EINVAL;
+    if (user && strlen(user) >= sizeof(c.user)) return HAL_EINVAL;
 
     memset(&c, 0, sizeof(c));
-    auth_user_name(c.user, sizeof(c.user));
+    if (user && user[0]) snprintf(c.user, sizeof(c.user), "%s", user);
+    else auth_user_name(c.user, sizeof(c.user));
     c.iter = CONSOLE_ITER;
     if ((rc = rand_bytes(c.salt, sizeof(c.salt))) != HAL_OK) goto fail;
     rc = console_pbkdf2_sha256(password, strlen(password), c.salt, sizeof(c.salt),
@@ -1473,21 +1475,32 @@ static hal_err_t ep_activate(const json_t *j, char *out, size_t cap)
         auth_user_name(user, sizeof(user));   /* 缺省沿用现有逻辑：config 的 localUser.name，再缺省 admin */
     }
 
-    /* 先写 config 再播种：console_auth_seed 内部经 auth_user_name() 复读这个键
-       决定凭据里的用户名，必须先落盘才能让自定义 user 生效。写入失败（例如
-       config 尚未初始化）不阻断激活本身——凭据不依赖 config，日志里的用户名
-       以播种后 s_cred.user 的实际值为准，不会出现"响应说改了但其实没改"。 */
-    rc = cfg_set_str("localUser.name", user);
-    if (rc != HAL_OK)
-        LOGW(MOD, "写入 localUser.name 失败（rc=%d），本次激活将使用 config 现有值/缺省值",
-             (int)rc);
-
-    rc = console_auth_seed(password, false);
+    /* 先播种再写 config（评审 Ruling 20 订正）：user 已经校验过、直接传给
+       console_auth_seed，不再需要先写 config 让该函数内部经 auth_user_name()
+       复读回来——那条往返本身就是不必要的。顺序颠倒过来还有一个更重要的理由：
+       若先写 config 后播种失败（例如 rand_bytes/持久化出错），config 会被
+       留在"localUser.name 已写入"的状态，而凭据其实没有播种成功；下次
+       ep_activate 的鉴权网关会看到 cred_ensure_loaded()==HAL_ENODEV（真未
+       播种）却又发现 config 里已有 localUser.name（见 Ruling 19 的第二判据），
+       误判为"曾经激活过、当前凭据不可读"这一矛盾态，把本该允许重试的
+       首次激活错误地拒绝掉。播种成功之后再写 config 就不存在这个窗口。 */
+    rc = console_auth_seed(password, user, false);
     secure_wipe(password, sizeof(password));
     if (rc != HAL_OK) return rc;
 
-    /* 契约预留（本期无人订阅，是有意为之，见文件头/设计文档 §2.2） */
-    event_bus_emit(EVT_BIND_ACTIVATED, -1);
+    /* 凭据已经落盘成功，config 写入只是为 IDP 判断留痕，失败不影响凭据本身
+       已经生效这一事实，因此仍然只记日志、不影响本次激活的响应结果。 */
+    rc = cfg_set_str("localUser.name", user);
+    if (rc != HAL_OK)
+        LOGW(MOD, "写入 localUser.name 失败（rc=%d），凭据已生效，仅 config 侧留痕缺失",
+             (int)rc);
+
+    /* 契约预留（本期无人订阅，是有意为之，见文件头/设计文档 §2.2）；
+       评审 Ruling 21：捕获返回值仅用于日志排障，队列满/未初始化不影响
+       激活本身已经成功这一事实，不能据此回滚已经落盘的凭据。 */
+    rc = event_bus_emit(EVT_BIND_ACTIVATED, -1);
+    if (rc != HAL_OK)
+        LOGW(MOD, "EVT_BIND_ACTIVATED 事件投递失败（rc=%d），不影响本次激活结果", (int)rc);
 
     LOGI(MOD, "本地账号已完成首次激活（用户 %s）", s_cred.user);
     return fmt_safe(out, cap, "{\"code\":0,\"msg\":\"激活成功，请使用新密码登录\"}");

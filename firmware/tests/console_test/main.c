@@ -82,7 +82,7 @@ static void test_auth_flow(void)
 
     SECTION("鉴权流程");
     /* 首次：以出厂验证码派生凭据 */
-    CHECK(console_auth_seed("ABCD1234", true) == HAL_OK, "以出厂验证码播种");
+    CHECK(console_auth_seed("ABCD1234", NULL, true) == HAL_OK, "以出厂验证码播种");
 
     /* challenge 返回稳定的 salt 与一次性 nonce */
     CHECK(console_auth_challenge("admin", salt_hex, sizeof(salt_hex), nonce, sizeof(nonce)) == HAL_OK,
@@ -146,7 +146,7 @@ static void test_auth_user_enum(void)
 static void test_must_change_password(void)
 {
     SECTION("首次强制改密");
-    console_auth_seed("ABCD1234", true);
+    console_auth_seed("ABCD1234", NULL, true);
     CHECK(console_auth_must_change() == true, "出厂状态需强制改密");
     CHECK(console_auth_set_password("ABCD1234", "NewPass@123") == HAL_OK, "改密成功");
     CHECK(console_auth_must_change() == false, "改密后解除");
@@ -366,7 +366,7 @@ static void test_auth_endpoints(void)
     /* 路由注册由 test_activation_bootstrap 那一次 console_auth_init() 完成：
        http_route 不去重且 ROUTE_MAX 只有 8，整个测试二进制只应调它一次，
        否则会把槽位烧给同一个前缀，坑到后续任务注册自己的路由。 */
-    CHECK(console_auth_seed("ABCD1234", true) == HAL_OK, "重新播种（回到出厂强制改密态）");
+    CHECK(console_auth_seed("ABCD1234", NULL, true) == HAL_OK, "重新播种（回到出厂强制改密态）");
 
     /* 未知子路径 → 404 语义；非 POST → 400 语义 */
     req_make(&req, "POST", "/api/v1/auth/bogus", "{}", NULL);
@@ -688,7 +688,7 @@ static void test_cred_not_in_config(void)
 
     SECTION("凭据不得进入配置导出");
     CHECK(cfg_init(NULL, "console_test_cfg.json") == HAL_OK, "配置中心就绪");
-    CHECK(console_auth_seed("ABCD1234", true) == HAL_OK, "播种凭据");
+    CHECK(console_auth_seed("ABCD1234", NULL, true) == HAL_OK, "播种凭据");
     CHECK(console_auth_challenge("admin", salt_hex, sizeof(salt_hex), nonce, sizeof(nonce)) == HAL_OK,
           "取到公开的 salt");
     dump = (char *)malloc(cap);
@@ -749,7 +749,7 @@ static void test_cred_fallback_store(void)
     CHECK(hal_deinit() == HAL_OK, "卸载 HAL，模拟平台不提供 crypto 模块");
     CHECK(hal_has(HAL_MOD_CRYPTO) == false, "crypto 能力不可用");
 
-    CHECK(console_auth_seed("FALLBK99", true) == HAL_OK, "凭据落到软存储文件");
+    CHECK(console_auth_seed("FALLBK99", NULL, true) == HAL_OK, "凭据落到软存储文件");
     /* 路径必须在私有数据目录下，而不是进程工作目录里的裸文件名 */
     CHECK(strchr(console_auth_cred_path(), '/') != NULL, "软存储位于私有数据目录下");
     console_auth_test_reload();  /* 丢弃内存缓存，强制从存储读回 */
@@ -868,7 +868,7 @@ static void test_api_config_endpoints(void)
     CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_EUNAUTH_,
           "未登录访问 config 返回未登录");
 
-    CHECK(console_auth_seed("ABCD1234", true) == HAL_OK, "播种凭据（出厂态）");
+    CHECK(console_auth_seed("ABCD1234", NULL, true) == HAL_OK, "播种凭据（出厂态）");
     CHECK(do_login("admin", "ABCD1234", "192.168.50.10", cookie, sizeof(cookie), &must_change) == HAL_OK,
           "登录成功");
 
@@ -960,7 +960,7 @@ static void test_api_system_endpoints(void)
 
     SECTION("REST 系统信息与动作端点");
     console_auth_reset_lockout();
-    CHECK(console_auth_seed("ABCD1234", true) == HAL_OK, "播种凭据（出厂态）");
+    CHECK(console_auth_seed("ABCD1234", NULL, true) == HAL_OK, "播种凭据（出厂态）");
 
     /* system/info 豁免的是"强制改密"，不是"登录"本身 */
     req_make(&req, "GET", "/api/v1/system/info", NULL, NULL);
@@ -1047,7 +1047,7 @@ static void test_reboot_handler_order(void)
 
     SECTION("console_api_handler：必须先入队响应、再登记延后动作");
     console_auth_reset_lockout();
-    CHECK(console_auth_seed("ABCD1234", true) == HAL_OK, "播种凭据（出厂态）");
+    CHECK(console_auth_seed("ABCD1234", NULL, true) == HAL_OK, "播种凭据（出厂态）");
     CHECK(console_auth_set_password("ABCD1234", "NewPass@123") == HAL_OK, "改密解除强制改密");
     CHECK(do_login("admin", "NewPass@123", "192.168.50.12", cookie, sizeof(cookie), &must_change) == HAL_OK,
           "登录成功");
@@ -1737,7 +1737,7 @@ static void test_net_status_endpoint(void)
     SECTION("REST 网络状态端点 GET /api/v1/net/status");
     console_net_test_reset();
     console_auth_reset_lockout();
-    CHECK(console_auth_seed("ABCD1234", true) == HAL_OK, "播种凭据（出厂态）");
+    CHECK(console_auth_seed("ABCD1234", NULL, true) == HAL_OK, "播种凭据（出厂态）");
 
     req_make(&req, "GET", "/api/v1/net/status", NULL, NULL);
     CHECK(console_net_test_dispatch(&req, body, sizeof(body), &http_status) == HAL_EUNAUTH_,
@@ -1794,7 +1794,7 @@ static void test_net_wifi_scan_endpoint(void)
     SECTION("REST WiFi 扫描端点 GET /api/v1/net/wifi/scan");
     console_net_test_reset();
     console_auth_reset_lockout();
-    CHECK(console_auth_seed("ABCD1234", true) == HAL_OK, "播种凭据（出厂态）");
+    CHECK(console_auth_seed("ABCD1234", NULL, true) == HAL_OK, "播种凭据（出厂态）");
     CHECK(console_auth_set_password("ABCD1234", "NewPass@123") == HAL_OK, "改密解除强制改密");
     CHECK(do_login("admin", "NewPass@123", "192.168.60.11", cookie, sizeof(cookie), &must_change) == HAL_OK,
           "登录成功");
@@ -1841,7 +1841,7 @@ static void test_net_wifi_connect_endpoint(void)
     SECTION("REST WiFi 配网提交端点 POST /api/v1/net/wifi/connect：参数校验与 202 立即响应");
     console_net_test_reset();
     console_auth_reset_lockout();
-    CHECK(console_auth_seed("ABCD1234", true) == HAL_OK, "播种凭据（出厂态）");
+    CHECK(console_auth_seed("ABCD1234", NULL, true) == HAL_OK, "播种凭据（出厂态）");
     CHECK(console_auth_set_password("ABCD1234", "NewPass@123") == HAL_OK, "改密解除强制改密");
     CHECK(do_login("admin", "NewPass@123", "192.168.60.13", cookie, sizeof(cookie), &must_change) == HAL_OK,
           "登录成功");
@@ -1911,7 +1911,7 @@ static void test_net_wifi_no_capability(void)
     SECTION("无 WiFi 能力时 scan/connect 均返回 ENOTSUP(501)，status 仍可用");
     console_net_test_reset();
     console_auth_reset_lockout();
-    CHECK(console_auth_seed("ABCD1234", true) == HAL_OK, "播种凭据（出厂态）");
+    CHECK(console_auth_seed("ABCD1234", NULL, true) == HAL_OK, "播种凭据（出厂态）");
     CHECK(console_auth_set_password("ABCD1234", "NewPass@123") == HAL_OK, "改密");
     CHECK(do_login("admin", "NewPass@123", "192.168.60.12", cookie, sizeof(cookie), &must_change) == HAL_OK,
           "登录成功");
@@ -1970,7 +1970,7 @@ static void test_net_connect_handler_order(void)
     SECTION("console_net_handler：必须先入队 202 响应、再登记延后动作交给工作线程");
     console_net_test_reset();
     console_auth_reset_lockout();
-    CHECK(console_auth_seed("ABCD1234", true) == HAL_OK, "播种凭据（出厂态）");
+    CHECK(console_auth_seed("ABCD1234", NULL, true) == HAL_OK, "播种凭据（出厂态）");
     CHECK(console_auth_set_password("ABCD1234", "NewPass@123") == HAL_OK, "改密解除强制改密");
     CHECK(do_login("admin", "NewPass@123", "192.168.60.14", cookie, sizeof(cookie), &must_change) == HAL_OK,
           "登录成功");

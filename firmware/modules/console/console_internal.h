@@ -71,8 +71,15 @@ hal_err_t console_hmac_sha256(const uint8_t *key, size_t key_len,
  * （Task 8.5：出厂验证码自举已被否决，改为用户首次访问时自行设置密码，
  * 见 `POST /api/v1/auth/activate`）：出厂验证码场景传 true（登录后强制改密）；
  * 用户自行设置的激活口令传 false；将来 IDP 远程重置按平台下发的值决定。
+ *
+ * `user` 为 NULL 或空串时退回旧逻辑（内部调 `auth_user_name()`：读 config 的
+ * `localUser.name`，再缺省 "admin"）；非空时直接采用，且必须能放进
+ * `CONSOLE_USER_MAX`，否则返回 `HAL_EINVAL`（评审 Ruling 20）。新增此形参是
+ * 为了让 `ep_activate` 把已经校验过的用户名直接传进来，不必先写 config
+ * 再指望本函数从 config 读回——那个往返顺序会在播种失败时把 config
+ * 留在"看似已激活"的错误状态，见 `ep_activate` 实现注释。
  */
-hal_err_t console_auth_seed(const char *password, bool must_change);
+hal_err_t console_auth_seed(const char *password, const char *user, bool must_change);
 /** 取挑战：salt 十六进制串 + 一次性 nonce（60s 过期） */
 hal_err_t console_auth_challenge(const char *user, char *salt_hex, size_t salt_cap,
                                  char *nonce, size_t nonce_cap);
