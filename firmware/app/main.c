@@ -12,6 +12,7 @@
  */
 #include "core/log.h"
 #include "core/config.h"
+#include "core/event_bus.h"
 #include "core/module.h"
 #include "core/os.h"
 #include "hal/hal.h"
@@ -27,6 +28,7 @@
 #define PROFILE_MAX       (64 * 1024)
 #define HEALTH_INTERVAL_MS 5000   /**< 模块健康巡检周期 */
 #define QUIT_POLL_MS       100    /**< 退出标志轮询步长，决定信号响应延迟上限 */
+#define EVENT_BUS_QUEUE_DEPTH 64  /**< 事件总线队列深度，与 core_test 的常用取值一致 */
 
 /* 信号处理器仅可做异步信号安全的操作：只置标志，真正的收尾在主循环里做。 */
 static volatile sig_atomic_t g_quit;
@@ -113,16 +115,29 @@ int main(int argc, char **argv)
         goto fail_hal;
     }
 
+    /* 评审 Ruling 21（I-5）：生产启动流程此前完全没有调用 event_bus_init，
+       导致 EVT_BIND_ACTIVATED 等事件在真机上从未被真正初始化过的总线上
+       发布——console_auth.c 的 ep_activate 调用 event_bus_emit 时，事件总线
+       实际处于未初始化态，返回 HAL_ESTATE 但被静默丢弃。放在 cfg_init 成功
+       之后、module_register 之前：模块 init 阶段不允许起线程（module.h 契约），
+       但允许调用 event_bus_publish 之类的非线程 API，事件总线必须先于任何
+       可能在 init/start 期间发布事件的模块就绪。 */
+    rc = event_bus_init(EVENT_BUS_QUEUE_DEPTH);
+    if (rc != HAL_OK) {
+        LOGE("app", "事件总线初始化失败: %s", hal_strerror(rc));
+        goto fail_cfg;
+    }
+
     rc = module_register(&mod_console);
     if (rc != HAL_OK) {
         LOGE("app", "注册 console 模块失败: %s", hal_strerror(rc));
-        goto fail_cfg;
+        goto fail_event_bus;
     }
 
     rc = module_start_all();
     if (rc != HAL_OK) {
         LOGE("app", "启动模块失败: %s", hal_strerror(rc));
-        goto fail_cfg;
+        goto fail_event_bus;
     }
 
     rc = http_server_start((uint16_t)port);
@@ -167,6 +182,11 @@ int main(int argc, char **argv)
     http_server_stop();
 fail_modules:
     module_stop_all();
+fail_event_bus:
+    /* event_bus_deinit 在总线未初始化时安全返回 HAL_ESTATE（不会崩溃，见
+       core/event_bus.c 对 g.inited 的判断），因此即便是从 event_bus_init 自身
+       失败的分支 goto 过来，这里也可以无脑调用，不需要额外判断是否已初始化。 */
+    event_bus_deinit();
 fail_cfg:
     cfg_deinit();
 fail_hal:

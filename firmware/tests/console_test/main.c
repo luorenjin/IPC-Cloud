@@ -9,6 +9,8 @@
 #include "core/config.h"
 #include "core/profile.h"
 #include "core/json.h"
+#include "core/event_bus.h"
+#include "core/os.h"
 #include "hal/hal.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -177,6 +179,20 @@ static void req_make(http_req_t *req, const char *method, const char *path,
         req->headers[0].value = cookie;
         req->header_count = 1;
     }
+}
+
+/** 追加一个请求头（评审 Ruling 18 新增：/auth/activate 起要求 Content-Type，
+ *  部分用例还需要 Origin/Host 来验证同源判定）。req_make 只内置 Cookie 这一个
+ *  槽位，本函数在其后继续往 headers[] 追加，不覆盖已有的。调用方必须保证
+ *  name/value 指向的内存活得比 req 使用期长（测试里一律传字符串字面量，
+ *  满足这一点）。header_count 撞上 HTTP_HEADERS_MAX 时静默丢弃——测试用例
+ *  的头部数远小于上限，不会触发。 */
+static void req_add_header(http_req_t *req, const char *name, const char *value)
+{
+    if (req->header_count >= (sizeof(req->headers) / sizeof(req->headers[0]))) return;
+    req->headers[req->header_count].name = name;
+    req->headers[req->header_count].value = value;
+    req->header_count++;
 }
 
 /** 从响应体里取一个字符串字段；不存在或超长返回 false */
@@ -738,6 +754,70 @@ static void test_cred_not_in_config(void)
     }
     cfg_deinit();
     remove("console_test_cfg.json");
+}
+
+/* ================= Ruling 21（I-5/I-6）：event_bus 接入与成功路径覆盖 ================= */
+static volatile int g_bind_activated_hits;
+static void on_bind_event(const event_t *e, void *u)
+{
+    (void)u;
+    if (e->type == EVT_BIND_ACTIVATED) g_bind_activated_hits++;
+}
+
+/**
+ * 评审 Ruling 21：此前生产路径的 event_bus_init 从未被真正调用过
+ * （main.c 缺失该调用，I-5），且 ep_activate 里 event_bus_emit 的成功路径
+ * 也从未被测试覆盖过（I-6）——只测过"总线未初始化时 emit 不崩溃"，没测过
+ * "总线就绪时事件真的送达订阅者"。main.c 那一侧已补上 event_bus_init 调用
+ * （见 app/main.c），这里在测试里搭一个同样"cfg_init + event_bus_init 都已
+ * 就绪"的窗口，重新走一次激活流程，断言两件事：
+ *  1) 激活成功后 cfg_get_str("localUser.name", ...) 能读到刚提交的用户名
+ *     （对照 ep_activate 里"先播种再写 config"的顺序，见 Ruling 20）；
+ *  2) 订阅 EVT_DOM_BIND 的处理器确实收到了 EVT_BIND_ACTIVATED
+ *     （对照 core_test/main.c 的 test_event_bus 用法：init → subscribe →
+ *     触发 → os_sleep_ms 等异步投递线程跑完 → 断言 → unsubscribe/deinit）。
+ * 用完对称地 event_bus_deinit()/cfg_deinit()，不影响后续用例。
+ */
+static void test_activation_wires_config_and_event_bus(void)
+{
+    char body[512], set_cookie[256];
+    char probe[CONSOLE_USER_MAX];
+    event_sub_t *sub = NULL;
+    http_req_t req;
+
+    SECTION("激活成功后 config 落地 + event_bus 真正收到事件（Ruling 21）");
+    console_auth_reset_lockout();
+
+    /* 回到"从未配置"状态，与 test_activation_bootstrap 相同手法 */
+    hal()->crypto->secure_delete(HAL_SEC_KEY_LOCAL_USER);
+    console_auth_test_reload();
+
+    CHECK(cfg_init(NULL, "console_test_cfg_evt.json") == HAL_OK, "配置中心就绪");
+    CHECK(event_bus_init(64) == HAL_OK, "事件总线就绪（复刻生产路径 main.c 的调用）");
+    g_bind_activated_hits = 0;
+    CHECK(event_bus_subscribe(1u << EVT_DOM_BIND, on_bind_event, NULL, &sub) == HAL_OK,
+          "订阅 EVT_DOM_BIND");
+
+    req_make(&req, "POST", "/api/v1/auth/activate", "{\"user\":\"evtuser\",\"password\":\"EvtBusPwd1\"}", NULL);
+    req_add_header(&req, "Content-Type", "application/json");
+    CHECK(console_auth_test_dispatch(&req, "172.16.0.9", body, sizeof(body),
+                                     set_cookie, sizeof(set_cookie)) == HAL_OK,
+          "激活成功（event_bus/cfg 均已就绪）");
+
+    CHECK(cfg_get_str("localUser.name", probe, sizeof(probe)) == HAL_OK && strcmp(probe, "evtuser") == 0,
+          "激活成功后 config 里的 localUser.name 是刚提交的用户名，实际：%s", probe);
+
+    os_sleep_ms(50);   /* 事件总线异步投递线程需要时间跑完 */
+    CHECK(g_bind_activated_hits == 1, "订阅者确实收到一次 EVT_BIND_ACTIVATED，实际 hits=%d", g_bind_activated_hits);
+
+    CHECK(event_bus_unsubscribe(sub) == HAL_OK, "取消订阅");
+    CHECK(event_bus_deinit() == HAL_OK, "事件总线卸载");
+    cfg_deinit();
+    remove("console_test_cfg_evt.json");
+
+    /* 收尾：把凭据状态还原为"从未配置"，避免影响后续用例对初始状态的假设 */
+    hal()->crypto->secure_delete(HAL_SEC_KEY_LOCAL_USER);
+    console_auth_test_reload();
 }
 
 static void test_cred_fallback_store(void)
@@ -2028,6 +2108,7 @@ int main(void)
     test_corrupt_cred_not_reset();
     test_auth_endpoints();
     test_cred_not_in_config();
+    test_activation_wires_config_and_event_bus();   /* Ruling 21：event_bus_init 接入 + 成功路径覆盖 */
     test_cred_fallback_store();
     test_config_rules();
     test_caps_json();
