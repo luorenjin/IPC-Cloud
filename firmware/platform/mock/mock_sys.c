@@ -7,6 +7,7 @@
  */
 #include "hal/hal.h"
 #include "mock_os.h"
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -239,8 +240,15 @@ static hal_err_t c_read(const char *key, uint8_t *buf, size_t cap, size_t *len)
     if (!key || !buf || !len) return HAL_EINVAL;
     if (strcmp(key, HAL_SEC_KEY_DEVICE_KEY) == 0) return HAL_ENOTSUP;
     sec_path(key, path, sizeof(path));
+    errno = 0;
     fp = fopen(path, "rb");
-    if (!fp) return HAL_ENODEV;
+    if (!fp) {
+        /* 评审 Ruling 19（C-2）：与 gk_crypto.c 的 c_read 同一处理——区分
+           ENOENT（真未播种，HAL_ENODEV）与其它 fopen 失败（HAL_EIO），
+           不再把"文件被替换成同名目录"等场景误判为"从未配置"。errno 必须
+           紧跟 fopen 失败立即读取。 */
+        return (errno == ENOENT) ? HAL_ENODEV : HAL_EIO;
+    }
     n = fread(buf, 1, cap, fp);
     fclose(fp);
     *len = n;

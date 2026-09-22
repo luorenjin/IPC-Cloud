@@ -1399,6 +1399,23 @@ static hal_err_t ep_logout(const http_req_t *req, char *out, size_t cap,
  * 已被配置过，不能当成"从未配置"覆盖）一律拒绝，返回 HAL_ESTATE（HTTP 409）。
  * 这是安全红线：否则任何人在局域网内都能重置一台已经设好密码的设备。
  *
+ * 评审 Ruling 19（C-2）订正：仅凭 `s_cred_load_rc == HAL_ENODEV` 并不足以断定
+ * "从未配置"——`hal_crypto`/软存储的 `c_read` 此前把**任何** `fopen` 失败
+ * （文件不存在的 ENOENT，也包括同名目录、权限被改等其它错误）一律折叠成
+ * `HAL_ENODEV`，导致"凭据文件被误删/被替换成同名目录"这类攻击也会呈现为
+ * "从未配置"，允许攻击者用自己的口令重新激活一台其实已经设过密码的设备
+ * （fail-open）。现分两层堵住：
+ *  1) `c_read` 底层区分 errno==ENOENT（真不存在→HAL_ENODEV）与其它失败
+ *     （HAL_EIO，见 gk_crypto.c/mock_sys.c），后者不再被 ep_activate 当作
+ *     "从未配置"。
+ *  2) 本函数在网关判据之外再加一条**独立**的第二判据，不依赖第 1 层是否
+ *     生效：若 `cfg_get_str("localUser.name", ...)` 命中（HAL_OK，说明
+ *     "曾经成功激活过、并且成功写过 config"）而此刻凭据读取却是
+ *     HAL_ENODEV，这本身就是矛盾态（正常首次激活时 config 还没有这个键，
+ *     命中 HAL_EINVAL 未初始化或 HAL_ENODEV 键不存在，不会落进这一分支），
+ *     判定为异常并拒绝，不当作首次激活放行。两层独立是为了防止其中一层
+ *     出现遗漏（比如第 1 层修复得不彻底）时仍有第二道闸门兜底。
+ *
  * 请求体 {"user": "...（可选）", "password": "..."}：password 必填，按
  * CONSOLE_PWD_MIN/MAX 校验；user 缺省沿用 auth_user_name() 的现有逻辑
  * （config 的 localUser.name，再缺省 "admin"）。用户自己设的密码不再强制
@@ -1426,6 +1443,20 @@ static hal_err_t ep_activate(const json_t *j, char *out, size_t cap)
 
     cred_ensure_loaded();
     if (s_cred_load_rc != HAL_ENODEV) return HAL_ESTATE;
+
+    /* 第二判据（评审 Ruling 19）：与上面的网关相互独立，任何一层单独生效
+       都能挡住攻击。config 尚未初始化时 cfg_get_str 返回 HAL_EINVAL，
+       键不存在时返回 HAL_ENODEV，两者都自然落不进下面的 if；只有真正
+       "曾经写成功过 localUser.name"（HAL_OK）才会命中。 */
+    {
+        char probe[CONSOLE_USER_MAX];
+        if (cfg_get_str("localUser.name", probe, sizeof(probe)) == HAL_OK) {
+            LOGE(MOD, "拒绝激活：config 显示曾经激活过（localUser.name 已写入），"
+                      "但凭据读取判定为从未配置，两者矛盾，判定为异常状态而非首次激活，"
+                      "请检查凭据存储是否被篡改或误删");
+            return HAL_ESTATE;
+        }
+    }
 
     if ((rc = body_str(j, "password", password, sizeof(password))) != HAL_OK) return rc;
     pwd_len = strlen(password);

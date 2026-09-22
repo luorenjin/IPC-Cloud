@@ -18,6 +18,7 @@
 #endif
 
 #include "hal/hal.h"
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -113,8 +114,18 @@ static hal_err_t c_read(const char *key, uint8_t *buf, size_t cap, size_t *len)
     if (strcmp(key, HAL_SEC_KEY_DEVICE_KEY) == 0) return HAL_ENOTSUP;
     if (!sec_path(key, path, sizeof(path))) return HAL_EINVAL;
 
+    errno = 0;
     fp = fopen(path, "rb");
-    if (!fp) return HAL_ENODEV;
+    if (!fp) {
+        /* 评审 Ruling 19（C-2）：区分"文件从未创建过"（ENOENT，上层据此判定
+           "从未配置"，允许 /api/v1/auth/activate 首次激活）与"文件存在但打不开"
+           （权限被改、同名目录、磁盘故障等，HAL_EIO）。此前两者一律折叠成
+           HAL_ENODEV，攻击者只需让 fopen 以任何方式失败（例如把凭据文件替换成
+           同名目录，触发 EISDIR）就能让一台已激活设备重新呈现"从未配置"，
+           进而用自己的口令重新激活——fail-open。errno 必须紧跟 fopen 失败
+           立即读取，不能在其后插入任何可能改写 errno 的调用。 */
+        return (errno == ENOENT) ? HAL_ENODEV : HAL_EIO;
+    }
     n = fread(buf, 1, cap, fp);
     fclose(fp);
     *len = n;
