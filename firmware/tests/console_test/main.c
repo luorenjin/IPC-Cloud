@@ -1340,16 +1340,48 @@ static void test_api_system_endpoints(void)
     CHECK(strstr(body, "\"code\":0") != NULL, "reboot 响应体正确，实际：%s", body);
     CHECK(deferred == true, "reboot 登记了延后动作而不是内联执行");
 
-    req_make(&req, "POST", "/api/v1/system/reset", "{\"keep_network\":true}", cookie);
-    deferred = false;
-    CHECK(console_api_test_dispatch(&req, body, sizeof(body), &deferred) == HAL_OK, "reset 端点返回成功");
-    CHECK(deferred == true, "reset 登记了延后动作而不是内联执行");
-
     req_make(&req, "GET", "/api/v1/system/reboot", NULL, cookie);
     CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_EINVAL, "reboot 必须是 POST");
 
     req_make(&req, "GET", "/api/v1/bogus", NULL, cookie);
     CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_ENODEV, "未知路径 404 语义");
+
+    /* reset 放在最后：它会清除凭据与全部会话 */
+    req_make(&req, "POST", "/api/v1/system/reset", "{\"keep_network\":true}", cookie);
+    deferred = false;
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), &deferred) == HAL_OK, "reset 端点返回成功");
+    CHECK(deferred == true, "reset 登记了延后动作而不是内联执行");
+}
+
+/** 恢复出厂必须清除本地管理员凭据、使旧会话失效，并回到"未激活"。 */
+static void test_reset_wipes_credentials(void)
+{
+    http_req_t req;
+    char body[4096], cookie[128], setck[128];
+    bool must_change = false;
+
+    SECTION("恢复出厂清除凭据");
+    CHECK(cfg_init(NULL, "console_test_cfg_reset.json") == HAL_OK, "配置中心就绪");
+    CHECK(console_api_register_rules() == HAL_OK, "登记规则");
+    console_auth_reset_lockout();
+    CHECK(console_auth_seed("Admin@12345", "admin", false) == HAL_OK, "已激活");
+    CHECK(cfg_set_str("localUser.name", "admin") == HAL_OK, "激活写入用户名");
+    CHECK(do_login("admin", "Admin@12345", "192.168.50.12", cookie, sizeof(cookie), &must_change) == HAL_OK,
+          "登录");
+
+    req_make(&req, "POST", "/api/v1/system/reset", NULL, cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "reset 成功");
+
+    req_make(&req, "GET", "/api/v1/auth/state", NULL, NULL);
+    CHECK(console_auth_test_dispatch(&req, "192.168.50.12", body, sizeof(body), setck, sizeof(setck)) == HAL_OK,
+          "state 可读");
+    CHECK(strstr(body, "\"activated\":false") != NULL, "出厂后回到未激活，实际：%s", body);
+
+    req_make(&req, "GET", "/api/v1/system/status", NULL, cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_EUNAUTH_, "旧会话失效");
+
+    cfg_deinit();
+    remove("console_test_cfg_reset.json");
 }
 
 /**
@@ -2390,6 +2422,7 @@ int main(void)
     test_capabilities_endpoint();
     test_api_config_endpoints();
     test_api_system_endpoints();
+    test_reset_wipes_credentials();
     test_reboot_handler_order();
 
     test_net_ap_decision();

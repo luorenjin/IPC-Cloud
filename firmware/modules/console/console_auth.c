@@ -42,6 +42,7 @@
 #include "core/os.h"
 #include "hal/hal.h"
 #include <ctype.h>
+#include <errno.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -952,6 +953,28 @@ hal_err_t console_auth_seed(const char *password, const char *user, bool must_ch
 
 fail:
     secure_wipe(&c, sizeof(c));
+    return rc;
+}
+
+hal_err_t console_auth_wipe(void)
+{
+    hal_err_t rc = HAL_OK;
+
+    sessions_clear();
+    nonces_clear();
+    if (crypto_store_available()) {
+        if (hal()->crypto->secure_delete) {
+            hal_err_t d = hal()->crypto->secure_delete(HAL_SEC_KEY_LOCAL_USER);
+            if (d != HAL_OK && d != HAL_ENODEV) rc = HAL_EIO;
+        }
+    } else if (remove(console_auth_cred_path()) != 0 && errno != ENOENT) {
+        rc = HAL_EIO;
+    }
+    secure_wipe(&s_cred, sizeof(s_cred));
+    s_cred_loaded = true;            /* 已知"无凭据"，不必再读存储 */
+    s_cred_load_rc = HAL_ENODEV;     /* activation_gate 据此判定可重新激活 */
+    if (rc == HAL_OK) LOGI(MOD, "本地账号凭据已清除，设备回到未激活状态");
+    else LOGE(MOD, "清除本地账号凭据失败");
     return rc;
 }
 

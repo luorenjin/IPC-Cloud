@@ -920,6 +920,8 @@ static hal_err_t ep_system_reset(const http_req_t *req, char *out, size_t out_ca
     }
 
     cfg_reset(NULL, 0);
+    /* 出厂 = 回到"未激活"：凭据不清掉的话忘记密码就无法通过出厂找回 */
+    if (console_auth_wipe() != HAL_OK) return HAL_EIO;
 
     rc = fmt_safe(out, out_cap, "{\"code\":0,\"msg\":\"设备将恢复出厂设置并重启\"}");
     if (rc != HAL_OK) return rc;

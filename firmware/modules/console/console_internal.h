@@ -91,6 +91,8 @@ hal_err_t console_hmac_sha256(const uint8_t *key, size_t key_len,
  * 留在"看似已激活"的错误状态，见 `ep_activate` 实现注释。
  */
 hal_err_t console_auth_seed(const char *password, const char *user, bool must_change);
+/** 恢复出厂：删除本地账号凭据、清空会话与挑战，设备回到"未激活"。 */
+hal_err_t console_auth_wipe(void);
 /** 取挑战：salt 十六进制串 + 一次性 nonce（60s 过期） */
 hal_err_t console_auth_challenge(const char *user, char *salt_hex, size_t salt_cap,
                                  char *nonce, size_t nonce_cap);
