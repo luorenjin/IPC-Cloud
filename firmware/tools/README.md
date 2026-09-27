@@ -1,0 +1,36 @@
+# firmware/tools
+
+## board.py：真机免断电部署与冒烟测试
+
+依赖：`pip install pyserial`。串口默认 `COM6`（或设置环境变量 `IPC_BOARD_PORT` / 传 `--port`）。
+
+**运行前断开占用串口的程序**（MobaXterm、PuTTY、BurnTool）；Tftpd64 等占 UDP 69 的程序也要关掉。首次运行时 Windows 防火墙若弹窗，放行 Python 的专用网络访问。
+
+| 命令 | 用途 | 耗时 |
+|---|---|---|
+| `python firmware/tools/board.py deploy-app` | 只替换 `/usr/bin/ipc_app` 并重启服务，保留 MAC、配置和激活状态；改了 `ipc_app` 或前端时用 | ~10s |
+| `python firmware/tools/board.py reflash-rootfs` | `reboot` → 抢停 U-Boot → TFTP 下载 → 擦写整个 rootfs 分区 → `reset`；改了 rootfs 内容时用 | ~1–2min |
+| `python firmware/tools/board.py smoke` | 冒烟测试：进程存在、MAC 固定、`GET /`、`/api/v1/auth/state`、未登录拦截、拉回应用日志 | ~5s |
+| `python firmware/tools/board.py shell "<命令>"` | 在板子上执行一条命令 | — |
+
+`deploy-app`、`reflash-rootfs` 完成后都会自动跑 `smoke`，退出码 0 表示通过，可以直接接到 CI 或其他脚本里。
+
+典型流程：
+
+```bash
+cd firmware/docker && make -f Makefile fw-build && cd ../..
+python firmware/tools/board.py deploy-app
+
+# rootfs 有改动时
+cd firmware/docker && make -f Makefile fw-all && cd ../..
+python firmware/tools/board.py reflash-rootfs
+```
+
+串口全文与应用日志保存在 `firmware/tools/logs/`（已加入 `.gitignore`）。
+
+### 说明
+
+- **reflash-rootfs 会擦掉整个 10MB 分区**，所以 `/etc/ipc/mac` 和 `/etc/ipc/config.json` 会被清掉：之后会生成新 MAC，控制台回到未激活状态。只改程序时用 `deploy-app`。
+- 板子 U-Boot 的 `bootdelay=0`，脚本在 `reboot` 后持续发送按键抢停；偶尔没抢到会报「没抢停 autoboot」，这时板子会正常启动，重跑即可。
+- U-Boot 阶段复用板子当前的 DHCP 地址作为临时静态 IP，`ethaddr` 无效时临时设置为 `02:00:00:00:00:01`，都不执行 `saveenv`。
+- 板子起不来、串口进不了 U-Boot 时，只能断电后用 BurnTool 恢复（见 `docker/flash/烧录指南.md`）。以后想全自动，可以加一个 USB 继电器控制电源。
