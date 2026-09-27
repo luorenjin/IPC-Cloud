@@ -12,6 +12,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <limits.h>
+#include <time.h>
 #include <sys/stat.h>
 
 #ifdef _WIN32
@@ -120,7 +121,13 @@ static hal_err_t s_get_stats(hal_sys_stats_t *st)
 
 static hal_err_t s_boot_reason(hal_boot_reason_t *r) { if (!r) return HAL_EINVAL; *r = HAL_BOOT_POWER_ON; return HAL_OK; }
 static uint64_t  s_monotonic_us(void) { return mock_os_monotonic_us(); }
-static hal_err_t s_set_wallclock(int64_t utc) { (void)utc; return HAL_OK; }
+static int64_t g_wall_offset;   /* 手动校时：墙钟 = time(NULL) + offset */
+static hal_err_t s_set_wallclock(int64_t utc)
+{
+    if (utc < 0) return HAL_EINVAL;
+    g_wall_offset = utc - (int64_t)time(NULL);
+    return HAL_OK;
+}
 static hal_err_t s_reboot(void) { printf("[mock] reboot requested\n"); return HAL_OK; }
 static hal_err_t s_factory_reset(bool keep_net) { printf("[mock] factory reset keep_net=%d\n", keep_net); return HAL_OK; }
 
@@ -231,10 +238,39 @@ static hal_err_t s_ota_abort(void)
     return HAL_OK;
 }
 
+/* ---- 可选能力：网络应用 / NTP / 墙钟（记录调用供测试断言）---- */
+
+static char    g_last_net[256];
+static char    g_last_ntp[128];
+
+static hal_err_t s_apply_net(const char *ip, const char *mask, const char *gw, const char *dns)
+{
+    snprintf(g_last_net, sizeof(g_last_net), "%s/%s/%s/%s",
+             ip ? ip : "", mask ? mask : "", gw ? gw : "", dns ? dns : "");
+    return HAL_OK;
+}
+
+static hal_err_t s_apply_ntp(const char *server)
+{
+    snprintf(g_last_ntp, sizeof(g_last_ntp), "%s", server ? server : "");
+    return HAL_OK;
+}
+
+static hal_err_t s_get_wallclock(int64_t *utc)
+{
+    if (!utc) return HAL_EINVAL;
+    *utc = (int64_t)time(NULL) + g_wall_offset;
+    return HAL_OK;
+}
+
+void mock_sys_last_net(char *buf, size_t cap) { snprintf(buf, cap, "%s", g_last_net); }
+void mock_sys_last_ntp(char *buf, size_t cap) { snprintf(buf, cap, "%s", g_last_ntp); }
+
 const hal_sys_ops_t mock_sys_ops = {
     s_get_info, s_get_stats, s_boot_reason, s_monotonic_us, s_set_wallclock,
     s_reboot, s_factory_reset, s_wdt_enable, s_wdt_feed, s_wdt_disable,
-    s_ota_get_state, s_ota_begin, s_ota_write, s_ota_end, s_ota_switch, s_ota_confirm, s_ota_abort
+    s_ota_get_state, s_ota_begin, s_ota_write, s_ota_end, s_ota_switch, s_ota_confirm, s_ota_abort,
+    s_apply_net, s_apply_ntp, s_get_wallclock
 };
 
 /* ---- 安全存储（文件模拟）---- */

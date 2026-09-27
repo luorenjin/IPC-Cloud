@@ -1,16 +1,22 @@
 #!/bin/sh
-# Pin the eth0 MAC, then get an address via DHCP.
+# Pin the eth0 MAC, then configure eth0 from /etc/ipc/net.conf (static) or DHCP.
 #
 # MAC: the kernel ignores U-Boot ethaddr and picks a random MAC on every boot,
 # so the DHCP address keeps changing. On first boot we generate a locally
 # administered unicast address (first byte 0x02), save it to $MAC_FILE, and
 # reuse it afterwards. A factory-assigned MAC written to $MAC_FILE takes over.
+#
+# Network: /etc/ipc/net.conf is written by ipc_app (console "network" page):
+#   MODE=static|dhcp  IP=  MASK=  GW=  DNS=
+# Missing file means DHCP. "restart" is used by ipc_app to re-apply settings.
 # udhcpc -b: go to background if no lease yet, so rcS is never blocked.
 
 IFACE=eth0
 UDHCPC=/sbin/udhcpc
 SCRIPT=/usr/share/udhcpc/default.script
 MAC_FILE=/etc/ipc/mac
+NET_CONF=/etc/ipc/net.conf
+PIDFILE=/var/run/udhcpc.$IFACE.pid
 
 valid_mac() {
     echo "$1" | grep -qiE '^[0-9a-f]{2}(:[0-9a-f]{2}){5}$' || return 1
@@ -20,29 +26,78 @@ valid_mac() {
     return 0
 }
 
+valid_ip() {
+    echo "$1" | grep -qE '^[0-9]{1,3}(\.[0-9]{1,3}){3}$'
+}
+
 gen_mac() {
     printf '02:%s\n' "$(head -c 5 /dev/urandom | od -An -tx1 | tr -s ' \n' ':' | sed 's/^://;s/:$//')"
 }
 
-MAC=$(cat "$MAC_FILE" 2>/dev/null | tr -d ' \r\n')
-if ! valid_mac "$MAC"; then
-    MAC=$(gen_mac)
-    if valid_mac "$MAC"; then
-        mkdir -p "$(dirname "$MAC_FILE")"
-        echo "$MAC" > "$MAC_FILE.tmp" && mv "$MAC_FILE.tmp" "$MAC_FILE" && sync
-        echo "[S81dhcp] first boot, generated MAC $MAC"
-    else
-        echo "[S81dhcp] MAC generation failed, keeping driver random MAC"
-        MAC=
+setup_mac() {
+    MAC=$(cat "$MAC_FILE" 2>/dev/null | tr -d ' \r\n')
+    if ! valid_mac "$MAC"; then
+        MAC=$(gen_mac)
+        if valid_mac "$MAC"; then
+            mkdir -p "$(dirname "$MAC_FILE")"
+            echo "$MAC" > "$MAC_FILE.tmp" && mv "$MAC_FILE.tmp" "$MAC_FILE" && sync
+            echo "[S81dhcp] first boot, generated MAC $MAC"
+        else
+            echo "[S81dhcp] MAC generation failed, keeping driver random MAC"
+            MAC=
+        fi
     fi
+}
+
+stop_dhcp() {
+    [ -f "$PIDFILE" ] && kill "$(cat "$PIDFILE")" 2>/dev/null
+    rm -f "$PIDFILE"
+}
+
+start_static() {
+    ifconfig "$IFACE" "$IP" netmask "$MASK" up
+    # bounded: an unbounded "until route fails" loop hangs rcS if route never fails
+    n=0; while [ $n -lt 5 ] && route del default dev "$IFACE" 2>/dev/null; do n=$((n+1)); done
+    [ -n "$GW" ] && route add default gw "$GW" dev "$IFACE"
+    if [ -n "$DNS" ]; then
+        echo "nameserver $DNS" > /etc/resolv.conf
+    elif [ -n "$GW" ]; then
+        echo "nameserver $GW" > /etc/resolv.conf
+    fi
+    echo "[S81dhcp] $IFACE static $IP"
+}
+
+start_dhcp() {
+    [ -x "$UDHCPC" ] || { echo "[S81dhcp] $UDHCPC not found, skip DHCP"; return; }
+    "$UDHCPC" -b -i "$IFACE" -s "$SCRIPT" -p "$PIDFILE"
+}
+
+MODE=dhcp
+IP= MASK= GW= DNS=
+[ -f "$NET_CONF" ] && . "$NET_CONF"
+if [ "$MODE" = "static" ] && ! { valid_ip "$IP" && valid_ip "$MASK"; }; then
+    echo "[S81dhcp] invalid static config, falling back to DHCP"
+    MODE=dhcp
 fi
 
-ifconfig lo 127.0.0.1 up
-ifconfig "$IFACE" down
-[ -n "$MAC" ] && ifconfig "$IFACE" hw ether "$MAC" && echo "[S81dhcp] $IFACE MAC $MAC"
-ifconfig "$IFACE" up
+case "$1" in
+    restart)
+        stop_dhcp
+        ifconfig "$IFACE" 0.0.0.0
+        ;;
+    *)
+        setup_mac
+        ifconfig lo 127.0.0.1 up
+        ifconfig "$IFACE" down
+        [ -n "$MAC" ] && ifconfig "$IFACE" hw ether "$MAC" && echo "[S81dhcp] $IFACE MAC $MAC"
+        ifconfig "$IFACE" up
+        ;;
+esac
 
-[ -x "$UDHCPC" ] || { echo "[S81dhcp] $UDHCPC not found, skip DHCP"; exit 0; }
-"$UDHCPC" -b -i "$IFACE" -s "$SCRIPT" -p /var/run/udhcpc.$IFACE.pid
+if [ "$MODE" = "static" ]; then
+    start_static
+else
+    start_dhcp
+fi
 
 exit 0

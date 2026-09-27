@@ -12,7 +12,7 @@ case "$1" in
     renew|bound)
         ifconfig "$interface" "$ip" $BROADCAST $NETMASK
         if [ -n "$router" ]; then
-            while route del default gw 0.0.0.0 dev "$interface" 2>/dev/null; do :; done
+            n=0; while [ $n -lt 5 ] && route del default gw 0.0.0.0 dev "$interface" 2>/dev/null; do n=$((n+1)); done
             for i in $router; do
                 route add default gw "$i" dev "$interface"
             done

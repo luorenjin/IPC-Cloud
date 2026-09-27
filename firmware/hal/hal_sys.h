@@ -78,6 +78,15 @@ typedef struct hal_sys_ops {
     hal_err_t (*ota_switch_slot)(int slot);             /**< 设置下次启动分区并置 pending */
     hal_err_t (*ota_confirm)(void);                     /**< 清 pending */
     hal_err_t (*ota_abort)(void);
+
+    /* ---- 以下为可选能力（NULL 表示平台不支持），追加在末尾以保持位置初始化兼容 ---- */
+
+    /** 应用有线网络。static_ip 为空串表示 DHCP；调用后网卡地址可能改变。 */
+    hal_err_t (*apply_net)(const char *static_ip, const char *mask, const char *gw, const char *dns);
+    /** 启停 NTP 同步。server 为空串表示停止。 */
+    hal_err_t (*apply_ntp)(const char *server);
+    /** 读系统墙钟（UTC 秒）。 */
+    hal_err_t (*get_wallclock)(int64_t *utc_seconds);
 } hal_sys_ops_t;
 
 #ifdef __cplusplus

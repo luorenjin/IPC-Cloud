@@ -1411,6 +1411,59 @@ static void test_api_system_extras(void)
     remove("console_test_cfg_sys.json");
 }
 
+/* mock 平台测试钩子（platform/mock/mock_sys.c）：最近一次 apply_net 的参数 */
+void mock_sys_last_net(char *buf, size_t cap);
+hal_err_t console_apply_net(void);
+
+/** 网络设置应用：校验静态地址、延后执行、返回新地址 */
+static void test_api_net_apply(void)
+{
+    http_req_t req;
+    char body[4096], cookie[128], last[256];
+    bool must_change = false, deferred = false;
+
+    SECTION("网络设置应用");
+    CHECK(cfg_init(NULL, "console_test_cfg_net.json") == HAL_OK, "配置中心就绪");
+    CHECK(console_api_register_rules() == HAL_OK, "登记规则");
+    console_auth_reset_lockout();
+    CHECK(console_auth_seed("Admin@12345", "admin", false) == HAL_OK, "已激活");
+    CHECK(do_login("admin", "Admin@12345", "192.168.50.14", cookie, sizeof(cookie), &must_change) == HAL_OK, "登录");
+
+    req_make(&req, "PUT", "/api/v1/config",
+             "{\"net.dhcp\":false,\"net.ip\":\"192.168.1.50\",\"net.mask\":\"255.255.255.0\",\"net.gw\":\"10.0.0.1\"}", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "写静态配置");
+    req_make(&req, "POST", "/api/v1/system/net/apply", NULL, cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_EINVAL, "网关与 IP 不同网段被拒");
+
+    req_make(&req, "PUT", "/api/v1/config", "{\"net.ip\":\"192.168.1.256\",\"net.gw\":\"192.168.1.1\"}", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "写非法 IP");
+    req_make(&req, "POST", "/api/v1/system/net/apply", NULL, cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_EINVAL, "非法 IPv4 被拒");
+
+    req_make(&req, "PUT", "/api/v1/config", "{\"net.ip\":\"192.168.1.50\"}", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "修正 IP");
+    req_make(&req, "POST", "/api/v1/system/net/apply", NULL, cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), &deferred) == HAL_OK, "合法静态配置接受");
+    CHECK(deferred == true, "网络应用延后到响应发出之后");
+    CHECK(strstr(body, "\"new_ip\":\"192.168.1.50\"") != NULL, "返回新地址，实际：%s", body);
+
+    CHECK(console_apply_net() == HAL_OK, "延后动作本身可执行");
+    mock_sys_last_net(last, sizeof(last));
+    CHECK(strcmp(last, "192.168.1.50/255.255.255.0/192.168.1.1/") == 0, "HAL 收到静态参数，实际：%s", last);
+
+    req_make(&req, "PUT", "/api/v1/config", "{\"net.dhcp\":true}", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "切回 DHCP");
+    req_make(&req, "POST", "/api/v1/system/net/apply", NULL, cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "DHCP 接受");
+    CHECK(strstr(body, "\"new_ip\":\"\"") != NULL, "DHCP 时新地址为空，实际：%s", body);
+    CHECK(console_apply_net() == HAL_OK, "DHCP 应用");
+    mock_sys_last_net(last, sizeof(last));
+    CHECK(strcmp(last, "///") == 0, "DHCP 时传空串，实际：%s", last);
+
+    cfg_deinit();
+    remove("console_test_cfg_net.json");
+}
+
 /** 恢复出厂必须清除本地管理员凭据、使旧会话失效，并回到"未激活"。 */
 static void test_reset_wipes_credentials(void)
 {
@@ -2482,6 +2535,7 @@ int main(void)
     test_api_config_endpoints();
     test_api_system_endpoints();
     test_api_system_extras();
+    test_api_net_apply();
     test_reset_wipes_credentials();
     test_reboot_handler_order();
 

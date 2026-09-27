@@ -90,6 +90,22 @@ hal_err_t console_hmac_sha256(const uint8_t *key, size_t key_len,
  * 再指望本函数从 config 读回——那个往返顺序会在播种失败时把 config
  * 留在"看似已激活"的错误状态，见 `ep_activate` 实现注释。
  */
+/* ---- 配置下发（console_apply.c）---- */
+typedef struct {
+    bool dhcp;
+    char ip[16], mask[16], gw[16], dns[16];
+} console_net_cfg_t;
+
+/** 严格解析点分十进制 IPv4（不接受多余字符）；out 为主机字节序 */
+bool        console_ipv4_parse(const char *s, uint32_t *out);
+hal_err_t   console_net_read(console_net_cfg_t *c);
+/** 静态地址合法性；合法返回 NULL，否则返回中文原因 */
+const char *console_net_check(const console_net_cfg_t *c);
+/** 按 net.* 配置经 HAL 应用网络（可能改变本机地址，调用方须先回响应） */
+hal_err_t   console_apply_net(void);
+/** 按 time.ntp.* 配置经 HAL 起停 NTP */
+hal_err_t   console_apply_time(void);
+
 hal_err_t console_auth_seed(const char *password, const char *user, bool must_change);
 /** 恢复出厂：删除本地账号凭据、清空会话与挑战，设备回到"未激活"。 */
 hal_err_t console_auth_wipe(void);

@@ -4,50 +4,85 @@
   const S = IPC.S, h = IPC.h, esc = IPC.esc, toast = IPC.toast, $ = IPC.$;
   const { switchRow, selRow, numRow, textRow, chkRow, saveRow, sec } = IPC.ui;
 
+  const IPV4 = /^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}$/;
+
+  /** 改静态地址后浏览器会失联：先提示新地址，倒计时后跳转 */
+  function jumpTo(ip) {
+    const url = location.protocol + '//' + ip + (location.port ? ':' + location.port : '') + '/';
+    const mask = h(`<div class="user-modal-mask" role="dialog" aria-modal="true"><div class="user-modal" style="width:380px">
+      <div class="user-modal-bd" style="text-align:center;padding:28px 20px"><b>设备地址已改为 ${esc(ip)}</b>
+      <p class="tip" style="margin-top:12px"><span id="net-cd">5</span> 秒后跳转到 <a href="${esc(url)}">${esc(url)}</a></p></div></div></div>`);
+    document.body.append(mask);
+    let n = 5;
+    const t = setInterval(() => {
+      n -= 1;
+      const el = document.getElementById('net-cd');
+      if (el) el.textContent = String(n);
+      if (n <= 0) { clearInterval(t); location.href = url; }
+    }, 1000);
+  }
+
   IPC.page('pNet', function (b) {
-    const isStatic = S.netMode === '静态IP';
-    const rows = [
-      h('<div class="frow"><div class="lab">连接状态</div><b>已连接</b></div>'),
-      selRow('模式', 'netMode', ['自动获取', '静态IP']),
-      h('<div class="sec-h" style="margin-top:8px">基本设置</div>')
-    ];
-
-    if (isStatic) {
-      rows.push(textRow('IP地址', 'ip'));
-      rows.push(textRow('掩码', 'mask'));
-      rows.push(textRow('网关', 'gw'));
-      rows.push(h(`<div class="frow"><div class="lab">DNS</div>
-        <input type="text" id="dns1" value="${esc(S.dns)}" aria-label="DNS1" style="width:150px;max-width:150px">
-        <input type="text" id="dns2" value="${esc(S.dns2 || '0.0.0.0')}" aria-label="DNS2" style="width:150px;max-width:150px">
-        <span class="unit">主 / 备</span>
-      </div>`));
-    } else {
-      // DHCP：与实机一致，地址只读展示，DNS 显示主备两个
-      rows.push(h(`<div class="frow"><div class="lab">IP地址</div><span class="muted">${esc(S.ip)}</span></div>`));
-      rows.push(h(`<div class="frow"><div class="lab">掩码</div><span class="muted">${esc(S.mask)}</span></div>`));
-      rows.push(h(`<div class="frow"><div class="lab">网关</div><span class="muted">${esc(S.gw)}</span></div>`));
-      rows.push(h(`<div class="frow"><div class="lab">DNS</div><span class="muted">${esc(S.dns)} , ${esc(S.dns2 || '0.0.0.0')}</span></div>`));
-    }
-
-    b.append(sec('', rows));
-    b.append(sec('高级设置', [numRow('MTU', 'mtu', 576, 9000)]));
-    b.append(saveRow());
-
-    // 静态模式：绑定双 DNS
-    const d1 = $('#dns1');
-    const d2 = $('#dns2');
-    if (d1) d1.onchange = (e) => { S.dns = e.target.value.trim(); };
-    if (d2) d2.onchange = (e) => { S.dns2 = e.target.value.trim() || '0.0.0.0'; };
-
-    // 模式切换后重绘（静态 ↔ DHCP 字段结构不同）
-    const modeSel = b.querySelector('select');
-    if (modeSel) {
-      const prev = modeSel.onchange;
-      modeSel.onchange = (e) => {
-        if (prev) prev(e);
-        IPC.render();
-      };
-    }
+    const box = h('<div class="sys-loading">正在读取网络设置…</div>');
+    b.append(box);
+    Promise.all([IPC.getCfg('net'), IPC.api('GET', '/api/v1/system/info')])
+      .then(([cfg, info]) => {
+        if (!box.isConnected) return;
+        box.remove();
+        const form = {
+          dhcp: cfg.dhcp !== false,
+          ip: cfg.ip || info.ip || '', mask: cfg.mask || '255.255.255.0', gw: cfg.gw || '', dns: cfg.dns || ''
+        };
+        const draw = () => {
+          b.innerHTML = '';
+          const rows = [
+            h(`<div class="frow"><div class="lab">当前地址</div><b>${esc(info.ip || '未获取')}</b></div>`),
+            h(`<div class="frow"><div class="lab">MAC</div><span class="muted">${esc((info.mac || '-').toUpperCase())}</span></div>`),
+            h(`<div class="frow"><div class="lab">模式</div><select id="net-mode">
+              <option value="dhcp" ${form.dhcp ? 'selected' : ''}>自动获取（DHCP）</option>
+              <option value="static" ${form.dhcp ? '' : 'selected'}>静态IP</option></select></div>`)
+          ];
+          if (!form.dhcp) {
+            [['IP地址', 'ip'], ['掩码', 'mask'], ['网关', 'gw'], ['DNS', 'dns']].forEach(([lab, k]) => {
+              rows.push(h(`<div class="frow"><div class="lab">${lab}</div><input type="text" data-k="${k}" value="${esc(form[k])}"></div>`));
+            });
+          } else {
+            rows.push(h('<p class="tip" style="padding-left:84px">由路由器自动分配地址。切换后请在路由器或串口日志中查看新地址。</p>'));
+          }
+          b.append(sec('', rows));
+          b.querySelectorAll('input[data-k]').forEach((inp) => { inp.oninput = () => { form[inp.dataset.k] = inp.value.trim(); }; });
+          b.querySelector('#net-mode').onchange = (e) => { form.dhcp = e.target.value === 'dhcp'; draw(); };
+          b.append(IPC.ui.saveRow(() => {
+            if (!form.dhcp) {
+              if (!IPV4.test(form.ip)) return Promise.reject(new Error('IP 地址格式不正确'));
+              if (!IPV4.test(form.mask)) return Promise.reject(new Error('子网掩码格式不正确'));
+              if (form.gw && !IPV4.test(form.gw)) return Promise.reject(new Error('网关格式不正确'));
+              if (form.dns && !IPV4.test(form.dns)) return Promise.reject(new Error('DNS 格式不正确'));
+              const n = (s) => s.split('.').reduce((a, x) => (a * 256) + (+x), 0);
+              const m = n(form.mask);
+              if (form.gw && (n(form.gw) & m) >>> 0 !== (n(form.ip) & m) >>> 0)
+                return Promise.reject(new Error('网关与 IP 不在同一网段'));
+              if (!confirm('设备地址将改为 ' + form.ip + '，浏览器会跳转到新地址，继续？')) return Promise.reject(new Error('已取消'));
+            } else if (cfg.dhcp === false && !confirm('切换为自动获取后设备地址会改变，当前页面将无法访问，继续？')) {
+              return Promise.reject(new Error('已取消'));
+            }
+            const body = form.dhcp ? { 'net.dhcp': true }
+              : { 'net.dhcp': false, 'net.ip': form.ip, 'net.mask': form.mask, 'net.gw': form.gw, 'net.dns': form.dns };
+            return IPC.saveCfg(body)
+              .then(() => IPC.api('POST', '/api/v1/system/net/apply').catch((e) => {
+                if (e.code === -1) throw new Error('设备拒绝了该网络设置（掩码/网关/广播地址不合法）');
+                throw e;
+              }))
+              .then((r) => {
+                cfg.dhcp = form.dhcp;
+                if (r.new_ip && r.new_ip !== location.hostname) jumpTo(r.new_ip);
+                else if (!r.new_ip) toast('已切换为自动获取，请在路由器中查看设备新地址');
+              });
+          }));
+        };
+        draw();
+      })
+      .catch((e) => { if (box.isConnected) box.textContent = '读取失败：' + e.message; });
   });
 
   IPC.page('pPort', function (b) {

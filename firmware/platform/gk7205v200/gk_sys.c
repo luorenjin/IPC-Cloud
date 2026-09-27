@@ -9,7 +9,9 @@
 #include "hal/hal.h"
 #include "gk_procfs.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #ifdef _WIN32
 /* 真机目标是 Linux ARM，clock_gettime/CLOCK_MONOTONIC 为标准接口；
@@ -236,6 +238,79 @@ static hal_err_t sys_ota_switch(int slot)                { (void)slot; return HA
 static hal_err_t sys_ota_confirm(void)                   { return HAL_ENOTSUP; }
 static hal_err_t sys_ota_abort(void)                     { return HAL_ENOTSUP; }
 
+/* ---- 网络 / NTP / 墙钟：交给 rootfs 里的开机脚本与 busybox 工具 ---- */
+
+#define GK_NET_CONF   "/etc/ipc/net.conf"
+#define GK_NET_SCRIPT "/etc/init.d/S81dhcp"
+
+/** 只允许点分十进制字符，防止写进 shell 可解析的配置文件里被注入 */
+static bool ipv4_chars_ok(const char *s)
+{
+    for (; s && *s; s++) if (!((*s >= '0' && *s <= '9') || *s == '.')) return false;
+    return true;
+}
+
+static hal_err_t sys_apply_net(const char *ip, const char *mask, const char *gw, const char *dns)
+{
+#ifdef _WIN32
+    (void)ip; (void)mask; (void)gw; (void)dns;
+    return HAL_ENOTSUP;
+#else
+    const char *tmp = GK_NET_CONF ".tmp";
+    bool dhcp = !ip || !ip[0];
+    FILE *fp;
+
+    if (!ipv4_chars_ok(ip) || !ipv4_chars_ok(mask) || !ipv4_chars_ok(gw) || !ipv4_chars_ok(dns))
+        return HAL_EINVAL;
+    fp = fopen(tmp, "w");
+    if (!fp) return HAL_EIO;
+    if (dhcp) fprintf(fp, "MODE=dhcp\n");
+    else fprintf(fp, "MODE=static\nIP=%s\nMASK=%s\nGW=%s\nDNS=%s\n", ip, mask ? mask : "",
+                 gw ? gw : "", dns ? dns : "");
+    if (fflush(fp) != 0 || fsync(fileno(fp)) != 0) { fclose(fp); remove(tmp); return HAL_EIO; }
+    fclose(fp);
+    if (rename(tmp, GK_NET_CONF) != 0) { remove(tmp); return HAL_EIO; }
+    /* 后台执行：脚本会杀掉 udhcpc、重配网卡，不能阻塞 HTTP 事件循环 */
+    if (system(GK_NET_SCRIPT " restart >/dev/null 2>&1 &") != 0) return HAL_EIO;
+    return HAL_OK;
+#endif
+}
+
+static bool host_chars_ok(const char *s)
+{
+    for (; s && *s; s++) {
+        char c = *s;
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              c == '.' || c == '-')) return false;
+    }
+    return true;
+}
+
+static hal_err_t sys_apply_ntp(const char *server)
+{
+#ifdef _WIN32
+    (void)server;
+    return HAL_ENOTSUP;
+#else
+    char cmd[256];
+    if (server && strlen(server) > 128) return HAL_EINVAL;
+    if (!host_chars_ok(server)) return HAL_EINVAL;
+    if (system("killall ntpd >/dev/null 2>&1") < 0) return HAL_EIO;
+    if (!server || !server[0]) return HAL_OK;
+    /* busybox ntpd：-p 指定服务器，默认后台常驻持续校时 */
+    snprintf(cmd, sizeof(cmd), "ntpd -p %s >/dev/null 2>&1", server);
+    if (system(cmd) != 0) return HAL_EIO;
+    return HAL_OK;
+#endif
+}
+
+static hal_err_t sys_get_wallclock(int64_t *utc)
+{
+    if (!utc) return HAL_EINVAL;
+    *utc = (int64_t)time(NULL);
+    return HAL_OK;
+}
+
 const hal_sys_ops_t gk_sys_ops = {
     sys_get_info,
     sys_get_stats,
@@ -253,5 +328,8 @@ const hal_sys_ops_t gk_sys_ops = {
     sys_ota_end,
     sys_ota_switch,
     sys_ota_confirm,
-    sys_ota_abort
+    sys_ota_abort,
+    sys_apply_net,
+    sys_apply_ntp,
+    sys_get_wallclock
 };

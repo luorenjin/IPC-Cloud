@@ -984,6 +984,38 @@ static void do_reset(void *arg)
     if (hal()->sys->reboot) hal()->sys->reboot();
 }
 
+static void do_apply_net(void *arg)
+{
+    (void)arg;
+    console_apply_net();
+}
+
+/**
+ * POST /api/v1/system/net/apply：按已保存的 net.* 应用网络。
+ * 应用会改变本机地址，必须先把响应发出去（延后动作），前端据 new_ip 跳转。
+ * 响应：{"code":0,"msg":"...","new_ip":"<静态 IP；DHCP 时为空>"}
+ */
+static hal_err_t ep_net_apply(char *out, size_t out_cap, void (**dfn)(void *), void **darg)
+{
+    console_net_cfg_t c;
+    const char *why;
+    hal_err_t rc;
+
+    if (!hal_has(HAL_MOD_SYS) || !hal()->sys->apply_net) return HAL_ENOTSUP;
+    console_net_read(&c);
+    why = console_net_check(&c);
+    if (why) {
+        LOGW(MOD, "拒绝应用网络设置：%s", why);
+        return HAL_EINVAL;
+    }
+    rc = fmt_safe(out, out_cap, "{\"code\":0,\"msg\":\"网络设置即将生效\",\"new_ip\":\"%s\"}",
+                  c.dhcp ? "" : c.ip);
+    if (rc != HAL_OK) return rc;
+    *dfn = do_apply_net;
+    *darg = NULL;
+    return HAL_OK;
+}
+
 /** POST /api/v1/system/reboot。响应：{"code":0,"msg":"设备将重启"} */
 static hal_err_t ep_system_reboot(char *out, size_t out_cap, void (**dfn)(void *), void **darg)
 {
@@ -1178,6 +1210,8 @@ static hal_err_t api_dispatch(const http_req_t *req, char *out, size_t out_cap,
         return strcmp(req->method, "GET") == 0 ? ep_system_capabilities(out, out_cap) : HAL_EINVAL;
     if (strcmp(req->path, "/api/v1/system/status") == 0)
         return strcmp(req->method, "GET") == 0 ? ep_system_status(out, out_cap) : HAL_EINVAL;
+    if (strcmp(req->path, "/api/v1/system/net/apply") == 0)
+        return strcmp(req->method, "POST") == 0 ? ep_net_apply(out, out_cap, dfn, darg) : HAL_EINVAL;
     if (strcmp(req->path, "/api/v1/system/log") == 0)
         return strcmp(req->method, "GET") == 0 ? ep_system_log(req, out, out_cap) : HAL_EINVAL;
     if (strcmp(req->path, "/api/v1/system/reboot") == 0)

@@ -2,6 +2,7 @@ add_library(ipc_console STATIC
     console.c
     console_auth.c
     console_api.c
+    console_apply.c
     console_net.c
     console_assets.c
     console_static.c
