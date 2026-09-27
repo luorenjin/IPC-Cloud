@@ -232,6 +232,39 @@ def board_ip_from_shell(b):
     return m.group(1)
 
 
+MAC_RE = re.compile(r"^([0-9a-f]{2}:){5}[0-9a-f]{2}$")
+
+
+def read_saved_mac(b):
+    out, _ = b.run("cat /etc/ipc/mac 2>/dev/null")
+    mac = out.strip().lower()
+    return mac if MAC_RE.match(mac) and mac != "00:00:00:00:00:00" else None
+
+
+def restore_mac(b, mac, want_ip=None):
+    """重烧会擦掉 /etc/ipc/mac，新系统首次开机已用随机 MAC 拿了租约。
+    写回旧 MAC、释放那份多余租约后按旧 MAC 重新 DHCP，并用 -r 请求原 IP。"""
+    if read_saved_mac(b) == mac:
+        return board_ip_from_shell(b)
+    log(f"写回 MAC {mac}，重新 DHCP" + (f"，请求 {want_ip}" if want_ip else ""))
+    b.run(f"echo {mac} > /etc/ipc/mac.tmp && mv /etc/ipc/mac.tmp /etc/ipc/mac && sync")
+    # SIGUSR2 让 udhcpc 发 DHCPRELEASE，路由器立即回收随机 MAC 占的地址
+    b.run("kill -USR2 $(cat /var/run/udhcpc.eth0.pid) 2>/dev/null; sleep 1; "
+          "kill $(cat /var/run/udhcpc.eth0.pid) 2>/dev/null; sleep 1")
+    b.run(f"ifconfig eth0 down && ifconfig eth0 hw ether {mac} && ifconfig eth0 up")
+    b.buf = b""
+    req = f"-r {want_ip} " if want_ip else ""
+    b.write(f"udhcpc -b {req}-i eth0 -s /usr/share/udhcpc/default.script -p /var/run/udhcpc.eth0.pid\n")
+    m = b.expect(ADDR_RE, 60, fail=None)
+    bip = m.group(1).decode()
+    if read_saved_mac(b) != mac:
+        raise RuntimeError("写回 MAC 后 /etc/ipc/mac 仍不一致")
+    # ipc_app 已监听 0.0.0.0，换地址不需要重启；重启只为让冒烟测试检查干净的新进程
+    b.run("killall ipc_app; sleep 1; /etc/init.d/S90ipcapp")
+    log(f"MAC 已保留，地址 {bip}")
+    return bip
+
+
 def md5_file(path):
     import hashlib
     return hashlib.md5(open(path, "rb").read()).hexdigest()
@@ -275,13 +308,14 @@ def cmd_reflash_rootfs(a):
     with open_transcript("reflash-rootfs") as tr:
         b = Board(a.port, transcript=tr)
         try:
-            if a.board_ip:
-                bip = a.board_ip
-            else:
-                b.shell_prompt()
-                bip = board_ip_from_shell(b)
+            b.shell_prompt()
+            bip = a.board_ip or board_ip_from_shell(b)
+            mac = read_saved_mac(b) if a.mac is None else a.mac
+            if mac and not MAC_RE.match(mac):
+                sys.exit(f"--mac 格式不对：{mac}")
+            bip_before = bip
             hip = a.host_ip or pick_host_ip(bip)
-            log(f"本机 {hip}，U-Boot 临时地址 {bip}")
+            log(f"本机 {hip}，U-Boot 临时地址 {bip}，保留 MAC {mac or '（无，将生成新 MAC）'}")
 
             b.buf = b""
             b.write("\nreboot\n")
@@ -340,6 +374,11 @@ def cmd_reflash_rootfs(a):
             b.expect(b"[S90ipcapp] starting console", 30)
             time.sleep(2)
             b.shell_prompt(20)
+            if mac:
+                old_ip = bip_before
+                bip = restore_mac(b, mac, old_ip)
+                if bip != old_ip:
+                    log(f"警告：地址由 {old_ip} 变为 {bip}（路由器未按 MAC 续回原租约）")
             return smoke(b, bip, a)
         finally:
             b.close()
@@ -472,6 +511,9 @@ def main():
 
     s = sub.add_parser("reflash-rootfs", help="经 U-Boot 重烧整个 rootfs 分区（不断电）")
     s.add_argument("--image", default=ROOTFS_IMG)
+    s.add_argument("--mac", type=str.lower, help="重烧后写回的 MAC（缺省读取板子当前 /etc/ipc/mac）")
+    s.add_argument("--new-mac", dest="mac", action="store_const", const="",
+                   help="不保留 MAC，模拟全新设备首次开机")
     s.set_defaults(fn=cmd_reflash_rootfs)
 
     s = sub.add_parser("smoke", help="冒烟测试")

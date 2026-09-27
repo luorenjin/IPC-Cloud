@@ -30,7 +30,10 @@ python firmware/tools/board.py reflash-rootfs
 
 ### 说明
 
-- **reflash-rootfs 会擦掉整个 10MB 分区**，所以 `/etc/ipc/mac` 和 `/etc/ipc/config.json` 会被清掉：之后会生成新 MAC，控制台回到未激活状态。只改程序时用 `deploy-app`。
+- **reflash-rootfs 会擦掉整个 10MB 分区**，但会**保留 MAC 和 IP**：烧写前读出 `/etc/ipc/mac`，新系统启动后写回，释放首次开机随机 MAC 占用的租约，再用 `udhcpc -r` 请求原 IP，所以自动化测试的地址不变。`/etc/ipc/config.json` 仍会被清掉，控制台回到未激活状态。
+  - 指定 MAC：`--mac 02:xx:xx:xx:xx:xx`；模拟全新设备（生成新 MAC）：`--new-mac`。
+  - 用 BurnTool 手动烧录不经过本脚本，MAC 会重新生成，IP 也会跟着变。
+  - 想完全固定地址，可以在路由器上为该 MAC 做 IP 保留。
 - 板子 U-Boot 的 `bootdelay=0`，脚本在 `reboot` 后持续发送按键抢停；偶尔没抢到会报「没抢停 autoboot」，这时板子会正常启动，重跑即可。
 - U-Boot 阶段复用板子当前的 DHCP 地址作为临时静态 IP，`ethaddr` 无效时临时设置为 `02:00:00:00:00:01`，都不执行 `saveenv`。
 - 板子起不来、串口进不了 U-Boot 时，只能断电后用 BurnTool 恢复（见 `docker/flash/烧录指南.md`）。以后想全自动，可以加一个 USB 继电器控制电源。
