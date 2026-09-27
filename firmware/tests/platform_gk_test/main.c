@@ -55,6 +55,20 @@ static void test_parse_uptime(void)
     CHECK(!gk_parse_uptime("abc\n", &up), "无效内容应失败");
 }
 
+static void test_parse_cpu_stat(void)
+{
+    uint64_t busy = 0, total = 0;
+
+    SECTION("parse_cpu_stat");
+    CHECK(gk_parse_cpu_stat("cpu  100 20 30 800 50 0 0 0 0 0\ncpu0 1 2 3 4\n", &busy, &total),
+          "解析应成功");
+    CHECK(total == 1000, "total=user+nice+system+idle+iowait+... 期望 1000，实际 %llu",
+          (unsigned long long)total);
+    CHECK(busy == 150, "busy=total-idle-iowait 期望 150，实际 %llu", (unsigned long long)busy);
+    CHECK(!gk_parse_cpu_stat("intr 1 2 3\n", &busy, &total), "缺 cpu 行应失败");
+    CHECK(!gk_parse_cpu_stat("cpu  \n", &busy, &total), "空字段应失败");
+}
+
 static void test_parse_cpuinfo(void)
 {
     char hw[64];
@@ -323,6 +337,7 @@ int main(void)
     test_read_u64();
     test_parse_meminfo();
     test_parse_uptime();
+    test_parse_cpu_stat();
     test_parse_cpuinfo();
     test_sys_ops();
     test_net_ops();

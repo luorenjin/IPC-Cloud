@@ -119,6 +119,31 @@ bool gk_parse_uptime(const char *content, uint64_t *uptime_s)
     return true;
 }
 
+bool gk_parse_cpu_stat(const char *content, uint64_t *busy, uint64_t *total)
+{
+    const char *p;
+    uint64_t v[10] = {0}, sum = 0;
+    int n = 0, i;
+
+    if (!content || !busy || !total) return false;
+    if (strncmp(content, "cpu ", 4) != 0) return false;
+    p = content + 4;
+    while (n < 10) {
+        char *end;
+        unsigned long long x;
+        while (*p == ' ') p++;
+        if (*p < '0' || *p > '9') break;
+        x = strtoull(p, &end, 10);
+        v[n++] = (uint64_t)x;
+        p = end;
+    }
+    if (n < 4) return false;   /* 至少 user nice system idle */
+    for (i = 0; i < n; i++) sum += v[i];
+    *total = sum;
+    *busy = sum - v[3] - (n > 4 ? v[4] : 0);
+    return true;
+}
+
 bool gk_parse_cpuinfo_hardware(const char *content, char *out, size_t cap)
 {
     if (!content || !out || cap == 0) return false;

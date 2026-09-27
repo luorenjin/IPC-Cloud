@@ -1316,6 +1316,7 @@ static void test_api_system_endpoints(void)
     req_make(&req, "GET", "/api/v1/system/status", NULL, cookie);
     CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "改密后 system/status 可访问");
     CHECK(strstr(body, "\"cpu_usage_pct\"") != NULL, "含 CPU 占用");
+    CHECK(strstr(body, "-2147483648") == NULL, "温度不可用时不得返回 INT32_MIN，实际：%s", body);
     CHECK(strstr(body, "\"modules\":[") != NULL, "含模块列表");
 
     req_make(&req, "GET", "/api/v1/video/params", NULL, cookie);

@@ -21,6 +21,13 @@ if(NOT EXISTS ${CMAKE_SOURCE_DIR}/profiles/${IPC_PROFILE}.json)
     message(FATAL_ERROR "Unknown IPC_PROFILE '${IPC_PROFILE}': profiles/${IPC_PROFILE}.json not found")
 endif()
 
+# 固件版本号：-DIPC_FW_VERSION=x.y.z 显式指定；缺省为 0.1.0-<configure 日期>
+if(NOT IPC_FW_VERSION)
+    string(TIMESTAMP IPC_BUILD_DATE "%Y%m%d")
+    set(IPC_FW_VERSION "0.1.0-${IPC_BUILD_DATE}")
+endif()
+add_compile_definitions(IPC_FW_VERSION="${IPC_FW_VERSION}")
+
 if(MSVC)
     add_compile_options(/W4 /utf-8 /D_CRT_SECURE_NO_WARNINGS)
 else()

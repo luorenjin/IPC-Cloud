@@ -805,7 +805,8 @@ static hal_err_t ep_system_status(char *out, size_t out_cap)
     json_object_set(root, "mem_total_kb", json_new_int(st.mem_total_kb));
     json_object_set(root, "mem_free_kb", json_new_int(st.mem_free_kb));
     json_object_set(root, "mem_avail_kb", json_new_int(st.mem_avail_kb));
-    json_object_set(root, "temp_milli_c", json_new_int(st.temp_milli_c));
+    if (st.temp_milli_c != INT32_MIN)   /* HAL 约定：无传感器填 INT32_MIN，此时省略字段 */
+        json_object_set(root, "temp_milli_c", json_new_int(st.temp_milli_c));
     json_object_set(root, "uptime_s", json_new_int((int64_t)st.uptime_s));
 
     n = module_list(mods, CONSOLE_MODULES_MAX);

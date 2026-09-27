@@ -24,6 +24,9 @@ bool gk_parse_meminfo(const char *content, uint32_t *total_kb, uint32_t *avail_k
 /** 解析 /proc/uptime 内容，取整数秒。 */
 bool gk_parse_uptime(const char *content, uint64_t *uptime_s);
 
+/** 解析 /proc/stat 首行 "cpu ..."：total=各字段之和，busy=total-idle-iowait。 */
+bool gk_parse_cpu_stat(const char *content, uint64_t *busy, uint64_t *total);
+
 /** 解析 /proc/cpuinfo 内容，取 Hardware 字段值。 */
 bool gk_parse_cpuinfo_hardware(const char *content, char *out, size_t cap);
 

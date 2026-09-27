@@ -130,9 +130,17 @@ static hal_err_t sys_get_stats(hal_sys_stats_t *st)
         uint64_t up = 0;
         if (gk_parse_uptime(buf, &up)) st->uptime_s = up;
     }
-    /* CPU 占用率需要两次采样做差，控制台每次刷新独立调用，
-       单次调用无法计算——本期留 0，待 console 侧需要时再实现采样缓存 */
-    st->cpu_usage_pct = 0;
+    /* 与上一次调用的 /proc/stat 做差；首次调用没有基线，返回 0 */
+    if (gk_read_file("/proc/stat", buf, sizeof(buf))) {
+        static uint64_t s_prev_busy, s_prev_total;
+        uint64_t busy = 0, total = 0;
+        if (gk_parse_cpu_stat(buf, &busy, &total)) {
+            if (s_prev_total && total > s_prev_total && busy >= s_prev_busy)
+                st->cpu_usage_pct = (uint32_t)((busy - s_prev_busy) * 100 / (total - s_prev_total));
+            s_prev_busy = busy;
+            s_prev_total = total;
+        }
+    }
     return HAL_OK;
 }
 
@@ -218,7 +226,7 @@ static hal_err_t sys_ota_get_state(hal_ota_state_t *st)
     memset(st, 0, sizeof(*st));
     st->current_slot = 0;
     st->other_slot = -1;
-    snprintf(st->current_version, sizeof(st->current_version), "dev");
+    snprintf(st->current_version, sizeof(st->current_version), "%s", IPC_FW_VERSION);
     return HAL_OK;
 }
 static hal_err_t sys_ota_begin(int slot, uint32_t total) { (void)slot; (void)total; return HAL_ENOTSUP; }
