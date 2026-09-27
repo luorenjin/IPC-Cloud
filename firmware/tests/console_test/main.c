@@ -79,6 +79,21 @@ static void test_pbkdf2_kat(void)
     CHECK(memcmp(mac, hmac_expect, 32) == 0, "HMAC-SHA256 匹配 RFC 4231 Test Case 1");
 }
 
+/** 浏览器端 firmware/web/js/crypto.js 的 selfTest 使用同一向量：两端 proof 必须逐字相同 */
+static void test_proof_cross_vector(void)
+{
+    char proof[65];
+    SECTION("proof 跨端向量（与前端 crypto.js 对齐）");
+    CHECK(console_auth_make_proof("Admin@12345", "00112233445566778899aabbccddeeff",
+                                  "0123456789abcdef0123456789abcdef", proof, sizeof(proof)) == HAL_OK, "计算 proof");
+    CHECK(strcmp(proof, "5cdf3e3b1d6c8001595b3bb4aad6a4107b369bf451596c077e79a3aeafb9abb8") == 0,
+          "proof 与前端向量一致，实际：%s", proof);
+    CHECK(console_auth_make_proof("密码Test123", "00112233445566778899aabbccddeeff",
+                                  "0123456789abcdef0123456789abcdef", proof, sizeof(proof)) == HAL_OK, "中文口令");
+    CHECK(strcmp(proof, "68edff6c2057e0079074af17aa2f09b1d44fb3492813580dd432fe8b93d77275") == 0,
+          "中文口令按 UTF-8 计算，实际：%s", proof);
+}
+
 static void test_auth_flow(void)
 {
     char salt_hex[64], nonce[64], proof[128];
@@ -2404,6 +2419,7 @@ int main(void)
 
     test_err_mapping();
     test_pbkdf2_kat();
+    test_proof_cross_vector();
     test_auth_flow();
     test_auth_lockout();
     test_auth_user_enum();
