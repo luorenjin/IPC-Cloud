@@ -55,6 +55,15 @@ make -f Makefile fw-build
 
 可覆盖的变量：`CHIP`（默认 `gk7205v200`）、`TARGET`（默认 `clean`）、`BUILD_UID`/`BUILD_GID`（默认均 `1000`）、`FORCE`（默认 `0`）、`SDK_SRC_DIR`/`SDK_PATCH_DIR`（无默认值，`sdk-init` 时必须显式传入）、`OUT_DIR`（`sdk-export` 专用，无显式默认值；不传入时效果上等价于执行 `make` 时所在目录下的 `out/`，即通常的 `firmware/docker/out/`——这个默认值从当前版本起改为在 `sdk-export` 的 recipe 内用 shell 的 `` $$(pwd) `` 实时求值，而不是 Makefile 顶层的 `$(CURDIR)`，原因见下方「常见故障排查」）。
 
+## 刷机分区表（以 `flash/` 为准）
+
+板子实测 `mtdparts=sfc:512K(boot),512K(bootargs),5M(kernel),10M(rootfs)`；SDK prebuilts 的 `spi_partitions.xml` / `bootargs.bin` 是 4M kernel、rootfs@5M，**与板子不符，按它烧录 rootfs 无法挂载**。
+
+- 受控源：`flash/spi_partitions.xml`（整片）、`flash/rootfs_partitions.xml`（四个分区全列、只勾 rootfs，日常刷控制台用这个；BurnTool 要求第一行必须是 `fastboot`，不能删成只剩 rootfs 一行）、`flash/spi_bootargs.txt`。
+- `make fw-rootfs` 每次打包都把它们复制到 `out/gk7205v200/spi_image/`，并用 SDK `mkbootargs` 重新生成 `bootargs.bin`，覆盖 `sdk-export` 带出的 SDK 版本；打包后若 bootargs 不是 `5M(kernel),10M(rootfs)` 直接报错。
+- 改分区布局时三个文件与板子 bootargs 必须一起改。
+- 烧录操作步骤（ToolPlatform / U-Boot 命令行、备份与恢复）：[`flash/烧录指南.md`](flash/烧录指南.md)。
+
 ## 已知限制
 
 - 四款候选芯片均完成端到端编译验证，但没有实际开发板可供逐一烧录验证镜像能否真正跑通；本环境止步于"编译产出 image 文件"。

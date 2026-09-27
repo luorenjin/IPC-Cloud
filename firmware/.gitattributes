@@ -1,0 +1,5 @@
+# 在板子/容器里执行的脚本必须保持 LF：core.autocrlf=true 检出成 CRLF 后，
+# busybox sh 会把 \r 当成命令的一部分，S81dhcp 等开机脚本直接失败。
+docker/rootfs-overlay/** text eol=lf
+docker/scripts/*.sh text eol=lf
+docker/entrypoint.sh text eol=lf

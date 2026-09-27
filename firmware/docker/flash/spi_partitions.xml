@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="GB2312" ?>
+<Partition_Info>
+<Part Sel="1" PartitionName="fastboot" FlashType="spi" FileSystem="none" Start="0" Length="512K" SelectFile="uboot_gk7205v200.bin"/>
+<Part Sel="1" PartitionName="bootargs" FlashType="spi" FileSystem="none" Start="512K" Length="512K" SelectFile="bootargs.bin"/>
+<Part Sel="1" PartitionName="kernel" FlashType="spi" FileSystem="none" Start="1M" Length="5M" SelectFile="uImage_gk7205v200"/>
+<Part Sel="1" PartitionName="rootfs" FlashType="spi" FileSystem="none" Start="6M" Length="10M" SelectFile="rootfs-console.64k.jffs2"/>
+</Partition_Info>

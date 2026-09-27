@@ -12,3 +12,8 @@ gk_test_sec/
 .vscode/
 *.user
 docker/out/
+tools/logs/
+__pycache__/
+
+# 根 .gitignore 的 *.txt 会吞掉它；它是生成 bootargs.bin 的受控源
+!docker/flash/spi_bootargs.txt
