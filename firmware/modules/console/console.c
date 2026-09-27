@@ -81,7 +81,12 @@ static hal_err_t console_init(void)
 
 /* 端口由 http_server 统一监听，本模块自身只需起停配网工作线程
    （module.h 契约：init 不得起线程，start 才起线程——resolution C） */
-static hal_err_t console_start(void) { return console_net_start(); }
+static hal_err_t console_start(void)
+{
+    /* 开机按已保存的设置启动 NTP；平台不支持或未启用都不影响控制台启动 */
+    (void)console_apply_time();
+    return console_net_start();
+}
 static hal_err_t console_stop(void)  { return console_net_stop(); }
 static hal_err_t console_deinit(void) { s_routes_registered = false; return HAL_OK; }
 

@@ -984,6 +984,73 @@ static void do_reset(void *arg)
     if (hal()->sys->reboot) hal()->sys->reboot();
 }
 
+/** NTP 服务器名只允许主机名/IPv4 字符，避免拼进平台命令时被注入 */
+static bool ntp_host_ok(const char *s)
+{
+    size_t n = 0;
+    for (; *s; s++, n++) {
+        char c = *s;
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              c == '.' || c == '-')) return false;
+    }
+    return n > 0 && n <= 128;
+}
+
+/**
+ * GET /api/v1/system/time → {"code":0,"utc":秒,"timezone":"CST-8","ntp_enable":bool,"ntp_server":".."}
+ */
+static hal_err_t ep_time_get(char *out, size_t out_cap)
+{
+    int64_t utc = 0;
+    bool en = false;
+    char server[129] = "", tz[64] = "";
+
+    if (!hal_has(HAL_MOD_SYS) || !hal()->sys->get_wallclock) return HAL_ENOTSUP;
+    if (hal()->sys->get_wallclock(&utc) != HAL_OK) return HAL_EIO;
+    if (cfg_get_bool("time.ntp.enable", &en) != HAL_OK) en = false;
+    cfg_get_str("time.ntp.server", server, sizeof(server));
+    if (cfg_get_str("time.timezone", tz, sizeof(tz)) != HAL_OK || !tz[0])
+        snprintf(tz, sizeof(tz), "CST-8");
+    return fmt_safe(out, out_cap,
+                    "{\"code\":0,\"utc\":%lld,\"timezone\":\"%s\",\"ntp_enable\":%s,\"ntp_server\":\"%s\"}",
+                    (long long)utc, tz, en ? "true" : "false", server);
+}
+
+/**
+ * PUT /api/v1/system/time，二选一：
+ *   {"ntp_enable":true,"ntp_server":"pool.ntp.org"}  → 保存并启动 NTP
+ *   {"ntp_enable":false,"utc":1790000000}            → 停 NTP 并手动设墙钟
+ */
+static hal_err_t ep_time_put(const http_req_t *req, char *out, size_t out_cap)
+{
+    json_t *j;
+    bool en;
+    hal_err_t rc = HAL_OK;
+
+    if (!hal_has(HAL_MOD_SYS) || !hal()->sys->apply_ntp || !hal()->sys->set_wallclock) return HAL_ENOTSUP;
+    if (!req->body || req->body_len == 0) return HAL_EINVAL;
+    j = json_parse(req->body, req->body_len, NULL, 0);
+    if (!j || !json_is(j, JSON_OBJECT)) { json_free(j); return HAL_EINVAL; }
+    en = json_bool(json_get(j, "ntp_enable"), false);
+
+    if (en) {
+        const char *server = json_string(json_get(j, "ntp_server"), "");
+        if (!ntp_host_ok(server)) { json_free(j); return HAL_EINVAL; }
+        if (cfg_set_str("time.ntp.server", server) != HAL_OK ||
+            cfg_set_bool("time.ntp.enable", true) != HAL_OK) rc = HAL_EIO;
+    } else {
+        const json_t *u = json_get(j, "utc");
+        int64_t utc = json_int(u, -1);
+        if (!u || utc < 0) { json_free(j); return HAL_EINVAL; }
+        if (cfg_set_bool("time.ntp.enable", false) != HAL_OK) rc = HAL_EIO;
+        if (rc == HAL_OK && hal()->sys->set_wallclock(utc) != HAL_OK) rc = HAL_EIO;
+    }
+    json_free(j);
+    if (rc != HAL_OK) return rc;
+    if (console_apply_time() != HAL_OK) return HAL_EIO;
+    return fmt_safe(out, out_cap, "{\"code\":0,\"msg\":\"时间设置已生效\"}");
+}
+
 static void do_apply_net(void *arg)
 {
     (void)arg;
@@ -1210,6 +1277,11 @@ static hal_err_t api_dispatch(const http_req_t *req, char *out, size_t out_cap,
         return strcmp(req->method, "GET") == 0 ? ep_system_capabilities(out, out_cap) : HAL_EINVAL;
     if (strcmp(req->path, "/api/v1/system/status") == 0)
         return strcmp(req->method, "GET") == 0 ? ep_system_status(out, out_cap) : HAL_EINVAL;
+    if (strcmp(req->path, "/api/v1/system/time") == 0) {
+        if (strcmp(req->method, "GET") == 0) return ep_time_get(out, out_cap);
+        if (strcmp(req->method, "PUT") == 0) return ep_time_put(req, out, out_cap);
+        return HAL_EINVAL;
+    }
     if (strcmp(req->path, "/api/v1/system/net/apply") == 0)
         return strcmp(req->method, "POST") == 0 ? ep_net_apply(out, out_cap, dfn, darg) : HAL_EINVAL;
     if (strcmp(req->path, "/api/v1/system/log") == 0)

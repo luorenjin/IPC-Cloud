@@ -20,27 +20,6 @@
     return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
   }
 
-  function fmtTimeSpaced(d) {
-    return `${pad2(d.getHours())} : ${pad2(d.getMinutes())} : ${pad2(d.getSeconds())}`;
-  }
-
-  /** 系统时间每秒跳动；离开页面后自动停 */
-  function startSysClock(el) {
-    if (IPC._clockT) clearInterval(IPC._clockT);
-    if (!el) return;
-    const tick = () => {
-      const node = document.getElementById(el);
-      if (!node) {
-        clearInterval(IPC._clockT);
-        IPC._clockT = null;
-        return;
-      }
-      node.textContent = fmtClock(new Date());
-    };
-    tick();
-    IPC._clockT = setInterval(tick, 1000);
-  }
-
   function fmtUptime(s) {
     const d = Math.floor(s / 86400), hh = Math.floor((s % 86400) / 3600), mm = Math.floor((s % 3600) / 60);
     return (d ? d + ' 天 ' : '') + hh + ' 小时 ' + mm + ' 分';
@@ -81,10 +60,70 @@
       .catch((e) => { if (box.isConnected) box.textContent = '读取失败：' + e.message; });
   }
 
+  /**
+   * 时间校对：设备墙钟为准（每秒本地自增，不用浏览器时间）；
+   * NTP 自动校时写 time.ntp.*，手动/同步计算机时间直接设墙钟并停 NTP。
+   */
+  function loadTimePage(b) {
+    const box = h('<div class="sys-loading">正在读取设备时间…</div>');
+    b.append(box);
+    IPC.api('GET', '/api/v1/system/time').then((t) => {
+      if (!box.isConnected) return;
+      box.remove();
+      const base = t.utc * 1000 - Date.now();
+      let manual = !t.ntp_enable;
+      const draw = () => {
+        b.innerHTML = '';
+        const rows = [
+          h(`<div class="frow"><div class="lab">设备时间</div><b id="sys-clock"></b></div>`),
+          h(`<div class="frow"><div class="lab">校时方式</div><select id="tm-mode">
+            <option value="ntp" ${manual ? '' : 'selected'}>NTP自动校时</option>
+            <option value="manual" ${manual ? 'selected' : ''}>手动校时</option></select></div>`)
+        ];
+        if (manual) {
+          rows.push(h(`<div class="frow"><div class="lab">设置时间</div>
+            <input type="datetime-local" id="tm-set" step="1" style="width:220px"></div>`));
+          rows.push(h(`<div class="frow"><div class="lab"></div>
+            <button type="button" class="btn ghost" id="tm-pc">与计算机时间同步</button></div>`));
+        } else {
+          rows.push(h(`<div class="frow"><div class="lab">服务器地址</div>
+            <input type="text" id="tm-ntp" value="${esc(t.ntp_server || 'ntp.aliyun.com')}" maxlength="128"></div>`));
+        }
+        b.append(sec('', rows));
+        const clock = $('#sys-clock', b);
+        const tick = () => { if (clock.isConnected) clock.textContent = fmtClock(new Date(Date.now() + base)); };
+        tick();
+        if (IPC._clockT) clearInterval(IPC._clockT);
+        IPC._clockT = setInterval(() => { if (!clock.isConnected) clearInterval(IPC._clockT); else tick(); }, 1000);
+        $('#tm-mode', b).onchange = (e) => { manual = e.target.value === 'manual'; draw(); };
+
+        const put = (body) => IPC.api('PUT', '/api/v1/system/time', body)
+          .then(() => { toast('时间设置已生效'); IPC.render(); });
+        if (manual) {
+          const set = $('#tm-set', b);
+          const d = new Date(Date.now() + base);
+          set.value = `${fmtDate(d)}T${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+          $('#tm-pc', b).onclick = () => put({ ntp_enable: false, utc: Math.floor(Date.now() / 1000) }).catch((e) => toast(e.message));
+          b.append(IPC.ui.saveRow(() => {
+            const ms = new Date(set.value).getTime();
+            if (!set.value || isNaN(ms)) return Promise.reject(new Error('请选择时间'));
+            return put({ ntp_enable: false, utc: Math.floor(ms / 1000) });
+          }));
+        } else {
+          b.append(IPC.ui.saveRow(() => {
+            const v = $('#tm-ntp', b).value.trim();
+            if (!/^[A-Za-z0-9.-]{1,128}$/.test(v)) return Promise.reject(new Error('服务器地址只能包含字母、数字、点和横线'));
+            return put({ ntp_enable: true, ntp_server: v });
+          }));
+        }
+      };
+      draw();
+    }).catch((e) => { if (box.isConnected) box.textContent = '读取失败：' + e.message; });
+  }
+
   IPC.page('pSysInfo', function (b) {
     // 顶栏三页签由 router.tabsFor 提供（与实机一致），此处按 S.tab 分支
     const tab = S.tab || '设备信息';
-    const now = fmtClock(new Date());
     const active = ['设备信息', '基本设置', '时间校对'].includes(tab) ? tab : '设备信息';
 
     if (active === '设备信息') {
@@ -93,96 +132,7 @@
     }
 
     if (active === '时间校对') {
-      const isManual = S.timeMode === '手动校时';
-      const rows = [
-        h(`<div class="frow"><div class="lab">系统时间</div><b id="sys-clock">${now}</b></div>`),
-        selRow('校时方式', 'timeMode', ['NTP自动校时', '手动校时'])
-      ];
-      if (isManual) {
-        // 对齐实机：设置时间（日期+时间，右侧日历/时钟图标）+ 与计算机时间同步；隐藏服务器地址
-        rows.push(h(`<div class="frow"><div class="lab">设置时间</div>
-          <span class="ico-wrap">
-            <input type="text" id="man-date" class="ico-input has-cal" value="${esc(S.manualDate)}"
-              readonly aria-label="日期">
-            <button type="button" class="ico-btn" data-for="man-date" aria-label="选择日期" tabindex="-1">📅</button>
-          </span>
-        </div>`));
-        rows.push(h(`<div class="frow"><div class="lab"></div>
-          <span class="ico-wrap">
-            <input type="text" id="man-time" class="ico-input has-clock" value="${esc(S.manualTime)}"
-              readonly aria-label="时间">
-            <button type="button" class="ico-btn" data-for="man-time" aria-label="选择时间" tabindex="-1">🕐</button>
-          </span>
-        </div>`));
-        rows.push(h(`<div class="frow"><div class="lab"></div>
-          <button type="button" class="btn primary" id="syn-cp">与计算机时间同步</button>
-        </div>`));
-      } else {
-        rows.push(textRow('服务器地址', 'ntp', ''));
-      }
-      b.append(sec('', rows));
-
-      const sels = b.querySelectorAll('select');
-      if (sels[0]) sels[0].addEventListener('change', () => IPC.render());
-
-      startSysClock('sys-clock');
-
-      const openPicker = (input, type) => {
-        if (!input) return;
-        const display = type === 'date' ? S.manualDate : S.manualTime.replace(/\s+/g, '');
-        input.readOnly = false;
-        input.type = type;
-        if (type === 'time' && display && !display.includes('T')) {
-          // HH:mm:ss → 需要 HH:mm:ss；浏览器 time 用 :
-          const parts = display.split(':');
-          input.value = parts.length >= 2 ? `${parts[0].padStart(2, '0')}:${parts[1].padStart(2, '0')}${parts[2] ? ':' + parts[2].padStart(2, '0') : ''}` : display;
-        } else if (type === 'date') {
-          input.value = S.manualDate;
-        }
-        try {
-          if (typeof input.showPicker === 'function') input.showPicker();
-        } catch (e) { /* ignore */ }
-        input.focus();
-        const commit = () => {
-          if (type === 'date' && input.value) S.manualDate = input.value;
-          if (type === 'time' && input.value) {
-            const p = input.value.split(':');
-            S.manualTime = `${(p[0] || '00').padStart(2, '0')} : ${(p[1] || '00').padStart(2, '0')} : ${(p[2] || '00').padStart(2, '0')}`;
-          }
-          input.type = 'text';
-          input.readOnly = true;
-          input.value = type === 'date' ? S.manualDate : S.manualTime;
-          input.removeEventListener('change', commit);
-          input.removeEventListener('blur', commit);
-        };
-        input.addEventListener('change', commit);
-        input.addEventListener('blur', commit);
-      };
-
-      $$('.ico-btn', b).forEach((btn) => {
-        btn.onclick = () => {
-          const input = document.getElementById(btn.dataset.for);
-          openPicker(input, btn.dataset.for === 'man-date' ? 'date' : 'time');
-        };
-      });
-      const dateEl = $('#man-date', b);
-      const timeEl = $('#man-time', b);
-      if (dateEl) dateEl.onclick = () => openPicker(dateEl, 'date');
-      if (timeEl) timeEl.onclick = () => openPicker(timeEl, 'time');
-
-      const syn = $('#syn-cp', b);
-      if (syn) {
-        syn.onclick = () => {
-          const d = new Date();
-          S.manualDate = fmtDate(d);
-          S.manualTime = fmtTimeSpaced(d);
-          IPC.render();
-          toast('已同步计算机时间');
-        };
-      }
-
-      b.append(h('<div class="save-row"><button class="btn primary" type="button" id="time-save">保存</button></div>'));
-      $('#time-save').onclick = () => toast('时间设置已保存');
+      loadTimePage(b);
       return;
     }
 

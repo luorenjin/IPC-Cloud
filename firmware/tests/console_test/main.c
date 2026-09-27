@@ -1464,6 +1464,50 @@ static void test_api_net_apply(void)
     remove("console_test_cfg_net.json");
 }
 
+void mock_sys_last_ntp(char *buf, size_t cap);
+
+/** 时间设置：手动校时 / NTP 开关 */
+static void test_api_time(void)
+{
+    http_req_t req;
+    char body[4096], cookie[128], last[128];
+    bool must_change = false;
+
+    SECTION("时间设置");
+    CHECK(cfg_init(NULL, "console_test_cfg_time.json") == HAL_OK, "配置中心就绪");
+    CHECK(console_api_register_rules() == HAL_OK, "登记规则");
+    console_auth_reset_lockout();
+    CHECK(console_auth_seed("Admin@12345", "admin", false) == HAL_OK, "已激活");
+    CHECK(do_login("admin", "Admin@12345", "192.168.50.15", cookie, sizeof(cookie), &must_change) == HAL_OK, "登录");
+
+    req_make(&req, "PUT", "/api/v1/system/time", "{\"ntp_enable\":false,\"utc\":1790000000}", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "手动校时成功");
+    req_make(&req, "GET", "/api/v1/system/time", NULL, cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "读时间");
+    CHECK(strstr(body, "\"ntp_enable\":false") != NULL, "NTP 已关闭，实际：%s", body);
+    CHECK(strstr(body, "\"utc\":17900000") != NULL, "墙钟已设置（秒级误差内），实际：%s", body);
+    mock_sys_last_ntp(last, sizeof(last));
+    CHECK(last[0] == '\0', "手动校时停止 NTP");
+
+    req_make(&req, "PUT", "/api/v1/system/time", "{\"ntp_enable\":true,\"ntp_server\":\"\"}", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_EINVAL, "开启 NTP 时服务器不能为空");
+    req_make(&req, "PUT", "/api/v1/system/time", "{\"ntp_enable\":true,\"ntp_server\":\"pool.ntp.org;reboot\"}", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_EINVAL, "服务器名含非法字符被拒");
+    req_make(&req, "PUT", "/api/v1/system/time", "{\"ntp_enable\":true,\"ntp_server\":\"ntp.aliyun.com\"}", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "开启 NTP");
+    mock_sys_last_ntp(last, sizeof(last));
+    CHECK(strcmp(last, "ntp.aliyun.com") == 0, "HAL 收到 NTP 服务器，实际：%s", last);
+    req_make(&req, "GET", "/api/v1/system/time", NULL, cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "读时间");
+    CHECK(strstr(body, "\"ntp_server\":\"ntp.aliyun.com\"") != NULL, "回显服务器，实际：%s", body);
+
+    req_make(&req, "PUT", "/api/v1/system/time", "{\"ntp_enable\":false,\"utc\":-5}", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_EINVAL, "负时间被拒");
+
+    cfg_deinit();
+    remove("console_test_cfg_time.json");
+}
+
 /** 恢复出厂必须清除本地管理员凭据、使旧会话失效，并回到"未激活"。 */
 static void test_reset_wipes_credentials(void)
 {
@@ -2536,6 +2580,7 @@ int main(void)
     test_api_system_endpoints();
     test_api_system_extras();
     test_api_net_apply();
+    test_api_time();
     test_reset_wipes_credentials();
     test_reboot_handler_order();
 

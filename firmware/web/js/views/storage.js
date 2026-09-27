@@ -131,40 +131,33 @@
     bindEventGate(b, swInputOf(head));
   });
 
-  IPC.page('pStorage', function (b) {
-    if (S.tfPresent === false) {
-      b.append(tfEmpty());
-      // 无卡时容量管理仍展示结构，但不可编辑
-      const box = h('<div class="sec tf-gate-off"></div>');
-      box.append(h('<div class="sec-h">容量管理</div>'));
-      const rows = h('<div></div>');
-      rows.append(chkRow('录像循环写入', 'loopRec'));
-      rows.append(chkRow('抓图循环写入', 'loopSnap'));
-      rows.append(numRow('录像容量配额', 'recQuota', 0, 100, '%　容量 0.00GB　剩余 0.00GB'));
-      rows.append(numRow('抓图容量配额', 'snapQuota', 0, 100, '%　容量 0.00GB　剩余 0.00GB'));
-      box.append(rows);
-      b.append(box);
-      b.append(h('<p class="tip">未插入存储卡，请先插入 TF 卡后再分配录像/抓图容量。</p>'));
-      const save = h('<div class="save-row"><button class="btn primary" type="button" id="fmt-save" disabled>保存</button></div>');
-      b.append(save);
-      return;
-    }
+  function fmtBytes(n) {
+    if (!n) return '0 GB';
+    return n >= 1073741824 ? (n / 1073741824).toFixed(2) + ' GB' : (n / 1048576).toFixed(1) + ' MB';
+  }
 
-    b.append(sec('', [
-      h(`<table class="table"><thead><tr><th>序号</th><th>类型</th><th>属性</th><th>剩余容量/总容量</th><th>状态</th><th></th></tr></thead>
-        <tbody><tr><td>1</td><td>本地</td><td>可读写</td><td>39.20GB/64.00GB</td><td>正常</td>
-        <td><button class="linkish" type="button" id="fmt">格式化</button></td></tbody></table>`)
-    ]));
-    $('#fmt').onclick = () => {
-      if (confirm('格式化将清除卡上所有数据，继续？')) toast('已格式化（演示）');
-    };
-    b.append(sec('容量管理', [
-      chkRow('录像循环写入', 'loopRec'),
-      chkRow('抓图循环写入', 'loopSnap'),
-      numRow('录像容量配额', 'recQuota', 0, 100, '%　容量 64.00GB　剩余 39.20GB'),
-      numRow('抓图容量配额', 'snapQuota', 0, 100, '%　容量 0.00GB　剩余 0.00GB')
-    ]));
-    b.append(h('<p class="tip">如需将抓图保存在SD卡中，请先分配抓图容量。除录像和抓图外，SD卡容量可能会被其他特色功能使用。</p>'));
-    b.append(saveRow());
+  /** 存储管理：读设备 TF 卡实况；格式化/容量配额依赖后端能力（storage.format） */
+  IPC.page('pStorage', function (b) {
+    const box = h('<div class="sys-loading">正在读取存储卡信息…</div>');
+    b.append(box);
+    IPC.api('GET', '/api/v1/storage/info').then((st) => {
+      if (!box.isConnected) return;
+      box.remove();
+      S.tfPresent = !!st.present;
+      if (!st.present) {
+        b.append(tfEmpty());
+        return;
+      }
+      const HEALTH = { ok: '正常', warn: '告警', bad: '异常', unknown: '未知' };
+      const used = st.total_bytes - st.free_bytes;
+      b.append(sec('', [
+        h(`<table class="table"><thead><tr><th>序号</th><th>文件系统</th><th>挂载点</th><th>已用 / 总容量</th><th>剩余</th><th>状态</th></tr></thead>
+          <tbody><tr><td>1</td><td>${esc(st.fs)}</td><td>${esc(st.mounted ? st.mount_path : '未挂载')}</td>
+          <td>${fmtBytes(used)} / ${fmtBytes(st.total_bytes)}</td><td>${fmtBytes(st.free_bytes)}</td>
+          <td>${HEALTH[st.health] || st.health}</td></tr></tbody></table>`)
+      ]));
+      if (!st.mounted) b.append(h('<p class="tip">存储卡已插入但未挂载，请检查文件系统（支持 FAT32 / exFAT）。</p>'));
+      b.append(saveRow());
+    }).catch((e) => { if (box.isConnected) box.textContent = '读取失败：' + e.message; });
   });
 })(window.IPC);
