@@ -12,6 +12,7 @@
 #include "core/json.h"
 #include "core/event_bus.h"
 #include "core/os.h"
+#include "core/log.h"
 #include "hal/hal.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -1368,6 +1369,48 @@ static void test_api_system_endpoints(void)
     CHECK(deferred == true, "reset 登记了延后动作而不是内联执行");
 }
 
+/** 系统日志、设备名称、设备信息里的网络字段 */
+static void test_api_system_extras(void)
+{
+    http_req_t req;
+    char body[16384], cookie[128];
+    bool must_change = false;
+
+    SECTION("系统日志 / 设备名称");
+    log_init(LOG_INFO, 16);   /* 与 app/main.c 一致：启用环形缓冲 */
+    CHECK(cfg_init(NULL, "console_test_cfg_sys.json") == HAL_OK, "配置中心就绪");
+    CHECK(console_api_register_rules() == HAL_OK, "登记规则");
+    console_auth_reset_lockout();
+    CHECK(console_auth_seed("Admin@12345", "admin", false) == HAL_OK, "已激活");
+    CHECK(do_login("admin", "Admin@12345", "192.168.50.13", cookie, sizeof(cookie), &must_change) == HAL_OK, "登录");
+
+    LOGI("test", "日志端点探针行");
+    req_make(&req, "GET", "/api/v1/system/log", NULL, cookie);
+    snprintf(req.query, sizeof(req.query), "lines=50");
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "system/log 成功");
+    CHECK(strstr(body, "\"lines\":[") != NULL, "含日志行数组，实际：%.200s", body);
+    CHECK(strstr(body, "日志端点探针行") != NULL, "最近写入的日志可见");
+
+    req_make(&req, "GET", "/api/v1/system/log", NULL, NULL);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_EUNAUTH_, "日志需登录");
+
+    req_make(&req, "PUT", "/api/v1/config", "{\"device.name\":\"前门摄像头\"}", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "设置设备名");
+    CHECK(strstr(body, "\"applied\":1") != NULL, "device.name 已接受，实际：%s", body);
+    req_make(&req, "PUT", "/api/v1/config", "{\"device.name\":\"\"}", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "空设备名请求");
+    CHECK(strstr(body, "\"rejected_total\":1") != NULL, "空设备名被拒，实际：%s", body);
+
+    req_make(&req, "GET", "/api/v1/system/info", NULL, cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "info");
+    CHECK(strstr(body, "\"device_name\":\"前门摄像头\"") != NULL, "info 回显设备名");
+    CHECK(strstr(body, "\"mac\":\"") != NULL, "info 含 MAC");
+    CHECK(strstr(body, "\"ip\":\"") != NULL, "info 含 IP");
+
+    cfg_deinit();
+    remove("console_test_cfg_sys.json");
+}
+
 /** 恢复出厂必须清除本地管理员凭据、使旧会话失效，并回到"未激活"。 */
 static void test_reset_wipes_credentials(void)
 {
@@ -2438,6 +2481,7 @@ int main(void)
     test_capabilities_endpoint();
     test_api_config_endpoints();
     test_api_system_endpoints();
+    test_api_system_extras();
     test_reset_wipes_credentials();
     test_reboot_handler_order();
 

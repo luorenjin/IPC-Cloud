@@ -102,6 +102,8 @@ var cfgRules = map[string]cfgRule{
 
 	// 本地设置
 	"localUser.name": {t: cfgStr},
+	// 设备名称：1–32 字节（与固件规则一致）
+	"device.name": {t: cfgStr, min: 1, max: 32},
 	// 只写键：min/max 在此是**字符串长度**上下限，与固件 console 的口令策略（8..63）
 	// 及 PRD §159「≤8 位含字母数字」一致的下限取 8
 	"localUser.password": {t: cfgSecret, min: 8, max: 63},
@@ -168,6 +170,7 @@ func cfgDefaults() map[string]any {
 		"net.dns":  "223.5.5.5",
 
 		"localUser.name": "admin",
+		"device.name":    "IPC",
 		// 只写键的占位值：它只用于“本键受支持”这一个用途（平台 supported = 白名单 ∩ 设备回包），
 		// 真正的口令不会落在 d.cfg 里（改密后只存哈希），所以这里永远是空串
 		"localUser.password": "",
@@ -315,6 +318,10 @@ func coerceCfg(rule cfgRule, v any) (any, bool) {
 					return s, true
 				}
 			}
+			return nil, false
+		}
+		// 与固件 core/config.c 一致：min>0 时 min/max 是字节长度上下限
+		if rule.min > 0 && (len(s) < rule.min || (rule.max > 0 && len(s) > rule.max)) {
 			return nil, false
 		}
 		return s, true

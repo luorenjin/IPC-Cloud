@@ -323,6 +323,8 @@ static void register_common_rules(void)
         { "net.gw",                  CFG_T_STR,  0, 0, NULL, true },
         { "net.dns",                 CFG_T_STR,  0, 0, NULL, true },
         { "localUser.name",          CFG_T_STR,  0, 0, NULL, false },
+        /* 设备名称（控制台基本设置 / 平台远程配置）：1–32 字节 UTF-8 */
+        { "device.name",             CFG_T_STR,  1, 32, NULL, false },
         /* 本地账户口令（接入规范 §5.7 的 cfg 最小集）：只写键——可下发、卡长度，
          * 但不落盘、不进 cfg_dump_json，值只留在内存等认证模块取走转成哈希。
          * 8–63 位与 modules/console/console_internal.h 的口令长度限制、

@@ -760,6 +760,22 @@ static hal_err_t ep_system_info(char *out, size_t out_cap)
     json_object_set(root, "code", json_new_int(0));
     json_object_set(root, "model", json_new_string(p->model));
     json_object_set(root, "vendor", json_new_string(p->vendor));
+    {
+        char name[64];
+        hal_netif_status_t ns;
+        char mac[18] = "";
+        if (cfg_get_str("device.name", name, sizeof(name)) != HAL_OK || !name[0])
+            snprintf(name, sizeof(name), "%s", p->model);
+        json_object_set(root, "device_name", json_new_string(name));
+        memset(&ns, 0, sizeof(ns));
+        if (hal_has(HAL_MOD_NET) && hal()->net->get_status &&
+            hal()->net->get_status(HAL_NETIF_ETH, &ns) == HAL_OK) {
+            snprintf(mac, sizeof(mac), "%02x:%02x:%02x:%02x:%02x:%02x",
+                     ns.mac[0], ns.mac[1], ns.mac[2], ns.mac[3], ns.mac[4], ns.mac[5]);
+        }
+        json_object_set(root, "mac", json_new_string(mac));
+        json_object_set(root, "ip", json_new_string(ns.ip));
+    }
     json_object_set(root, "serial", json_new_string(serial));
     json_object_set(root, "fw_version", json_new_string(ota.current_version));
     json_object_set(root, "uptime_s", json_new_int((int64_t)st.uptime_s));
@@ -837,6 +853,87 @@ static hal_err_t ep_system_status(char *out, size_t out_cap)
     }
     json_object_set(root, "modules", arr);
 
+    txt = json_dump(root, false);
+    json_free(root);
+    if (!txt) return HAL_ENOMEM;
+    rc = (strlen(txt) < out_cap) ? HAL_OK : HAL_ENOMEM;
+    if (rc == HAL_OK) strcpy(out, txt);
+    free(txt);
+    return rc;
+}
+
+#define CONSOLE_LOG_DUMP_MAX   (64 * 1024)
+#define CONSOLE_LOG_LINES_DEF  200
+#define CONSOLE_LOG_LINES_MAX  1000
+
+/**
+ * GET /api/v1/system/log?lines=N：内存环形日志的最后 N 行（默认 200，上限 1000）。
+ * 响应：{"code":0,"total":<返回行数>,"lines":["...", ...]}（旧→新）。
+ * 响应体受 CONSOLE_API_BODY_MAX 限制：超出时从最旧的行开始丢弃。
+ */
+static hal_err_t ep_system_log(const http_req_t *req, char *out, size_t out_cap)
+{
+    char qbuf[16];
+    const char *q = http_query(req, "lines", qbuf, sizeof(qbuf), "");
+    long want = q[0] ? strtol(q, NULL, 10) : CONSOLE_LOG_LINES_DEF;
+    char *dump, *start, *p, *txt;
+    size_t n;
+    long count = 0;
+    json_t *root, *arr;
+    hal_err_t rc;
+
+    if (want <= 0) want = CONSOLE_LOG_LINES_DEF;
+    if (want > CONSOLE_LOG_LINES_MAX) want = CONSOLE_LOG_LINES_MAX;
+
+    dump = (char *)malloc(CONSOLE_LOG_DUMP_MAX);
+    if (!dump) return HAL_ENOMEM;
+    n = log_ring_dump(dump, CONSOLE_LOG_DUMP_MAX);
+    if (n >= CONSOLE_LOG_DUMP_MAX) n = CONSOLE_LOG_DUMP_MAX - 1;
+    dump[n] = '\0';
+
+    /* 从尾部往前数 want 个换行，定位第一行的起点 */
+    start = dump;
+    for (p = dump + n; p > dump; p--) {
+        if (p[-1] == '\n' && p != dump + n) {
+            if (++count >= want) { start = p; break; }
+        }
+    }
+
+    root = json_new_object();
+    arr = json_new_array();
+    if (!root || !arr) { json_free(root); json_free(arr); free(dump); return HAL_ENOMEM; }
+
+    for (;;) {
+        /* 预留 256 字节给外层字段，超出就从最旧的行丢起 */
+        size_t budget = out_cap > 256 ? out_cap - 256 : 0;
+        size_t est = 0;
+        count = 0;
+        for (p = start; *p; ) {
+            char *nl = strchr(p, '\n');
+            size_t len = nl ? (size_t)(nl - p) : strlen(p);
+            est += len * 2 + 4;   /* 转义最坏翻倍 */
+            count++;
+            p = nl ? nl + 1 : p + len;
+        }
+        if (est <= budget || !*start) break;
+        p = strchr(start, '\n');
+        if (!p) break;
+        start = p + 1;
+    }
+
+    count = 0;
+    for (p = start; *p; ) {
+        char *nl = strchr(p, '\n');
+        if (nl) *nl = '\0';
+        if (*p) { json_array_push(arr, json_new_string(p)); count++; }
+        if (!nl) break;
+        p = nl + 1;
+    }
+    free(dump);
+
+    json_object_set(root, "code", json_new_int(0));
+    json_object_set(root, "total", json_new_int(count));
+    json_object_set(root, "lines", arr);
     txt = json_dump(root, false);
     json_free(root);
     if (!txt) return HAL_ENOMEM;
@@ -1081,6 +1178,8 @@ static hal_err_t api_dispatch(const http_req_t *req, char *out, size_t out_cap,
         return strcmp(req->method, "GET") == 0 ? ep_system_capabilities(out, out_cap) : HAL_EINVAL;
     if (strcmp(req->path, "/api/v1/system/status") == 0)
         return strcmp(req->method, "GET") == 0 ? ep_system_status(out, out_cap) : HAL_EINVAL;
+    if (strcmp(req->path, "/api/v1/system/log") == 0)
+        return strcmp(req->method, "GET") == 0 ? ep_system_log(req, out, out_cap) : HAL_EINVAL;
     if (strcmp(req->path, "/api/v1/system/reboot") == 0)
         return strcmp(req->method, "POST") == 0 ? ep_system_reboot(out, out_cap, dfn, darg) : HAL_EINVAL;
     if (strcmp(req->path, "/api/v1/system/reset") == 0)

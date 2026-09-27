@@ -617,7 +617,7 @@ var cfgKeys = []string{
 	// NetworkSettings 区块，前端带独立保存与强确认）
 	"net.dhcp", "net.ip", "net.mask", "net.gw", "net.dns",
 	// 本地设置（设备维护页签）
-	"localUser.name", "led.enable",
+	"localUser.name", "led.enable", "device.name",
 	// 本地账户口令（接入规范 §5.7 的 cfg 最小集里就有 localUser.password）。
 	// 它是**只写键**：可以下发，但永不回显——读写都走 cfg.get/cfg.set，而“读”只会
 	// 把口令搬回浏览器与响应体，既无必要又多一份泄露面。见 cfgWriteOnly。
