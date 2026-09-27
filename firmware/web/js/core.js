@@ -198,7 +198,12 @@ window.IPC = {
 
   /** 会话失效：回到登录页（router 注入 showAuth） */
   onUnauth() {
-    if (this.showAuth) this.showAuth('login');
+    if (!this.showAuth) return;
+    /* 会话失效可能是被别处恢复出厂：未激活时应进激活页，否则用户会一直登录失败 */
+    fetch('/api/v1/auth/state', { cache: 'no-store' })
+      .then((r) => r.json())
+      .then((st) => this.showAuth(st && st.activated === false ? 'activate' : 'login'))
+      .catch(() => this.showAuth('login'));
   },
 
   /** 写配置：设备逐键校验，有被拒的键即视为失败并列出键名 */

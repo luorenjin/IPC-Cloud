@@ -66,13 +66,10 @@
             } else if (cfg.dhcp === false && !confirm('切换为自动获取后设备地址会改变，当前页面将无法访问，继续？')) {
               return Promise.reject(new Error('已取消'));
             }
-            const body = form.dhcp ? { 'net.dhcp': true }
-              : { 'net.dhcp': false, 'net.ip': form.ip, 'net.mask': form.mask, 'net.gw': form.gw, 'net.dns': form.dns };
-            return IPC.saveCfg(body)
-              .then(() => IPC.api('POST', '/api/v1/system/net/apply').catch((e) => {
-                if (e.code === -1) throw new Error('设备拒绝了该网络设置（掩码/网关/广播地址不合法）');
-                throw e;
-              }))
+            /* 一次提交：设备先校验，通过才保存并应用；被拒时 msg 为具体原因、配置不落盘 */
+            const body = form.dhcp ? { dhcp: true }
+              : { dhcp: false, ip: form.ip, mask: form.mask, gw: form.gw, dns: form.dns };
+            return IPC.api('POST', '/api/v1/system/net/apply', body)
               .then((r) => {
                 cfg.dhcp = form.dhcp;
                 if (r.new_ip && r.new_ip !== location.hostname) jumpTo(r.new_ip);

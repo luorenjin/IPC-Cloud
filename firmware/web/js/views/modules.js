@@ -109,7 +109,7 @@
       const d = draft();
       body[m.cfg_key || ('module.' + m.name + '.enabled')] = d[m.name];
     });
-    IPC.api('PUT', '/api/v1/config', body).then(() => {
+    IPC.saveCfg(body).then(() => {
       toast('已保存，部分模块需重启生效');
       draft() && (S._modDraft = {});
       return loadCapabilities();

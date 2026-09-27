@@ -900,6 +900,7 @@ typedef SOCKET net_sock_t;
 #include <sys/select.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <unistd.h>
 typedef int net_sock_t;
 #define NET_SOCK_INVALID (-1)
@@ -990,6 +991,9 @@ static void net_dhcp_socket_ensure_open(void)
     }
 #endif
     s_dhcp_sock = socket(AF_INET, SOCK_DGRAM, 0);
+#ifndef _WIN32
+    if (s_dhcp_sock != NET_SOCK_INVALID) (void)fcntl(s_dhcp_sock, F_SETFD, FD_CLOEXEC);
+#endif
     if (s_dhcp_sock == NET_SOCK_INVALID) {
         LOGE(MOD, "DHCP：创建 UDP socket 失败");
         return;

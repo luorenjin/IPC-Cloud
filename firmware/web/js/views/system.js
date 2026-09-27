@@ -222,7 +222,10 @@
    * 重启/恢复出厂后等设备重新上线：每 3 秒探测一次 auth/state（免登录），
    * 设备恢复后按激活状态回到登录页或激活页。
    */
-  function waitForDevice(title) {
+  const WAIT_MAX_MS = 180000;
+
+  /** addrMayChange：设备重启后可能换地址（如恢复出厂后改为 DHCP），超时提示去路由器查 */
+  function waitForDevice(title, addrMayChange) {
     const mask = h(`<div class="user-modal-mask" id="reboot-mask" role="dialog" aria-modal="true">
       <div class="user-modal" style="width:360px"><div class="user-modal-bd" style="text-align:center;padding:28px 20px">
         <b>${esc(title)}</b><p class="tip" id="reboot-tip" style="margin-top:12px">请稍候，设备恢复后将自动返回登录页…</p>
@@ -242,6 +245,14 @@
         .catch(() => {
           seenDown = true;
           const tip = $('#reboot-tip');
+          if (Date.now() - t0 > WAIT_MAX_MS) {
+            if (tip) {
+              tip.textContent = addrMayChange
+                ? '设备已改为自动获取地址，当前地址已失效。请在路由器中查找设备的新地址后访问。'
+                : '设备长时间未恢复，请检查设备电源与网络连接后刷新页面。';
+            }
+            return;
+          }
           if (tip) tip.textContent = '设备重启中，已等待 ' + Math.round((Date.now() - t0) / 1000) + ' 秒…';
           setTimeout(poll, 3000);
         });
@@ -283,12 +294,18 @@
           .catch((e) => toast(e.message));
       };
       $('#factory', b).onclick = () => {
-        const v = prompt('恢复出厂将清除全部配置和管理员密码，且不可撤销。\n请输入「确认」继续：');
-        if (v === null) return;
-        if (v.trim() !== '确认') return toast('输入不正确，已取消');
-        IPC.api('POST', '/api/v1/system/reset', { keep_network: false })
-          .then(() => waitForDevice('正在恢复出厂设置'))
-          .catch((e) => toast(e.message));
+        IPC.getCfg('net').catch(() => ({})).then((net) => {
+          const isStatic = net && net.dhcp === false;
+          const warn = isStatic
+            ? '\n\n注意：设备当前为静态IP，恢复出厂后将改为自动获取地址，当前页面地址会失效，需在路由器中查找新地址。'
+            : '';
+          const v = prompt('恢复出厂将清除全部配置和管理员密码，且不可撤销。' + warn + '\n请输入「确认」继续：');
+          if (v === null) return;
+          if (v.trim() !== '确认') return toast('输入不正确，已取消');
+          IPC.api('POST', '/api/v1/system/reset', { keep_network: false })
+            .then(() => waitForDevice('正在恢复出厂设置', isStatic))
+            .catch((e) => toast(e.message));
+        });
       };
       return;
     }

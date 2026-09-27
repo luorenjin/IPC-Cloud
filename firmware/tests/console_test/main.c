@@ -1150,8 +1150,10 @@ static void test_capabilities_endpoint(void)
           "含 hardware 来源标签");
     /* console 固件必备：不可开关 */
     CHECK(strstr(body, "\"name\":\"console\"") != NULL, "目录含 console");
-    /* mock 允许 rtsp：toggleable 应为 true */
     CHECK(strstr(body, "\"cfg_key\":\"module.rtsp.enabled\"") != NULL, "RTSP 键写入目录");
+    /* 评审（模块开关假保存）：固件未编入/未注册的模块开关不产生任何效果，不得标为可开关 */
+    CHECK(strstr(body, "\"toggleable\":true") == NULL,
+          "本测试未注册任何可开关模块 → 全部 toggleable=false，实际：%.300s", strstr(body, "\"modules\""));
 
     /* 关闭 RTSP 后 config_enabled=false */
     CHECK(cfg_set_bool("module.rtsp.enabled", false) == HAL_OK, "写入 module.rtsp.enabled=false");
@@ -1459,6 +1461,26 @@ static void test_api_net_apply(void)
     CHECK(console_apply_net() == HAL_OK, "DHCP 应用");
     mock_sys_last_net(last, sizeof(last));
     CHECK(strcmp(last, "///") == 0, "DHCP 时传空串，实际：%s", last);
+
+    /* 评审 I-3：非法配置随请求体提交时，必须先校验、被拒则不落盘 */
+    {
+        char ipbuf[32] = "";
+        bool dhcp = true;
+        req_make(&req, "POST", "/api/v1/system/net/apply",
+                 "{\"dhcp\":false,\"ip\":\"192.168.1.255\",\"mask\":\"255.255.255.0\",\"gw\":\"192.168.1.1\",\"dns\":\"\"}", cookie);
+        CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_EINVAL, "广播地址被拒");
+        CHECK(strstr(body, "广播") != NULL, "拒绝原因返回给前端，实际：%s", body);
+        cfg_get_bool("net.dhcp", &dhcp);
+        CHECK(dhcp == true, "被拒的静态配置没有落盘（net.dhcp 仍为 true）");
+        req_make(&req, "POST", "/api/v1/system/net/apply",
+                 "{\"dhcp\":false,\"ip\":\"192.168.1.60\",\"mask\":\"255.255.255.0\",\"gw\":\"192.168.1.1\",\"dns\":\"223.5.5.5\"}", cookie);
+        CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "合法请求体被接受");
+        cfg_get_str("net.ip", ipbuf, sizeof(ipbuf));
+        CHECK(strcmp(ipbuf, "192.168.1.60") == 0, "校验通过后才落盘，实际：%s", ipbuf);
+        req_make(&req, "POST", "/api/v1/system/net/apply",
+                 "{\"dhcp\":false,\"ip\":\"+1.2.3.4\",\"mask\":\"255.0.0.0\",\"gw\":\"\",\"dns\":\"\"}", cookie);
+        CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_EINVAL, "带 + 号的 IP 被拒（评审 minor 4）");
+    }
 
     cfg_deinit();
     remove("console_test_cfg_net.json");

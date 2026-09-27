@@ -16,11 +16,31 @@
 
 bool console_ipv4_parse(const char *s, uint32_t *out)
 {
-    unsigned a, b, c, d;
-    char tail;
-    if (!s || sscanf(s, "%u.%u.%u.%u%c", &a, &b, &c, &d, &tail) != 4) return false;
-    if (a > 255 || b > 255 || c > 255 || d > 255) return false;
-    if (out) *out = (a << 24) | (b << 16) | (c << 8) | d;
+    uint32_t v = 0;
+    int parts = 0;
+
+    /* 逐字符解析：sscanf("%u") 会接受前导空白与 '+'，而这些值最终写进
+       平台的网络配置文件，必须与平台侧"只含数字和点"的判定一致 */
+    if (!s || !*s) return false;
+    while (parts < 4) {
+        unsigned n = 0;
+        int digits = 0;
+        while (*s >= '0' && *s <= '9') {
+            if (digits == 1 && n == 0) return false;   /* 拒绝前导 0（如 "01"） */
+            n = n * 10 + (unsigned)(*s - '0');
+            if (++digits > 3 || n > 255) return false;
+            s++;
+        }
+        if (!digits) return false;
+        v = (v << 8) | n;
+        parts++;
+        if (parts < 4) {
+            if (*s != '.') return false;
+            s++;
+        }
+    }
+    if (*s) return false;
+    if (out) *out = v;
     return true;
 }
 

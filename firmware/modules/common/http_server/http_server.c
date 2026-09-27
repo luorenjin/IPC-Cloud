@@ -195,6 +195,18 @@ static const char *status_reason(int status)
 /* 平台相关：非阻塞设置                                                        */
 /* ------------------------------------------------------------------------ */
 
+/* 平台层会用 system() 拉起常驻进程（udhcpc/ntpd）：不设 CLOEXEC 的话它们会继承
+   监听 socket、连接和 epoll fd，ipc_app 重启后 8080 仍被占用、连接挂死 */
+static void set_cloexec(sock_t fd)
+{
+#ifndef _WIN32
+    int f = fcntl(fd, F_GETFD);
+    if (f >= 0) (void)fcntl(fd, F_SETFD, f | FD_CLOEXEC);
+#else
+    (void)fd;
+#endif
+}
+
 static hal_err_t set_nonblocking(sock_t fd)
 {
 #ifdef _WIN32
@@ -298,6 +310,7 @@ static void accept_new_conn(void)
 
         memset(&peer, 0, sizeof(peer));
         fd = accept(s_srv.listen_fd, (struct sockaddr *)&peer, &peer_len);
+        if (fd != SOCK_INVALID) set_cloexec(fd);
 
         if (fd == SOCK_INVALID) {
 #ifndef _WIN32
@@ -731,6 +744,7 @@ hal_err_t http_server_start(uint16_t port)
 #endif
 
     fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (fd != SOCK_INVALID) set_cloexec(fd);
     if (fd == SOCK_INVALID) {
         LOGE(MOD, "创建监听 socket 失败");
 #ifdef _WIN32
@@ -786,7 +800,7 @@ hal_err_t http_server_start(uint16_t port)
     s_srv.listen_fd = fd;
 
 #ifndef _WIN32
-    s_srv.epfd = epoll_create1(0);
+    s_srv.epfd = epoll_create1(EPOLL_CLOEXEC);
     if (s_srv.epfd < 0) {
         LOGE(MOD, "epoll_create1 失败");
         CLOSESOCK(fd);

@@ -353,7 +353,8 @@
     });
     $('#btn-logout').onclick = () => IPC.auth.logout().then(() => showAuth('login'));
     $('#btn-help').onclick = () => toast('PRD：摄像机本地管理控制台PRD_v2.0');
-    $('#forgot').onclick = (e) => { e.preventDefault(); toast('忘记密码：请在系统维护中恢复出厂，或长按机身 Reset 10 秒'); };
+    /* 机身 Reset 键长按恢复出厂尚未实现，这里不能承诺它 */
+    $('#forgot').onclick = (e) => { e.preventDefault(); toast('忘记密码：请联系售后或通过串口维护恢复出厂'); };
     if (!window.IPCCrypto || !IPCCrypto.selfTest()) {
       toast('浏览器加密自检失败，无法登录');
       return;

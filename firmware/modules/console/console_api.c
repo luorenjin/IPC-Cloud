@@ -429,7 +429,8 @@ static json_t *build_modules_array(void)
         json_object_set(m, "config_enabled", json_new_bool(config_on));
         json_object_set(m, "user_enabled", json_new_bool(effective));
         json_object_set(m, "effective", json_new_bool(effective));
-        json_object_set(m, "toggleable", json_new_bool(meta->cfg_key != NULL && profile_ok));
+        /* 只有固件里真正注册了的模块，开关才会被读取生效；未落地的模块开关是假开关 */
+        json_object_set(m, "toggleable", json_new_bool(meta->cfg_key != NULL && profile_ok && registered));
         json_object_set(m, "reboot_required", json_new_bool(meta->reboot_required));
         json_object_set(m, "source", json_new_string(source));
         if (meta->cfg_key) json_object_set(m, "cfg_key", json_new_string(meta->cfg_key));
@@ -1062,18 +1063,49 @@ static void do_apply_net(void *arg)
  * 应用会改变本机地址，必须先把响应发出去（延后动作），前端据 new_ip 跳转。
  * 响应：{"code":0,"msg":"...","new_ip":"<静态 IP；DHCP 时为空>"}
  */
-static hal_err_t ep_net_apply(char *out, size_t out_cap, void (**dfn)(void *), void **darg)
+static void body_str_copy(const json_t *j, const char *key, char *dst, size_t cap)
+{
+    snprintf(dst, cap, "%s", json_string(json_get(j, key), ""));
+}
+
+/**
+ * 请求体（可选）：{"dhcp":bool,"ip":"","mask":"","gw":"","dns":""}。
+ * 带请求体时先校验、通过后才写入 net.* —— 被拒的配置不得落盘，否则设备与
+ * 控制台/平台看到的配置不一致。不带请求体时应用已保存的 net.*。
+ */
+static hal_err_t ep_net_apply(const http_req_t *req, char *out, size_t out_cap,
+                              void (**dfn)(void *), void **darg)
 {
     console_net_cfg_t c;
     const char *why;
     hal_err_t rc;
 
     if (!hal_has(HAL_MOD_SYS) || !hal()->sys->apply_net) return HAL_ENOTSUP;
-    console_net_read(&c);
+    if (req->body && req->body_len > 0) {
+        json_t *j = json_parse(req->body, req->body_len, NULL, 0);
+        if (!j || !json_is(j, JSON_OBJECT)) { json_free(j); return HAL_EINVAL; }
+        memset(&c, 0, sizeof(c));
+        c.dhcp = json_bool(json_get(j, "dhcp"), true);
+        body_str_copy(j, "ip", c.ip, sizeof(c.ip));
+        body_str_copy(j, "mask", c.mask, sizeof(c.mask));
+        body_str_copy(j, "gw", c.gw, sizeof(c.gw));
+        body_str_copy(j, "dns", c.dns, sizeof(c.dns));
+        json_free(j);
+    } else {
+        console_net_read(&c);
+    }
     why = console_net_check(&c);
     if (why) {
         LOGW(MOD, "拒绝应用网络设置：%s", why);
+        fmt_safe(out, out_cap, "{\"code\":%d,\"msg\":\"%s\"}", (int)HAL_EINVAL, why);
         return HAL_EINVAL;
+    }
+    if (req->body && req->body_len > 0) {
+        if (cfg_set_bool("net.dhcp", c.dhcp) != HAL_OK) return HAL_EIO;
+        if (!c.dhcp &&
+            (cfg_set_str("net.ip", c.ip) != HAL_OK || cfg_set_str("net.mask", c.mask) != HAL_OK ||
+             cfg_set_str("net.gw", c.gw) != HAL_OK || cfg_set_str("net.dns", c.dns) != HAL_OK))
+            return HAL_EIO;
     }
     rc = fmt_safe(out, out_cap, "{\"code\":0,\"msg\":\"网络设置即将生效\",\"new_ip\":\"%s\"}",
                   c.dhcp ? "" : c.ip);
@@ -1283,7 +1315,7 @@ static hal_err_t api_dispatch(const http_req_t *req, char *out, size_t out_cap,
         return HAL_EINVAL;
     }
     if (strcmp(req->path, "/api/v1/system/net/apply") == 0)
-        return strcmp(req->method, "POST") == 0 ? ep_net_apply(out, out_cap, dfn, darg) : HAL_EINVAL;
+        return strcmp(req->method, "POST") == 0 ? ep_net_apply(req, out, out_cap, dfn, darg) : HAL_EINVAL;
     if (strcmp(req->path, "/api/v1/system/log") == 0)
         return strcmp(req->method, "GET") == 0 ? ep_system_log(req, out, out_cap) : HAL_EINVAL;
     if (strcmp(req->path, "/api/v1/system/reboot") == 0)
@@ -1320,8 +1352,18 @@ static int console_api_handler(http_req_t *req, void *user)
     body = (char *)malloc(CONSOLE_API_BODY_MAX);
     if (!body) return console_reply_err(req->conn, HAL_ENOMEM);
 
+    body[0] = '\0';
     e = api_dispatch(req, body, CONSOLE_API_BODY_MAX, &dfn, &darg);
-    if (e != HAL_OK) { free(body); return console_reply_err(req->conn, e); }
+    if (e != HAL_OK) {
+        /* 端点可在失败时写入带具体原因的错误体（以 {"code": 开头），优先使用 */
+        if (strncmp(body, "{\"code\":", 8) == 0) {
+            int r = http_respond_json(req->conn, console_http_status(e), body) == HAL_OK ? 0 : -1;
+            free(body);
+            return r;
+        }
+        free(body);
+        return console_reply_err(req->conn, e);
+    }
 
     /* 调用顺序是硬约束：必须先让响应真正入队，才能登记"响应发出后"的动作。
        http_conn_defer_after_flush 用返回值强制这一点——若这两行被颠倒，
