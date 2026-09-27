@@ -146,7 +146,8 @@ window.IPC = {
   feat(id) {
     const f = this.S.features;
     if (!f) return true;
-    return f[id] !== false;
+    /* 设备未上报的功能 ID 视为不可用：没有后端实现的页面一律隐藏 */
+    return f[id] === true;
   },
 
   /** 写入 system/info 的能力三元组并触发重绘 */

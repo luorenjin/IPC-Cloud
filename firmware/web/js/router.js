@@ -17,20 +17,42 @@
     { id: '摄像头', icon: 'cam', subs: ['画面显示', '视音频'], feat: 'image.basic' },
     { id: '事件侦测', icon: 'evt', subs: ['常用侦测', '智能检测', '报警设备', '异常检测'], feat: 'event.any' },
     { id: '存储', icon: 'sto', subs: ['录像计划', '抓图计划', '存储管理'], feat: 'storage.tf' },
-    { id: '网络设置', icon: 'net', subs: ['连接', '端口', '平台接入', '高级配置'], feat: null },
+    { id: '网络设置', icon: 'net', subs: ['连接', '端口', '平台接入', '高级配置'], feat: 'network.config' },
     { id: '云服务', icon: 'cloud', subs: [], feat: 'cloud.bind' },
     { id: '系统设置', icon: 'sys', subs: ['基本设置', '系统升级', '用户管理', '系统配置', '能力与模块'], feat: null },
     { id: '算法赋能', icon: 'algo', subs: [], feat: 'event.smart' }
   ];
 
-  /** 子页 → 功能 ID；false 表示该入口需要 feat 才显示 */
+  /**
+   * 子页 → 功能 ID：设备未上报 true 的入口不显示。
+   * network.ports / network.ftp 设备端尚无实现，永远不会上报，对应入口保持隐藏。
+   */
   const SUB_FEAT = {
+    画面显示: 'image.basic',
+    视音频: 'image.basic',
+    常用侦测: 'event.any',
     智能检测: 'event.smart',
+    报警设备: 'event.alarm',
+    异常检测: 'event.any',
     录像计划: 'storage.record',
     抓图计划: 'storage.record',
     存储管理: 'storage.manage',
+    连接: 'network.config',
+    端口: 'network.ports',
     平台接入: 'netplatform.any',
-    系统升级: 'system.ota'
+    高级配置: 'network.ftp',
+    基本设置: 'system.device',
+    系统升级: 'system.ota',
+    用户管理: 'system.users',
+    能力与模块: 'module.admin'
+  };
+
+  /** 内容页签 → 功能 ID（设备不上报的键 → 页签隐藏） */
+  const TAB_FEAT = {
+    时间校对: 'system.time',
+    系统日志: 'system.log',
+    配置管理: 'system.cfgfile',
+    诊断工具: 'system.diag'
   };
 
   /** 顶部区：无对应能力时隐藏整区入口 */
@@ -60,7 +82,9 @@
     }
     if (g.subs.length) {
       const want = S.tab || S.mod;
-      const ok = g.subs.includes(want) || g.subs.includes(SINGLE_TAB[want] || want) || g.id === want;
+      /* S.mod 是二级菜单项（如「系统配置」），S.tab 是其内容页签（如「系统日志」），任一命中即有效 */
+      const ok = g.subs.includes(S.mod) || g.subs.includes(want) ||
+        g.subs.includes(SINGLE_TAB[want] || want) || g.id === want;
       if (!ok) {
         S.mod = g.subs[0];
         S.tab = DEFAULT_TAB[S.mod] || g.subs[0];
@@ -109,6 +133,10 @@
   };
 
   function tabsFor(mod, tab) {
+    return tabsForRaw(mod, tab).filter((t) => !TAB_FEAT[t] || IPC.feat(TAB_FEAT[t]));
+  }
+
+  function tabsForRaw(mod, tab) {
     const key = tab || mod;
     // 系统设置·基本设置：与实机一致，内容区三页签（设备信息/基本设置/时间校对）
     if (key === '基本设置' || key === '设备信息' || key === '时间校对' ||
