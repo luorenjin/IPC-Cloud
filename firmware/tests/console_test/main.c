@@ -1088,7 +1088,7 @@ static void test_config_rules(void)
 
 static void test_caps_json(void)
 {
-    char buf[1024];
+    char buf[2048];
     SECTION("能力清单");
     CHECK(console_caps_json(buf, sizeof(buf)) == HAL_OK, "生成能力清单");
     CHECK(strstr(buf, "\"wifi\"") != NULL, "含 wifi 字段");
@@ -1096,6 +1096,63 @@ static void test_caps_json(void)
     CHECK(strstr(buf, "\"h265\"") != NULL, "含 h265 字段");
     /* 能力值应来自 profile，而非硬编码 */
     CHECK(strstr(buf, "\"model\"") != NULL, "含型号");
+    /* R0：caps 补齐音频/智能/协议/日夜，供前端裁剪表单 */
+    CHECK(strstr(buf, "\"audio_in\"") != NULL, "含 audio_in");
+    CHECK(strstr(buf, "\"ivs_motion\"") != NULL, "含 ivs_motion");
+    CHECK(strstr(buf, "\"gb\"") != NULL, "含 gb 协议位");
+    CHECK(strstr(buf, "\"daynight\"") != NULL, "含 daynight");
+    /* mock-x86：network 仅有 eth → wifi=false；storage.tf=true */
+    CHECK(strstr(buf, "\"wifi\":false") != NULL, "mock 无 WiFi 模块时 wifi=false");
+    CHECK(strstr(buf, "\"tf\":true") != NULL, "mock 有 TF 能力");
+}
+
+/** R1：能力管理页数据源 GET /api/v1/system/capabilities + module.*.enabled 规则 */
+static void test_capabilities_endpoint(void)
+{
+    http_req_t req;
+    char body[16384];
+    char cookie[128];
+    bool must_change = false;
+
+    SECTION("REST 能力与模块管理端点");
+    CHECK(cfg_init(NULL, "console_test_cfg_caps.json") == HAL_OK, "配置中心就绪");
+    CHECK(console_api_register_rules() == HAL_OK, "登记 module.*.enabled 规则");
+    console_auth_reset_lockout();
+    CHECK(console_auth_seed("ABCD1234", NULL, true) == HAL_OK, "播种凭据");
+    CHECK(console_auth_set_password("ABCD1234", "NewPass@123") == HAL_OK, "改密");
+    CHECK(do_login("admin", "NewPass@123", "192.168.70.10", cookie, sizeof(cookie), &must_change) == HAL_OK,
+          "登录成功");
+
+    req_make(&req, "GET", "/api/v1/system/capabilities", NULL, cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "capabilities 成功");
+    CHECK(strstr(body, "\"features\":[") != NULL, "含功能明细数组");
+    CHECK(strstr(body, "\"modules\":[") != NULL, "含模块目录数组");
+    CHECK(strstr(body, "\"module.rtsp.enabled\"") != NULL, "含 RTSP 配置键");
+    CHECK(strstr(body, "\"toggleable\"") != NULL, "含可开关标记");
+    CHECK(strstr(body, "\"reboot_required\"") != NULL, "含重启策略");
+    CHECK(strstr(body, "\"source\":\"hardware\"") != NULL || strstr(body, "\"source\": \"hardware\"") != NULL,
+          "含 hardware 来源标签");
+    /* console 固件必备：不可开关 */
+    CHECK(strstr(body, "\"name\":\"console\"") != NULL, "目录含 console");
+    /* mock 允许 rtsp：toggleable 应为 true */
+    CHECK(strstr(body, "\"cfg_key\":\"module.rtsp.enabled\"") != NULL, "RTSP 键写入目录");
+
+    /* 关闭 RTSP 后 config_enabled=false */
+    CHECK(cfg_set_bool("module.rtsp.enabled", false) == HAL_OK, "写入 module.rtsp.enabled=false");
+    req_make(&req, "GET", "/api/v1/system/capabilities", NULL, cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "再次读取");
+    CHECK(strstr(body, "\"config_enabled\":false") != NULL, "RTSP 配置开关反映为 false");
+
+    /* PUT config 应能改回 */
+    {
+        bool on = false;
+        req_make(&req, "PUT", "/api/v1/config", "{\"module.rtsp.enabled\":true}", cookie);
+        CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "PUT 恢复开关");
+        CHECK(cfg_get_bool("module.rtsp.enabled", &on) == HAL_OK && on, "配置可读回为 true");
+    }
+
+    cfg_deinit();
+    remove("console_test_cfg_caps.json");
 }
 
 /**
@@ -1204,7 +1261,7 @@ static void test_api_config_endpoints(void)
 static void test_api_system_endpoints(void)
 {
     http_req_t req;
-    char body[4096];
+    char body[8192];
     char cookie[128];
     bool must_change = false;
     bool deferred;
@@ -1228,6 +1285,24 @@ static void test_api_system_endpoints(void)
     CHECK(strstr(body, "\"model\":\"MOCK-X86\"") != NULL, "含型号，实际：%s", body);
     CHECK(strstr(body, "\"caps\":{") != NULL, "内嵌能力清单对象");
     CHECK(strstr(body, "\"uptime_s\"") != NULL, "含运行时长");
+    /* R0 能力驱动：features/modules 是前端导航裁剪的权威来源 */
+    CHECK(strstr(body, "\"features\":{") != NULL, "内嵌功能映射对象");
+    CHECK(strstr(body, "\"modules\":[") != NULL, "内嵌模块清单数组");
+    CHECK(strstr(body, "\"preview.live\":false") != NULL, "本测试未启动视频编码 → 预览不可用（如实上报）");
+    CHECK(strstr(body, "\"event.motion\":true") != NULL, "mock 开启移动侦测");
+    CHECK(strstr(body, "\"event.smart\":false") != NULL, "mock 无智能算法");
+    CHECK(strstr(body, "\"network.wifi\":false") != NULL, "mock 无 WiFi → 功能关闭");
+    CHECK(strstr(body, "\"preview.playback\":false") != NULL, "recorder 未注册 → 回放功能关");
+    /* 如实上报：模块未注册的功能一律 false，本计划新增的系统功能为 true */
+    CHECK(strstr(body, "\"system.ota\":false") != NULL, "ota 模块未注册 → 升级入口隐藏，实际：%s", body);
+    CHECK(strstr(body, "\"cloud.bind\":false") != NULL, "idp 模块未注册 → 云绑定隐藏");
+    CHECK(strstr(body, "\"netplatform.gb\":false") != NULL, "gb28181 未注册 → 国标接入隐藏");
+    CHECK(strstr(body, "\"storage.record\":false") != NULL, "recorder 未注册 → 录像计划隐藏");
+    CHECK(strstr(body, "\"system.time\":true") != NULL, "时间设置可用");
+    CHECK(strstr(body, "\"system.log\":true") != NULL, "系统日志可用");
+    CHECK(strstr(body, "\"system.device\":true") != NULL, "设备名称可用");
+    CHECK(strstr(body, "\"network.config\":true") != NULL, "网络设置可用");
+    CHECK(strstr(body, "\"storage.format\":false") != NULL, "格式化未实现");
 
     /* system/status 未豁免，强制改密期间应 403 */
     req_make(&req, "GET", "/api/v1/system/status", NULL, cookie);
@@ -2311,6 +2386,7 @@ int main(void)
     test_cred_fallback_store();
     test_config_rules();
     test_caps_json();
+    test_capabilities_endpoint();
     test_api_config_endpoints();
     test_api_system_endpoints();
     test_reboot_handler_order();

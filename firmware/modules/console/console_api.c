@@ -95,7 +95,29 @@ static hal_err_t fmt_safe(char *out, size_t cap, const char *fmt, ...)
  */
 hal_err_t console_api_register_rules(void)
 {
+    static const char *const module_keys[] = {
+        "module.idp.enabled", "module.rtsp.enabled", "module.onvif.enabled",
+        "module.gb28181.enabled", "module.recorder.enabled", "module.ota.enabled",
+        "module.ivs.enabled", "module.snapshot.enabled"
+    };
+    size_t i;
+
     if (!profile_get()) return HAL_ESTATE;   /* profile 未加载：不应发生，纯防御 */
+
+    /* 模块级运行时开关：在 profile 允许范围内由产线/售后本机启停。
+     * 显式列出键名（而非 module.*.enabled 通配），避免误开未知模块键。
+     * reboot_required=true：协议栈启停涉及端口/线程，默认重启生效（R1 策略）。
+     * 允许重复登记：rule_for 命中首条即可；cfg 重新 init 后规则表清空，
+     * 必须能再次登记（测试里会多次 cfg_init）。 */
+    for (i = 0; i < sizeof(module_keys) / sizeof(module_keys[0]); i++) {
+        cfg_rule_t r;
+        memset(&r, 0, sizeof(r));
+        r.key_pattern = module_keys[i];
+        r.type = CFG_T_BOOL;
+        r.min = 0; r.max = 1;
+        r.reboot_required = true;
+        if (cfg_register_rules(&r, 1) != HAL_OK) return HAL_ENOMEM;
+    }
     return HAL_OK;
 }
 
@@ -141,15 +163,51 @@ static bool cap_playback(void)
 #endif
 }
 
+/** 运行时配置布尔键：未写入时用默认值（cfg_get_bool 对未设置键返回 ENODEV） */
+static bool cfg_flag(const char *key, bool def)
+{
+    bool v = def;
+    if (cfg_get_bool(key, &v) != HAL_OK) return def;
+    return v;
+}
+
+static bool cap_audio_in(const profile_t *p)
+{
+    return p && (p->audio_in_mic || p->audio_in_line);
+}
+
+static bool cap_ivs(const profile_t *p, uint32_t kind)
+{
+    return p && (p->ivs_kinds_mask & (1u << kind)) != 0;
+}
+
+static bool cap_ivs_smart(const profile_t *p)
+{
+    return cap_ivs(p, HAL_IVS_HUMANOID) || cap_ivs(p, HAL_IVS_INTRUSION) || cap_ivs(p, HAL_IVS_LINECROSS);
+}
+
+static bool mod_up(const char *name) { return module_state(name) != MOD_STATE_UNLOADED; }
+
+/** 视频真在出流（通道 0 已 set_encoder/start）。GK 视频 HAL 未落地时恒 false。 */
+static bool video_live(void)
+{
+    hal_enc_cfg_t c;
+    return hal_has(HAL_MOD_VIDEO) && hal()->video->get_encoder &&
+           hal()->video->get_encoder(0, &c) == HAL_OK;
+}
+
+static bool image_ok(void)
+{
+    hal_image_t img;
+    return hal_has(HAL_MOD_VIDEO) && hal()->video->get_image &&
+           hal()->video->get_image(&img) == HAL_OK;
+}
+
 /**
  * 构建能力清单的 json_t 对象，调用者持有并负责 json_free。
- * console_caps_json（对外，序列化成字符串）与 ep_system_info（内嵌为
- * "caps" 子对象）共用，避免"构建 → 序列化成串 → 再解析回来"这趟往返——
- * 后者不仅浪费一次 malloc/parse，还引入了一个本不必存在的失败态
- * （重新解析理论上可能失败，之前的实现对此静默降级、caps 字段直接消失，
- * 与"caps 恒存在"的对外契约不符；现在两个调用方都直接拿 json_t*，
- * 这个失败态整个消失了）。返回 NULL 表示 profile 未加载或内存不足，
- * 调用方自行决定映射成哪个 hal_err_t。
+ * console_caps_json 与 ep_system_info 共用，避免"序列化→再解析"往返。
+ * caps 描述「硬件/编译/型号有什么」；「现在开不开」见 build_features_object。
+ * 返回 NULL 表示 profile 未加载或内存不足。
  */
 static json_t *build_caps_object(void)
 {
@@ -163,13 +221,335 @@ static json_t *build_caps_object(void)
         json_object_set(obj, "vendor", json_new_string(p->vendor)) != 0 ||
         json_object_set(obj, "wifi", json_new_bool(cap_wifi(p))) != 0 ||
         json_object_set(obj, "wifi_ap", json_new_bool(cap_wifi_ap())) != 0 ||
+        json_object_set(obj, "eth", json_new_bool(p->eth)) != 0 ||
         json_object_set(obj, "tf", json_new_bool(p->tf)) != 0 ||
         json_object_set(obj, "h265", json_new_bool(cap_h265())) != 0 ||
-        json_object_set(obj, "playback", json_new_bool(cap_playback())) != 0) {
+        json_object_set(obj, "playback", json_new_bool(cap_playback())) != 0 ||
+        json_object_set(obj, "audio_in", json_new_bool(cap_audio_in(p))) != 0 ||
+        json_object_set(obj, "audio_out", json_new_bool(p->audio_out)) != 0 ||
+        json_object_set(obj, "audio_talk", json_new_bool(p->audio_out && cap_audio_in(p))) != 0 ||
+        json_object_set(obj, "ivs_motion", json_new_bool(cap_ivs(p, HAL_IVS_MOTION))) != 0 ||
+        json_object_set(obj, "ivs_tamper", json_new_bool(cap_ivs(p, HAL_IVS_TAMPER))) != 0 ||
+        json_object_set(obj, "ivs_smart", json_new_bool(cap_ivs_smart(p))) != 0 ||
+        json_object_set(obj, "wdr", json_new_bool(p->isp_wdr)) != 0 ||
+        json_object_set(obj, "daynight", json_new_bool(strcmp(p->daynight, "none") != 0)) != 0 ||
+        json_object_set(obj, "idp", json_new_bool(p->idp_enabled)) != 0 ||
+        json_object_set(obj, "rtsp", json_new_bool(p->rtsp_enabled)) != 0 ||
+        json_object_set(obj, "onvif", json_new_bool(p->onvif_enabled)) != 0 ||
+        json_object_set(obj, "gb", json_new_bool(p->gb_enabled)) != 0 ||
+        json_object_set(obj, "ota_ab", json_new_bool(p->ota_ab)) != 0) {
         json_free(obj);
         return NULL;
     }
     return obj;
+}
+
+/**
+ * 功能映射（UI 功能层）：feature = 编译包含 ∧ profile 硬件能力 ∧ 运行时配置。
+ * 任一为假时前端必须隐藏/禁用对应入口，API 对该功能返回 HAL_ENOTSUP。
+ * 键名与 firmware/web 的导航过滤表、开发计划 §8 对齐，新增键须同步前端。
+ */
+static json_t *build_features_object(void)
+{
+    const profile_t *p = profile_get();
+    json_t *obj;
+    bool storage_record, preview_playback, event_smart, event_any, event_motion, event_tamper;
+    bool np_idp, np_rtsp, np_onvif, np_gb, live, img, ivs, audio;
+
+    if (!p) return NULL;
+    obj = json_new_object();
+    if (!obj) return NULL;
+
+    /* 功能 = profile 有 ∧ 固件实现能跑通；只看 profile 会把未落地的模块报成可用 */
+    live = video_live();
+    img = p->channel_count > 0 && image_ok();
+    ivs = hal_has(HAL_MOD_IVS);
+    audio = hal_has(HAL_MOD_AUDIO);
+    event_motion = ivs && cap_ivs(p, HAL_IVS_MOTION);
+    event_tamper = ivs && cap_ivs(p, HAL_IVS_TAMPER);
+    event_smart = ivs && cap_ivs_smart(p);
+    event_any = event_motion || event_tamper || event_smart;
+    storage_record = p->tf && cfg_flag("record.enabled", true) && mod_up("recorder");
+#ifdef IPC_CONSOLE_PLAYBACK
+    preview_playback = p->tf && mod_up("recorder") && live;
+#else
+    preview_playback = false;
+#endif
+    np_idp = p->idp_enabled && mod_up("idp");
+    np_rtsp = p->rtsp_enabled && mod_up("rtsp");
+    np_onvif = p->onvif_enabled && mod_up("onvif");
+    np_gb = p->gb_enabled && mod_up("gb28181");
+
+    if (json_object_set(obj, "preview.live", json_new_bool(live)) != 0 ||
+        json_object_set(obj, "preview.playback", json_new_bool(preview_playback)) != 0 ||
+        json_object_set(obj, "tools.download", json_new_bool((p->tf || cap_ivs(p, HAL_IVS_MOTION)) && live)) != 0 ||
+        json_object_set(obj, "image.basic", json_new_bool(img)) != 0 ||
+        json_object_set(obj, "image.daynight", json_new_bool(img && strcmp(p->daynight, "none") != 0)) != 0 ||
+        json_object_set(obj, "image.wdr", json_new_bool(img && p->isp_wdr)) != 0 ||
+        json_object_set(obj, "event.motion", json_new_bool(event_motion)) != 0 ||
+        json_object_set(obj, "event.tamper", json_new_bool(event_tamper)) != 0 ||
+        json_object_set(obj, "event.smart", json_new_bool(event_smart)) != 0 ||
+        json_object_set(obj, "event.any", json_new_bool(event_any)) != 0 ||
+        json_object_set(obj, "event.alarm", json_new_bool(event_any)) != 0 ||
+        json_object_set(obj, "storage.tf", json_new_bool(p->tf)) != 0 ||
+        json_object_set(obj, "storage.record", json_new_bool(storage_record)) != 0 ||
+        json_object_set(obj, "storage.manage", json_new_bool(p->tf)) != 0 ||
+        json_object_set(obj, "storage.format", json_new_bool(false)) != 0 ||
+        json_object_set(obj, "network.eth", json_new_bool(p->eth)) != 0 ||
+        json_object_set(obj, "network.config", json_new_bool(p->eth)) != 0 ||
+        json_object_set(obj, "network.wifi", json_new_bool(cap_wifi(p))) != 0 ||
+        json_object_set(obj, "network.wifi_ap", json_new_bool(cap_wifi_ap())) != 0 ||
+        json_object_set(obj, "netplatform.idp", json_new_bool(np_idp)) != 0 ||
+        json_object_set(obj, "netplatform.rtsp", json_new_bool(np_rtsp)) != 0 ||
+        json_object_set(obj, "netplatform.onvif", json_new_bool(np_onvif)) != 0 ||
+        json_object_set(obj, "netplatform.gb", json_new_bool(np_gb)) != 0 ||
+        json_object_set(obj, "netplatform.any", json_new_bool(np_idp || np_rtsp || np_onvif || np_gb)) != 0 ||
+        json_object_set(obj, "audio.in", json_new_bool(audio && cap_audio_in(p))) != 0 ||
+        json_object_set(obj, "audio.out", json_new_bool(audio && p->audio_out)) != 0 ||
+        json_object_set(obj, "system.ota", json_new_bool(mod_up("ota"))) != 0 ||
+        json_object_set(obj, "system.users", json_new_bool(true)) != 0 ||
+        json_object_set(obj, "system.time", json_new_bool(true)) != 0 ||
+        json_object_set(obj, "system.log", json_new_bool(true)) != 0 ||
+        json_object_set(obj, "system.device", json_new_bool(true)) != 0 ||
+        json_object_set(obj, "module.admin", json_new_bool(true)) != 0 ||
+        json_object_set(obj, "cloud.bind", json_new_bool(np_idp)) != 0) {
+        json_free(obj);
+        return NULL;
+    }
+    return obj;
+}
+
+/**
+ * 固件模块目录（产品层元数据，与 module.h 的 mod_* 声明对应）。
+ * 未注册的模块也出现在管理页：说明「SKU 是否允许 / 配置是否打开」，
+ * 而不是等模块落地后才看得到开关。state 仍以 module_loader 为准。
+ */
+typedef struct {
+    const char *name;
+    const char *title;
+    const char *cfg_key;     /**< NULL = 固件必备，不可开关 */
+    const char *depends;     /**< 依赖模块名，无则 NULL */
+    bool        reboot_required;
+} module_meta_t;
+
+static const module_meta_t MODULE_CATALOG[] = {
+    { "console",   "本地控制台",   NULL,                     NULL,   false },
+    { "idp",       "IDP 云接入",   "module.idp.enabled",     NULL,   true  },
+    { "rtsp",      "RTSP 服务",    "module.rtsp.enabled",    NULL,   true  },
+    { "onvif",     "ONVIF 服务",   "module.onvif.enabled",   "rtsp", true  },
+    { "gb28181",   "GB28181 接入", "module.gb28181.enabled", NULL,   true  },
+    { "recorder",  "本地录像",     "module.recorder.enabled",NULL,   true  },
+    { "ota",       "固件升级",     "module.ota.enabled",     NULL,   true  },
+    { "ivs",       "智能分析",     "module.ivs.enabled",     NULL,   true  },
+    { "snapshot",  "抓图服务",     "module.snapshot.enabled",NULL,   true  },
+};
+
+static bool profile_allows_module(const profile_t *p, const char *name)
+{
+    if (!p) return false;
+    if (strcmp(name, "console") == 0) return true;
+    if (strcmp(name, "idp") == 0)       return p->idp_enabled;
+    if (strcmp(name, "rtsp") == 0)      return p->rtsp_enabled;
+    if (strcmp(name, "onvif") == 0)     return p->onvif_enabled;
+    if (strcmp(name, "gb28181") == 0)   return p->gb_enabled;
+    if (strcmp(name, "recorder") == 0)  return p->tf;
+    if (strcmp(name, "ivs") == 0)       return strcmp(p->ivs_engine, "none") != 0;
+    if (strcmp(name, "ota") == 0)       return true;
+    if (strcmp(name, "snapshot") == 0)  return p->channel_count > 0;
+    return false;
+}
+
+static const char *module_state_str(module_state_t state)
+{
+    switch (state) {
+    case MOD_STATE_INITED:  return "inited";
+    case MOD_STATE_RUNNING: return "running";
+    case MOD_STATE_STOPPED: return "stopped";
+    case MOD_STATE_FAILED:  return "failed";
+    default:                return "unloaded";
+    }
+}
+
+/**
+ * 模块清单：目录全量（含未注册）+ 运行态 + profile/config/effective 三层判定。
+ * source：always / profile / config —— 以「谁能让它关掉」为准。
+ */
+static json_t *build_modules_array(void)
+{
+    const profile_t *p = profile_get();
+    json_t *arr;
+    size_t i;
+
+    if (!p) return NULL;
+    arr = json_new_array();
+    if (!arr) return NULL;
+
+    for (i = 0; i < sizeof(MODULE_CATALOG) / sizeof(MODULE_CATALOG[0]); i++) {
+        const module_meta_t *meta = &MODULE_CATALOG[i];
+        bool profile_ok = profile_allows_module(p, meta->name);
+        bool config_on = true;
+        module_state_t st = module_state(meta->name);
+        bool registered = (st != MOD_STATE_UNLOADED);
+        bool effective;
+        const char *source;
+        json_t *m;
+        if (meta->cfg_key) {
+            bool v = true;
+            if (cfg_get_bool(meta->cfg_key, &v) == HAL_OK) config_on = v;
+        }
+        /* 依赖未满足时 effective 为假（管理页展示影响面） */
+        effective = profile_ok && config_on;
+        if (effective && meta->depends) {
+            bool dep_cfg = true;
+            const char *dep_key = NULL;
+            size_t k;
+            for (k = 0; k < sizeof(MODULE_CATALOG) / sizeof(MODULE_CATALOG[0]); k++) {
+                if (strcmp(MODULE_CATALOG[k].name, meta->depends) == 0) {
+                    dep_key = MODULE_CATALOG[k].cfg_key;
+                    if (!profile_allows_module(p, meta->depends)) effective = false;
+                    break;
+                }
+            }
+            if (effective && dep_key && cfg_get_bool(dep_key, &dep_cfg) == HAL_OK && !dep_cfg)
+                effective = false;
+        }
+
+        if (!meta->cfg_key) source = "always";
+        else if (!profile_ok) source = "profile";
+        else if (!config_on) source = "config";
+        else source = "profile";
+
+        m = json_new_object();
+        if (!m) continue;
+        json_object_set(m, "name", json_new_string(meta->name));
+        json_object_set(m, "title", json_new_string(meta->title));
+        json_object_set(m, "state", json_new_string(module_state_str(st)));
+        json_object_set(m, "registered", json_new_bool(registered));
+        json_object_set(m, "profile_ok", json_new_bool(profile_ok));
+        json_object_set(m, "config_enabled", json_new_bool(config_on));
+        json_object_set(m, "user_enabled", json_new_bool(effective));
+        json_object_set(m, "effective", json_new_bool(effective));
+        json_object_set(m, "toggleable", json_new_bool(meta->cfg_key != NULL && profile_ok));
+        json_object_set(m, "reboot_required", json_new_bool(meta->reboot_required));
+        json_object_set(m, "source", json_new_string(source));
+        if (meta->cfg_key) json_object_set(m, "cfg_key", json_new_string(meta->cfg_key));
+        if (meta->depends) json_object_set(m, "depends", json_new_string(meta->depends));
+        json_array_push(arr, m);
+    }
+    return arr;
+}
+
+/**
+ * 功能明细（能力管理页）：在 features 布尔之外补充来源与中文名。
+ * source：hardware（profile/HAL）/ compile（裁剪宏）/ config（运行时开关）/ mixed。
+ */
+static json_t *build_feature_detail_array(void)
+{
+    const profile_t *p = profile_get();
+    json_t *arr;
+    bool rec_cfg = true;
+
+    if (!p) return NULL;
+    arr = json_new_array();
+    if (!arr) return NULL;
+    (void)cfg_get_bool("record.enabled", &rec_cfg);
+
+#define FEAT(id, title, on, src, detail) do { \
+    json_t *f = json_new_object(); \
+    if (!f) break; \
+    json_object_set(f, "id", json_new_string(id)); \
+    json_object_set(f, "title", json_new_string(title)); \
+    json_object_set(f, "enabled", json_new_bool(on)); \
+    json_object_set(f, "source", json_new_string(src)); \
+    json_object_set(f, "detail", json_new_string(detail)); \
+    json_array_push(arr, f); \
+} while (0)
+
+    {
+    bool live = video_live();
+    bool img = p->channel_count > 0 && image_ok();
+    bool ivs = hal_has(HAL_MOD_IVS);
+    bool audio = hal_has(HAL_MOD_AUDIO);
+    bool ev_any = ivs && (cap_ivs(p, HAL_IVS_MOTION) || cap_ivs(p, HAL_IVS_TAMPER) || cap_ivs_smart(p));
+
+    FEAT("preview.live", "实时预览", live, "mixed", "依赖视频模块出流");
+    FEAT("preview.playback", "本地回放",
+         cap_playback() && p->tf && live, "mixed",
+         cap_playback() ? "依赖 TF 卡、recorder 模块与视频出流" : "固件未编入回放代码路径");
+    FEAT("tools.download", "图片下载", (p->tf || cap_ivs(p, HAL_IVS_MOTION)) && live, "mixed",
+         "依赖视频出流与 TF 或移动侦测抓图");
+    FEAT("image.basic", "图像调节", img, "mixed", "依赖视频通道与 ISP 图像接口");
+    FEAT("image.daynight", "日夜切换", img && strcmp(p->daynight, "none") != 0, "mixed",
+         p->daynight[0] ? p->daynight : "none");
+    FEAT("image.wdr", "宽动态", img && p->isp_wdr, "mixed", "ISP 能力");
+    FEAT("event.motion", "移动侦测", ivs && cap_ivs(p, HAL_IVS_MOTION), "mixed", "IVS 能力位 + IVS 模块");
+    FEAT("event.tamper", "视频遮挡", ivs && cap_ivs(p, HAL_IVS_TAMPER), "mixed", "IVS 能力位 + IVS 模块");
+    FEAT("event.smart", "智能检测", ivs && cap_ivs_smart(p), "mixed", "人形/入侵/越界任一 + IVS 模块");
+    FEAT("event.alarm", "报警设备", ev_any, "mixed", "依赖任一侦测事件");
+    FEAT("storage.tf", "存储卡", p->tf, "hardware", "profile.storage.tf");
+    FEAT("storage.record", "本地录像", p->tf && rec_cfg && mod_up("recorder"), "mixed",
+         rec_cfg ? "硬件 TF + recorder 模块" : "record.enabled 已关闭");
+    FEAT("storage.manage", "存储管理", p->tf, "hardware", "profile.storage.tf");
+    FEAT("storage.format", "存储卡格式化", false, "always", "本期未实现");
+    FEAT("network.eth", "以太网", p->eth, "hardware", "profile.network.eth");
+    FEAT("network.config", "网络设置", p->eth, "hardware", "有线 DHCP/静态地址");
+    FEAT("network.wifi", "WiFi", cap_wifi(p), "hardware", "需 WiFi 模组与 HAL");
+    FEAT("network.wifi_ap", "AP 配网", cap_wifi_ap(), "hardware", "需 AP 能力");
+    FEAT("netplatform.idp", "IDP 接入", p->idp_enabled && mod_up("idp"), "mixed", "protocols.idp + idp 模块");
+    FEAT("netplatform.rtsp", "RTSP 接入", p->rtsp_enabled && mod_up("rtsp"), "mixed", "protocols.rtsp + rtsp 模块");
+    FEAT("netplatform.onvif", "ONVIF 接入", p->onvif_enabled && mod_up("onvif"), "mixed", "protocols.onvif + onvif 模块");
+    FEAT("netplatform.gb", "GB28181 接入", p->gb_enabled && mod_up("gb28181"), "mixed", "protocols.gb28181 + gb28181 模块");
+    FEAT("audio.in", "音频输入", audio && cap_audio_in(p), "mixed", "拾音/线性输入 + 音频模块");
+    FEAT("audio.out", "音频输出", audio && p->audio_out, "mixed", "扬声器/线性输出 + 音频模块");
+    FEAT("system.ota", "固件升级", mod_up("ota"), "mixed", "依赖 ota 模块");
+    FEAT("system.users", "用户管理", true, "always", "本地账号");
+    FEAT("system.time", "时间设置", true, "always", "NTP / 手动校时");
+    FEAT("system.log", "系统日志", true, "always", "内存环形日志");
+    FEAT("system.device", "设备名称", true, "always", "device.name");
+    FEAT("module.admin", "模块管理", true, "always", "本页");
+    FEAT("cloud.bind", "云服务绑定", p->idp_enabled && mod_up("idp"), "mixed", "依赖 IDP 模块");
+    }
+
+#undef FEAT
+    return arr;
+}
+
+/**
+ * GET /api/v1/system/capabilities：能力管理页数据源。
+ * 响应：{"code":0,"features":[{id,title,enabled,source,detail}...],
+ *        "modules":[{name,title,state,registered,profile_ok,config_enabled,
+ *                    effective,toggleable,reboot_required,source,cfg_key,depends}...]}
+ */
+static hal_err_t ep_system_capabilities(char *out, size_t out_cap)
+{
+    json_t *root, *feats, *mods;
+    char *txt;
+    hal_err_t rc;
+
+    if (!profile_get()) return HAL_ESTATE;
+    feats = build_feature_detail_array();
+    mods = build_modules_array();
+    if (!feats || !mods) {
+        json_free(feats);
+        json_free(mods);
+        return HAL_ENOMEM;
+    }
+    root = json_new_object();
+    if (!root) {
+        json_free(feats);
+        json_free(mods);
+        return HAL_ENOMEM;
+    }
+    json_object_set(root, "code", json_new_int(0));
+    json_object_set(root, "features", feats);
+    json_object_set(root, "modules", mods);
+    txt = json_dump(root, false);
+    json_free(root);
+    if (!txt) return HAL_ENOMEM;
+    rc = (strlen(txt) < out_cap) ? HAL_OK : HAL_ENOMEM;
+    if (rc == HAL_OK) strcpy(out, txt);
+    free(txt);
+    return rc;
 }
 
 hal_err_t console_caps_json(char *buf, size_t cap)
@@ -335,11 +715,12 @@ static void device_serial(char *out, size_t cap)
 }
 
 /**
- * GET /api/v1/system/info：型号/序列号/固件版本/运行时长 + 能力清单。
+ * GET /api/v1/system/info：型号/序列号/固件版本/运行时长 + caps/features/modules。
  * 响应：{"code":0,"model":..,"vendor":..,"serial":..,"fw_version":..,
- *        "uptime_s":..,"caps":{...console_caps_json 同款字段...}}
+ *        "uptime_s":..,"caps":{...},"features":{...},"modules":[...]}
  * 唯一在强制改密期间仍可访问的业务端点（console_auth_check 已豁免），
  * 前端在改密页也要能读到型号与能力清单渲染页面外壳。
+ * features/modules 为能力驱动 UI 的权威来源，前端不得另算一套。
  */
 static hal_err_t ep_system_info(char *out, size_t out_cap)
 {
@@ -347,7 +728,7 @@ static hal_err_t ep_system_info(char *out, size_t out_cap)
     hal_sys_stats_t st;
     hal_ota_state_t ota;
     char serial[64];
-    json_t *root, *caps_obj;
+    json_t *root, *caps_obj, *feat_obj, *mods_arr;
     char *txt;
     hal_err_t rc;
 
@@ -359,23 +740,32 @@ static hal_err_t ep_system_info(char *out, size_t out_cap)
     if (hal_has(HAL_MOD_SYS) && hal()->sys->ota_get_state) hal()->sys->ota_get_state(&ota);
     device_serial(serial, sizeof(serial));
 
-    /* 直接拿 build_caps_object() 的 json_t*，不再走 console_caps_json 的
-       "序列化成串 → 再解析回来"往返：既省一次 malloc/parse，也让"重新解析
-       失败"这个原本需要单独处理、且曾经被静默吞掉的边界情况彻底消失——
-       caps 字段现在要么正确出现，要么整个端点返回 HAL_ENOMEM，不会有
-       "200 但 caps 不见了"这种与对外契约（caps 恒存在）矛盾的中间态。 */
     caps_obj = build_caps_object();
-    if (!caps_obj) return HAL_ENOMEM;
+    feat_obj = build_features_object();
+    mods_arr = build_modules_array();
+    if (!caps_obj || !feat_obj || !mods_arr) {
+        json_free(caps_obj);
+        json_free(feat_obj);
+        json_free(mods_arr);
+        return HAL_ENOMEM;
+    }
 
     root = json_new_object();
-    if (!root) { json_free(caps_obj); return HAL_ENOMEM; }
+    if (!root) {
+        json_free(caps_obj);
+        json_free(feat_obj);
+        json_free(mods_arr);
+        return HAL_ENOMEM;
+    }
     json_object_set(root, "code", json_new_int(0));
     json_object_set(root, "model", json_new_string(p->model));
     json_object_set(root, "vendor", json_new_string(p->vendor));
     json_object_set(root, "serial", json_new_string(serial));
     json_object_set(root, "fw_version", json_new_string(ota.current_version));
     json_object_set(root, "uptime_s", json_new_int((int64_t)st.uptime_s));
-    json_object_set(root, "caps", caps_obj);   /* 接管所有权 */
+    json_object_set(root, "caps", caps_obj);       /* 接管所有权 */
+    json_object_set(root, "features", feat_obj);   /* 接管所有权 */
+    json_object_set(root, "modules", mods_arr);    /* 接管所有权 */
 
     txt = json_dump(root, false);
     json_free(root);
@@ -684,6 +1074,8 @@ static hal_err_t api_dispatch(const http_req_t *req, char *out, size_t out_cap,
     }
     if (strcmp(req->path, "/api/v1/system/info") == 0)
         return strcmp(req->method, "GET") == 0 ? ep_system_info(out, out_cap) : HAL_EINVAL;
+    if (strcmp(req->path, "/api/v1/system/capabilities") == 0)
+        return strcmp(req->method, "GET") == 0 ? ep_system_capabilities(out, out_cap) : HAL_EINVAL;
     if (strcmp(req->path, "/api/v1/system/status") == 0)
         return strcmp(req->method, "GET") == 0 ? ep_system_status(out, out_cap) : HAL_EINVAL;
     if (strcmp(req->path, "/api/v1/system/reboot") == 0)
