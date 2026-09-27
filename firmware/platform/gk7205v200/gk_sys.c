@@ -197,11 +197,19 @@ static hal_err_t sys_reboot(void)
 #endif
 }
 
+#define GK_NET_CONF   "/etc/ipc/net.conf"
+#define GK_NET_SCRIPT "/etc/init.d/S81dhcp"
+
 static hal_err_t sys_factory_reset(bool keep_network)
 {
+    /* 配置与凭据由 core/config、console 各自清除；平台侧只需清掉自己落的
+       网络文件，否则 cfg 已回到 DHCP 而 S81dhcp 仍按旧静态地址起网。
+       不做分区级擦除（超出里程碑范围）。 */
+#ifndef _WIN32
+    if (!keep_network) remove(GK_NET_CONF);
+#else
     (void)keep_network;
-    /* 配置与安全存储的清除由 core/config 与 crypto 各自负责，此处只重启。
-       本期不实现分区级擦除——那需要碰 flash，超出里程碑范围。 */
+#endif
     return sys_reboot();
 }
 
@@ -239,9 +247,6 @@ static hal_err_t sys_ota_confirm(void)                   { return HAL_ENOTSUP; }
 static hal_err_t sys_ota_abort(void)                     { return HAL_ENOTSUP; }
 
 /* ---- 网络 / NTP / 墙钟：交给 rootfs 里的开机脚本与 busybox 工具 ---- */
-
-#define GK_NET_CONF   "/etc/ipc/net.conf"
-#define GK_NET_SCRIPT "/etc/init.d/S81dhcp"
 
 /** 只允许点分十进制字符，防止写进 shell 可解析的配置文件里被注入 */
 static bool ipv4_chars_ok(const char *s)

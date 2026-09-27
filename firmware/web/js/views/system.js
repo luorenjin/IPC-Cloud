@@ -366,6 +366,9 @@
     S.algoTab = tab;
 
     if (tab === '事件联动报警') {
+      /* 进入页面时拍快照：撤销 = 恢复快照（控件 onchange 直接改 S，单纯重绘撤销不了） */
+      const AE_KEYS = ['algoEvent', 'algoEvRec', 'algoEvSnap', 'algoEvPush', 'algoEvWhite', 'algoEvSound', 'alarmSnd', 'alarmTimes'];
+      if (!IPC._aeSnap) IPC._aeSnap = Object.fromEntries(AE_KEYS.map((k) => [k, S[k]]));
       const opts = (S.algoList || []).map((a) => a.name);
       if (!opts.includes(S.algoEvent)) S.algoEvent = opts[0] || '';
       // 对齐实机：蓝底算法下拉独立成行、左缘与页签/勾选列对齐（无空 lab 占位）
@@ -405,8 +408,13 @@
       $('#ae-white').onchange = (e) => { S.algoEvWhite = e.target.checked; };
       $('#ae-sound').onchange = (e) => { S.algoEvSound = e.target.checked; applySndExtra(); };
       applySndExtra();
-      $('#ae-save').onclick = () => toast('已保存');
-      $('#ae-revoke').onclick = () => { IPC.render(); toast('已撤销修改'); };
+      $('#ae-save').onclick = () => { IPC._aeSnap = null; toast('已保存'); };
+      $('#ae-revoke').onclick = () => {
+        Object.assign(S, IPC._aeSnap);
+        IPC._aeSnap = null;
+        IPC.render();
+        toast('已撤销修改');
+      };
       return;
     }
 

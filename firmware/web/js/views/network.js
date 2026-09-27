@@ -298,8 +298,8 @@
       bind('#ga-reggap', (el) => { S.gaRegGap = el.value; });
       bind('#ga-ch', (el) => { S.gaCh = el.value; });
       bind('#ga-chno', (el) => { S.gaChNo = el.value.trim(); });
-      bind('#ga-face', (el) => { S.gaFace = el.target.checked; });
-      bind('#ga-img', (el) => { S.gaImg = el.target.checked; });
+      bind('#ga-face', (el) => { S.gaFace = el.checked; });
+      bind('#ga-img', (el) => { S.gaImg = el.checked; });
     }
   });
 
@@ -310,8 +310,8 @@
       numRow('端口', 'ftpPort', 1, 65535),
       textRow('用户名', 'ftpUser'),
       chkRow('匿名', 'ftpAnon'),
-      textRow('密码', 'ftpHost', '', 'password'),
-      textRow('密码确认', 'ftpHost', '', 'password'),
+      textRow('密码', 'ftpPwd', '', 'password'),
+      textRow('密码确认', 'ftpPwd2', '', 'password'),
       selRow('上传路径与命名', 'ftpPath', ['保存在根目录', '按日期分目录'])
     ]));
     b.append(saveRow());

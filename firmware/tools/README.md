@@ -28,6 +28,20 @@ python firmware/tools/board.py reflash-rootfs
 
 串口全文与应用日志保存在 `firmware/tools/logs/`（已加入 `.gitignore`）。
 
+## console_e2e.py：控制台真机浏览器验收
+
+依赖：`pip install playwright`；使用系统 Chrome（`channel="chrome"`），不需要 `playwright install`。
+
+```bash
+python firmware/tools/console_e2e.py                  # 默认 http://172.16.1.185:8080/，口令 Admin@12345
+python firmware/tools/console_e2e.py --skip-reboot --skip-reset   # 快速回归，不重启不出厂
+```
+
+覆盖 13 个用例：激活、错误口令被拒、只显示可用菜单、设备信息真实值、设备名持久化、与计算机时间同步、系统日志导出、修改密码、会话失效回登录页、连续错误口令锁定、重启、恢复出厂（结束后自动用同一口令重新激活）。退出码 0 = 全过；截图在 `firmware/tools/logs/e2e-<时间>/`。
+
+- 锁定用例会让本机 IP 被设备锁定 60 秒起（重复触发翻倍，最长 15 分钟），脚本会轮询直到解锁。
+- 「改为静态 IP」不在自动化里：会把测试机与设备的连接改断。需要时手工在「网络设置 → 连接」验证。
+
 ### 说明
 
 - **reflash-rootfs 会擦掉整个 10MB 分区**，但会**保留 MAC 和 IP**：烧写前读出 `/etc/ipc/mac`，新系统启动后写回，释放首次开机随机 MAC 占用的租约，再用 `udhcpc -r` 请求原 IP，所以自动化测试的地址不变。`/etc/ipc/config.json` 仍会被清掉，控制台回到未激活状态。
