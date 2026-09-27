@@ -1,0 +1,48 @@
+#!/bin/sh
+# Pin the eth0 MAC, then get an address via DHCP.
+#
+# MAC: the kernel ignores U-Boot ethaddr and picks a random MAC on every boot,
+# so the DHCP address keeps changing. On first boot we generate a locally
+# administered unicast address (first byte 0x02), save it to $MAC_FILE, and
+# reuse it afterwards. A factory-assigned MAC written to $MAC_FILE takes over.
+# udhcpc -b: go to background if no lease yet, so rcS is never blocked.
+
+IFACE=eth0
+UDHCPC=/sbin/udhcpc
+SCRIPT=/usr/share/udhcpc/default.script
+MAC_FILE=/etc/ipc/mac
+
+valid_mac() {
+    echo "$1" | grep -qiE '^[0-9a-f]{2}(:[0-9a-f]{2}){5}$' || return 1
+    case "$1" in
+        00:00:00:00:00:00|ff:ff:ff:ff:ff:ff|FF:FF:FF:FF:FF:FF) return 1 ;;
+    esac
+    return 0
+}
+
+gen_mac() {
+    printf '02:%s\n' "$(head -c 5 /dev/urandom | od -An -tx1 | tr -s ' \n' ':' | sed 's/^://;s/:$//')"
+}
+
+MAC=$(cat "$MAC_FILE" 2>/dev/null | tr -d ' \r\n')
+if ! valid_mac "$MAC"; then
+    MAC=$(gen_mac)
+    if valid_mac "$MAC"; then
+        mkdir -p "$(dirname "$MAC_FILE")"
+        echo "$MAC" > "$MAC_FILE.tmp" && mv "$MAC_FILE.tmp" "$MAC_FILE" && sync
+        echo "[S81dhcp] first boot, generated MAC $MAC"
+    else
+        echo "[S81dhcp] MAC generation failed, keeping driver random MAC"
+        MAC=
+    fi
+fi
+
+ifconfig lo 127.0.0.1 up
+ifconfig "$IFACE" down
+[ -n "$MAC" ] && ifconfig "$IFACE" hw ether "$MAC" && echo "[S81dhcp] $IFACE MAC $MAC"
+ifconfig "$IFACE" up
+
+[ -x "$UDHCPC" ] || { echo "[S81dhcp] $UDHCPC not found, skip DHCP"; exit 0; }
+"$UDHCPC" -b -i "$IFACE" -s "$SCRIPT" -p /var/run/udhcpc.$IFACE.pid
+
+exit 0

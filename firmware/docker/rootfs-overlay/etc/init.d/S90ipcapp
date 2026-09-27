@@ -1,0 +1,22 @@
+#!/bin/sh
+# Start the IPC console app.
+#
+# Must run in background without wait: if ipc_app crashes or hangs while this
+# script blocks, rcS never finishes and the board can only be recovered by
+# reflashing. Better to lose the console than to lose the board.
+
+APP=/usr/bin/ipc_app
+PROFILE=/etc/ipc/SP-R1-02.json
+LOG=/var/log/ipc_app.log
+PORT=8080
+
+[ -x "$APP" ] || exit 0
+[ -f "$PROFILE" ] || exit 0
+
+mkdir -p /var/log /etc/ipc/sec
+chmod 700 /etc/ipc/sec 2>/dev/null
+
+echo "[S90ipcapp] starting console on port $PORT"
+"$APP" --profile "$PROFILE" --port "$PORT" --persist /etc/ipc/config.json >> "$LOG" 2>&1 &
+
+exit 0

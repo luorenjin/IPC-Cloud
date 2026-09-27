@@ -1,0 +1,28 @@
+#!/bin/sh
+# udhcpc hook: apply address, default route and DNS from the lease.
+
+RESOLV_CONF=/etc/resolv.conf
+[ -n "$broadcast" ] && BROADCAST="broadcast $broadcast"
+[ -n "$subnet" ] && NETMASK="netmask $subnet"
+
+case "$1" in
+    deconfig)
+        ifconfig "$interface" 0.0.0.0
+        ;;
+    renew|bound)
+        ifconfig "$interface" "$ip" $BROADCAST $NETMASK
+        if [ -n "$router" ]; then
+            while route del default gw 0.0.0.0 dev "$interface" 2>/dev/null; do :; done
+            for i in $router; do
+                route add default gw "$i" dev "$interface"
+            done
+        fi
+        : > "$RESOLV_CONF"
+        [ -n "$domain" ] && echo "search $domain" >> "$RESOLV_CONF"
+        for i in $dns; do
+            echo "nameserver $i" >> "$RESOLV_CONF"
+        done
+        echo "[udhcpc] $interface got address $ip"
+        ;;
+esac
+exit 0
