@@ -6,6 +6,13 @@ node_modules/
 .output/
 dist/
 
+# CMake build outputs
+output/
+build/
+
+# 浏览器自动化工具的页面快照
+.playwright-cli/
+
 # Logs
 *.log
 *.txt

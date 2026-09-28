@@ -8,7 +8,7 @@
     "gb_manufacturer": "IpcCloud"
   },
   "video": {
-    "sensors": ["sc230ai"],
+    "sensors": ["gc2053"],
     "lens": { "type": "fixed", "af": false, "zoom": false },
     "channels": [
       { "ch": 0, "name": "main", "codecs": ["h265", "h264"],
@@ -18,24 +18,38 @@
         "max":     { "w": 704, "h": 396, "fps": 30 },
         "default": { "codec": "h264", "w": 640, "h": 360, "fps": 15, "kbps": 512, "rc": "cbr", "gop": 30 } }
     ],
-    "isp": { "wdr": true, "hdr": true, "3dnr": true, "daynight": "icr_auto" },
+    "isp": { "wdr": true, "hdr": true, "3dnr": true, "daynight": "icr_auto", "ircut_driver": "ba6208" },
     "snapshot": { "codec": "mjpeg", "max": { "w": 1920, "h": 1080 } }
   },
-  "audio": { "in": ["mic", "line"], "out": [], "codecs": ["g711a", "g711u", "aac"], "aec": false },
-  "ivs": { "engine": "ive", "motion": true, "humanoid": true, "intrusion": false, "linecross": false, "tamper": true, "max_regions": 4 },
-  "storage": { "tf": true, "max_gb": 256, "fs": ["exfat", "fat32"], "segment_s": 60, "reserve_pct": 5 },
+  "audio": { "in": ["mic", "line"], "out": ["line"], "codecs": ["g711a", "g711u"], "aec": false, "talk": true },
+  "ivs": { "engine": "ive", "motion": true, "humanoid": false, "intrusion": false, "linecross": false, "tamper": true, "max_regions": 4 },
+  "storage": { "tf": true, "max_gb": 256, "fs": ["exfat", "fat32"], "segment_s": 60, "reserve_pct": 5, "note": "可展板 TF 槽；样机已插 64GB" },
   "network": {
     "eth": true,
-    "wifi": { "module": "TBD", "bus": "sdio", "power_gpio": 20, "bands": ["2.4g"], "security": ["wpa2", "wpa3"], "stack": "nl80211+wpa_supplicant" }
+    "wifi": { "enabled": false, "module": null, "bus": null, "power_gpio": null, "bands": [], "security": [], "stack": "nl80211+wpa_supplicant" }
+  },
+  "flash": {
+    "type": "spi_nor",
+    "size_mb": 16,
+    "upgrade_sku_mb": 32,
+    "ota_mode": "single_slot",
+    "notes": "16MB 量产默认单槽升级；32MB 升配可开 A/B。禁止假设 128MB NAND / 40MB slot。"
   },
   "gpio_map": {
-    "ircut_a":      { "pin": 12 },
-    "ircut_b":      { "pin": 13 },
-    "ir_led":       { "pin": 14, "pwm": true, "pwm_hz": 1000 },
-    "status_led":   { "pin": 15 },
-    "reset_key":    { "pin": 16, "active_low": true, "debounce_ms": 50 },
-    "light_sensor": { "adc": 0, "night_below": 800, "day_above": 1500 },
-    "wifi_power":   { "pin": 20 }
+    "ircut_a":      { "pin": 4, "note": "U9 BA6208，J4 CUTS；走线≥20mil" },
+    "ircut_b":      { "pin": 5, "note": "U9 BA6208 BIN" },
+    "ir_led":       { "pin": 71, "pwm": true, "pwm_hz": 1000, "alt_gpio": 80, "note": "PWM1 / LED_Ctrl(GPIO1_0)" },
+    "status_led":   { "pin": 29, "note": "ETH_LINK_STA_LED/GPIO5_0，可按 BOM 改" },
+    "reset_key":    { "pin": 16, "active_low": true, "debounce_ms": 50, "note": "以 BOM 为准" },
+    "light_sensor": { "adc": 0, "adc_alt": 1, "night_below": 800, "day_above": 1500, "note": "LSADC_CH0/CH1" },
+    "ir_in":        { "pin": 72, "note": "GPIO0_0/UPDATE_MODE/IR_IN，R0 不解码" }
+  },
+  "peripherals": {
+    "usb": 1,
+    "pwm": 2,
+    "rs485": "reserved",
+    "crypto_if": 1,
+    "power": "DC12V 5-12V wide"
   },
   "protocols": {
     "idp":     { "enabled": true, "broker": "mqtts://idp.example.com:8883", "auth": "cert", "keepalive_s": 60 },
@@ -44,6 +58,6 @@
     "gb28181": { "enabled": false, "transport": "tcp", "playback": false, "alarm": true }
   },
   "limits": { "frame_bus_consumers": 4, "rtsp_sessions": 2, "playback_sessions": 1, "mem_budget_mb": 56, "cpu_budget_pct": 70 },
-  "security": { "hw_secure": false, "force_password_change": true, "telnet": false, "ssh": false },
-  "ota": { "ab": true, "slot_size_mb": 40, "confirm_timeout_s": 60 }
+  "security": { "hw_secure": true, "hw_secure_note": "板载加密接口×1；驱动未接入前 hal_crypto 可用文件回退", "force_password_change": true, "telnet": false, "ssh": false },
+  "ota": { "ab": false, "slot_size_mb": 0, "max_image_mb": 12, "confirm_timeout_s": 60 }
 }

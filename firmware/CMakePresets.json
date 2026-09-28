@@ -1,0 +1,28 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "mock-msvc",
+      "displayName": "mock x86 (MSVC)",
+      "description": "Windows 本机构建 mock 平台 + 全部测试；ARM 交叉编译走 docker/，勿用 arm-none-eabi kit",
+      "generator": "Visual Studio 17 2022",
+      "architecture": { "value": "x64", "strategy": "set" },
+      "binaryDir": "${sourceDir}/build-vscode",
+      "cacheVariables": {
+        "IPC_PLATFORM": "mock",
+        "IPC_PROFILE": "mock-x86"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "mock-msvc-debug", "configurePreset": "mock-msvc", "configuration": "Debug" }
+  ],
+  "testPresets": [
+    {
+      "name": "mock-msvc-debug",
+      "configurePreset": "mock-msvc",
+      "configuration": "Debug",
+      "output": { "outputOnFailure": true }
+    }
+  ]
+}
