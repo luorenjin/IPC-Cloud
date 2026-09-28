@@ -1396,6 +1396,45 @@ static void test_api_system_extras(void)
     req_make(&req, "GET", "/api/v1/system/log", NULL, NULL);
     CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_EUNAUTH_, "日志需登录");
 
+    /* 小问题 3：日志含控制字符（JSON 转义后膨胀 6 倍）时仍须在预算内返回，丢最旧的行 */
+    {
+        char ctl[400];
+        int k;
+        memset(ctl, 0x01, sizeof(ctl) - 1);
+        ctl[sizeof(ctl) - 1] = '\0';
+        log_init(LOG_INFO, 64);   /* 与 app/main.c 一致的 64KB 环 */
+        for (k = 0; k < 150; k++) LOGI("test", "ctl %d %s", k, ctl);
+        LOGI("test", "最新一行探针");
+        req_make(&req, "GET", "/api/v1/system/log", NULL, cookie);
+        snprintf(req.query, sizeof(req.query), "lines=1000");
+        CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK,
+              "控制字符日志不致使日志端点失败");
+        CHECK(strstr(body, "最新一行探针") != NULL, "超预算时保留最新的行");
+        CHECK(strlen(body) < 20 * 1024, "响应不超过 20KB 预算，实际 %u", (unsigned)strlen(body));
+    }
+    /* 行数边界：lines=N 精确返回最新 N 行（旧→新） */
+    {
+        json_t *jr;
+        log_init(LOG_INFO, 16);
+        LOGI("test", "L1");
+        LOGI("test", "L2");
+        LOGI("test", "L3");
+        req_make(&req, "GET", "/api/v1/system/log", NULL, cookie);
+        snprintf(req.query, sizeof(req.query), "lines=2");
+        CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "lines=2");
+        jr = json_parse(body, strlen(body), NULL, 0);
+        CHECK(jr && json_int(json_get(jr, "total"), -1) == 2, "恰好 2 行，实际：%s", body);
+        CHECK(strstr(body, "L2") && strstr(body, "L3") && !strstr(body, "L1"), "是最新两行");
+        CHECK(strstr(body, "L2") < strstr(body, "L3"), "旧→新排序");
+        json_free(jr);
+        req_make(&req, "GET", "/api/v1/system/log", NULL, cookie);
+        snprintf(req.query, sizeof(req.query), "lines=1");
+        CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "lines=1");
+        jr = json_parse(body, strlen(body), NULL, 0);
+        CHECK(jr && json_int(json_get(jr, "total"), -1) == 1 && strstr(body, "L3"), "lines=1 只返回最新一行：%s", body);
+        json_free(jr);
+    }
+
     req_make(&req, "PUT", "/api/v1/config", "{\"device.name\":\"前门摄像头\"}", cookie);
     CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "设置设备名");
     CHECK(strstr(body, "\"applied\":1") != NULL, "device.name 已接受，实际：%s", body);

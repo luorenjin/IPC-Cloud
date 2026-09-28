@@ -870,15 +870,17 @@ static hal_err_t ep_system_status(char *out, size_t out_cap)
 /**
  * GET /api/v1/system/log?lines=N：内存环形日志的最后 N 行（默认 200，上限 1000）。
  * 响应：{"code":0,"total":<返回行数>,"lines":["...", ...]}（旧→新）。
- * 响应体受 CONSOLE_API_BODY_MAX 限制：超出时从最旧的行开始丢弃。
+ * 响应体受 out_cap 限制：从最新一行往回取，按 JSON 转义最坏情况估算
+ * （控制字符转成 6 字节的 \u00XX），放不下就停——保留最新的行，丢最旧的。
  */
 static hal_err_t ep_system_log(const http_req_t *req, char *out, size_t out_cap)
 {
     char qbuf[16];
     const char *q = http_query(req, "lines", qbuf, sizeof(qbuf), "");
     long want = q[0] ? strtol(q, NULL, 10) : CONSOLE_LOG_LINES_DEF;
-    char *dump, *start, *p, *txt;
-    size_t n;
+    size_t budget = out_cap > 256 ? out_cap - 256 : 0;   /* 预留外层字段 */
+    size_t n, used = 0;
+    char *dump, *start, *end, *p, *txt;
     long count = 0;
     json_t *root, *arr;
     hal_err_t rc;
@@ -892,35 +894,27 @@ static hal_err_t ep_system_log(const http_req_t *req, char *out, size_t out_cap)
     if (n >= CONSOLE_LOG_DUMP_MAX) n = CONSOLE_LOG_DUMP_MAX - 1;
     dump[n] = '\0';
 
-    /* 从尾部往前数 want 个换行，定位第一行的起点 */
-    start = dump;
-    for (p = dump + n; p > dump; p--) {
-        if (p[-1] == '\n' && p != dump + n) {
-            if (++count >= want) { start = p; break; }
-        }
+    /* 单趟从尾部往回：每行累计最坏转义长度，行数或预算到限即停（线性时间） */
+    end = dump + n;
+    while (end > dump && end[-1] == '\n') end--;
+    *end = '\0';
+    start = end;
+    while (start > dump && count < want) {
+        char *ls = start;
+        size_t cost = 4;                                   /* 引号 + 逗号 */
+        if (ls < end) ls--;                                /* 跳到上一行末尾的换行符之前 */
+        while (ls > dump && ls[-1] != '\n') ls--;
+        for (p = ls; p < end && *p != '\n'; p++)
+            cost += ((unsigned char)*p < 0x20) ? 6 : (*p == '"' || *p == '\\') ? 2 : 1;
+        if (used + cost > budget) break;
+        used += cost;
+        count++;
+        start = ls;
     }
 
     root = json_new_object();
     arr = json_new_array();
     if (!root || !arr) { json_free(root); json_free(arr); free(dump); return HAL_ENOMEM; }
-
-    for (;;) {
-        /* 预留 256 字节给外层字段，超出就从最旧的行丢起 */
-        size_t budget = out_cap > 256 ? out_cap - 256 : 0;
-        size_t est = 0;
-        count = 0;
-        for (p = start; *p; ) {
-            char *nl = strchr(p, '\n');
-            size_t len = nl ? (size_t)(nl - p) : strlen(p);
-            est += len * 2 + 4;   /* 转义最坏翻倍 */
-            count++;
-            p = nl ? nl + 1 : p + len;
-        }
-        if (est <= budget || !*start) break;
-        p = strchr(start, '\n');
-        if (!p) break;
-        start = p + 1;
-    }
 
     count = 0;
     for (p = start; *p; ) {
