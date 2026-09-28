@@ -1,6 +1,6 @@
 # IpcCloud 固件 —— 通用层接口（HAL v1 / core / profiles / mock / console）
 
-> 状态：**HAL v1 + L2 core 已实现并通过 x86 测试**；`modules/console` + `common/http_server` + `app/` 已落地。`platform/gk7205v200/` 为**倾向性骨架**（交叉编译见 `docker/`），**芯片/传感器/ISP/Flash 选型未冻结**——勿向 `core/`/`modules/` 加芯片假设。
+> 状态：**HAL v1 + L2 core 已实现并通过 x86 测试**；`modules/console` + `common/http_server` + `app/` 已落地。`platform/gk7205v200/` 已在真机跑通（硬件基线 2026-09-21 冻结：GK7205V200 + GC2053 + 16MB SPI NOR；video/gpio 仍为桩），交叉编译见 `docker/`，真机部署与验收见 `tools/`——`core/`/`modules/` 仍不得出现芯片假设。
 > 本机控制台前端源：`web/`（改后 `scripts/gen_assets.py` 重生成 `console_assets.c`，见 [`web/AGENTS.md`](web/AGENTS.md)）。
 > 设计依据：[IPC固件平台化架构_HAL适配方案](../Docs/PRD/IPC固件平台化架构_HAL适配方案.md)、[设备接入规范 v1.0](../Docs/PRD/IpcCloud设备接入规范_v1.0.md)。
 
@@ -16,7 +16,7 @@ firmware/
 ├── web/                      本机控制台前端源（见 web/AGENTS.md）
 ├── app/                      主程序入口 main.c
 ├── profiles/                 L4 能力清单：schema/profile.v1.schema.json、SP-R1-02.json、mock-x86.json
-├── platform/mock/            L0 x86 模拟平台；platform/gk7205v200/ 倾向性骨架（选型未冻结）
+├── platform/mock/            L0 x86 模拟平台；platform/gk7205v200/ 量产平台（video/gpio 为桩）
 ├── scripts/gen_assets.py     web/ → console_assets.c（手动、生成物入库）
 ├── tests/hal_conformance/    HAL 一致性测试（任何平台必须全过）
 ├── tests/core_test/          core 层单元测试

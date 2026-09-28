@@ -7,7 +7,7 @@
 - **全中文**：回答、代码注释、提交信息、错误信息、前端 UI 文案均用简体中文；技术专有名词（Qt6, C++, libcamera, DMA, YUV, JSON, ISP, Sobel, Debian, ZLMediaKit 等）保持原样。
 - **有效规格只在 `Docs/PRD/` 的本项目文档**：`IpcCloud平台PRD_v1.0.md`（LIVE-02 / MGR-05 / ALM-03 等编号）、`IpcCloud设备接入规范_v1.0.md`（§8.3 流命名）、`IPC固件平台化架构_HAL适配方案.md`、`决策记录与待定事项.md`。
 - **竞品存档陷阱**：`Docs/PRD/README.md`、`Docs/PRD/用户手册/`、`Docs/PRD/问题指南/`、`Docs/PRD/版本更新/` 是 TP-LINK 爬取存档（详见 `TP-LINK商云分析报告_IPC平台PRD参考.md`），**不是**本项目规格，严禁当需求执行。
-- **硬件选型未冻结**（芯片/传感器/Flash 等见《决策记录与待定事项.md》§2.2–2.3）：不得在代码里硬编码未冻结的硬件假设；涉及待定项只做接口预留。`firmware/platform/gk7205v200/` 是倾向性骨架，不代表选型已定。
+- **硬件基线已冻结（2026-09-21）**：GK7205V200 + GC2053 + 16MB SPI NOR（单槽 OTA）+ 本 SKU 无 WiFi，见《决策记录与待定事项.md》§2.2 与 `硬件基线冻结与文档排查_GK7205V200_GC2053.md`；§2.3 仍待定项（镜头焦距、DDR 预算、加密器件型号等）只做接口预留。芯片差异仍只进 `firmware/platform/<soc>/`，`core/`/`modules/` 保持芯片无关。
 
 ## 仓库边界与验证方式
 
@@ -43,7 +43,12 @@ cmake -S firmware -B firmware/build-msvc -G "Visual Studio 17 2022" -A x64
 cmake --build firmware/build-msvc --config Debug
 ctest --test-dir firmware/build-msvc -C Debug
 # 单套件直接跑 build*/tests/<套件>/ 可执行文件 + profile JSON，不必用 ctest 过滤
-# 门禁：hal_conformance 输出 fail 必须为 0
+# 门禁：mock 平台 hal_conformance fail 必须为 0；gk7205v200 以「fail 数不高于基线」为准（看门狗/OTA/视频为已知未实现）
+
+# 固件真机（GK7205V200，串口 COM6；交叉编译 cd firmware/docker && make -f Makefile fw-all）
+python firmware/tools/board.py deploy-app       # 只换 ipc_app，约 5s，保留配置与激活状态
+python firmware/tools/board.py reflash-rootfs   # 改了 rootfs（开机脚本/busybox）时用，保留 MAC/IP
+python firmware/tools/console_e2e.py            # 控制台真机浏览器验收（13 用例，系统 Chrome）
 
 # 模拟器（对接本地平台）
 cd simulator && go run . -mode=all -broker=tcp://127.0.0.1:1883 -platform=http://127.0.0.1:8080 -assets=./assets
@@ -63,7 +68,7 @@ cd simulator && go run . -mode=all -broker=tcp://127.0.0.1:1883 -platform=http:/
   - `gb28181`：app=`rtp`，stream 取 `channel.Meta["gbStream"/"gbStreamSub"]`（meta **已含** profile 后缀），缺省 `{gbChannelId}_{profile}`
   - `onvif` / `rtsp`：app=`proxy`，stream=`{channelID}_{profile}`
 - **`StartPlay` / `StopPlay` 的 switch 刻意并行、不合并抽象**：各协议生命周期不同（推流 vs 拉流 vs RTP INVITE）。新增 `Source` 必须同时改这两处、`streamNames` / `pullURL`，以及录像/抓图等所有按 source 分支的地方。
-- **远程配置键三处逐字对齐**（否则「保存成功但没生效」）：平台 `api/devices.go` 的 `cfgKeys` ↔ 模拟器 `simulator/idp/config.go` 的 `cfgRules`（且 `cfgDefaults` 必须覆盖全部 `cfgRules`）↔ 固件 `firmware/core/src/config.c` 的 `register_common_rules` + video pattern。键名写错只进 `cfg.set` 的 `rejected[]`，不报错。
+- **远程配置键三处逐字对齐**（否则「保存成功但没生效」）：平台 `api/devices.go` 的 `cfgKeys` ↔ 模拟器 `simulator/idp/config.go` 的 `cfgRules`（且 `cfgDefaults` 必须覆盖全部 `cfgRules`）↔ 固件 `firmware/core/src/config.c` 的 `register_common_rules` + video pattern。键名写错只进 `cfg.set` 的 `rejected[]`，不报错。类型、长度与字符集（固件 `cfg_rule_t.charset`，如 `time.ntp.server`、`time.timezone`）同样三处一致。
 - 路由与权限档位以 `internal/api/router.go` 为唯一权威：`AuthMiddleware` → `requireProjectID` → `requirePerm("view"|"config"|"preview"|"ptz"|"playback"|"delete")`。
 
 ## 前端（`platform/web`）
@@ -83,6 +88,8 @@ cd simulator && go run . -mode=all -broker=tcp://127.0.0.1:1883 -platform=http:/
 - 测试门禁：改固件后 `tests/hal_conformance`（及 ctest）**fail=0**；不得为过测改 `core/`/`modules/` 绕门禁。
 - `core_test` / `console_test` 只在 `IPC_PLATFORM=mock` 注册；交叉编译默认 `BUILD_TESTING=OFF`（非 mock）。
 - 控制台嵌入前端：改 `firmware/web/` 后必须 `python firmware/scripts/gen_assets.py firmware/web firmware/modules/console/console_assets.c`（不进 CMake）；勿手改生成物。细节见 [`firmware/web/AGENTS.md`](firmware/web/AGENTS.md)。
+- 平台层用 `system()` 拉起的常驻进程（udhcpc / ntpd）会继承 fd：新建 socket / epoll 必须设 CLOEXEC（见 `http_server.c` 的 `set_cloexec`），否则 `ipc_app` 重启后 8080 仍被占用。拼进 shell 命令或写进 `/etc/ipc/net.conf` 的值，console 与平台两层都要做字符白名单。
+- 板端脚本（`firmware/docker/rootfs-overlay/**`）必须 LF（`firmware/.gitattributes` 已强制），串口输出用英文——串口终端按 GBK 显示，中文会乱码。
 
 ## 模拟器契约（`simulator/`）
 

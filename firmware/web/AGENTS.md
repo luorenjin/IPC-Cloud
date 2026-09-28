@@ -6,8 +6,8 @@
 
 设备本机 Web 管理端的**源文件**（原生 JS 单页，无框架、无构建、无 CDN、无 npm）。与 `platform/web`（云平台 Nuxt）**完全无关**，不要混用依赖或组件。
 
-- 入口：`index.html` → `js/core.js` → `ui` / `router` / `views/*` → `app.js`
-- 运行：浏览器直开 `index.html`（`file://` 可用），或经 `modules/console` 内嵌静态资源访问
+- 入口：`index.html` → `js/crypto.js` → `js/core.js` → `ui` / `router` / `views/*` → `app.js`
+- 运行：经设备（或本地 mock `ipc_app`）内嵌静态资源访问。`file://` 只能看壳层——激活、登录、保存都要设备接口
 - 设计依据：`Docs/superpowers/specs/2026-09-07-ipc-local-web-console-design.md`、`2026-09-21-控制台真机落地-design.md`
 
 ## 改完必须重新生成内嵌资源
@@ -35,11 +35,19 @@ python firmware/scripts/gen_assets.py firmware/web firmware/modules/console/cons
 
 | 方式 | 用途 |
 |---|---|
-| 直接打开 `firmware/web/index.html` | 改 UI 时最快；部分 API 会失败，属预期 |
-| mock 构建 + `console_test` / 起 `ipc_app --profile profiles/mock-x86.json` | 验静态资源与 `/api/v1/*` 契约 |
-| 真机（gk7205v200 rootfs） | 登录 → 配置读写 → 网络/系统页；**嵌入后**再冒烟一次 |
+| 直接打开 `firmware/web/index.html` | 只看样式/布局；登录与所有 API 都会失败 |
+| mock 构建后起 `ipc_app --profile profiles/mock-x86.json --port 28080` | 本地走完整流程（激活/登录/保存）。**别用 18080**：`http_server_test` 占用该端口 |
+| `python firmware/tools/board.py deploy-app` + `python firmware/tools/console_e2e.py` | 真机部署 + 13 用例浏览器验收（系统 Chrome，playwright `channel="chrome"`） |
 
-无独立单测 runner、无 lint。改完至少：重新 `gen_assets.py` → `cmake --build`（mock）→ ctest 或直接开浏览器走关键路径。
+无独立单测 runner、无 lint。改完至少：重新 `gen_assets.py` → `cmake --build`（mock）→ ctest → 浏览器走关键路径（确认没有页面脚本错误）。改了 `js/crypto.js` 还要跑其 `selfTest()`（与 `console_test` 的 `test_proof_cross_vector` 共用向量）。
+
+## 鉴权与请求（一律走 core.js）
+
+- 请求用 `IPC.api(method, path, body)`：401 / -101 自动回登录页（先查 `auth/state`，未激活则进激活页）；-3 为登录锁定。**不要**裸 `fetch`（`auth/state` 探测除外）。
+- 写配置 `IPC.saveCfg(obj)`（`rejected_total>0` 即失败并列出键）；读配置 `IPC.getCfg(prefix)`。
+- 激活 / 登录 / 改密走 `IPC.auth.*`：挑战-应答，口令不出浏览器。局域网 http 不是安全上下文，**没有 WebCrypto**，PBKDF2/HMAC 由 `js/crypto.js` 纯 JS 实现。
+- 口令长度按 UTF-8 **字节** 8–63：用 `IPC.pwdError()`，不要用 `str.length` 或 `maxlength`（22 个汉字 length=22 但有 66 字节）。
+- `IPC.ui.saveRow(onSave)`：`onSave` 返回 Promise，resolve 后才提示（resolve 字符串则以它为提示，用于转述设备回复）；**不传 `onSave` 就不渲染保存按钮**——禁止只弹 toast 的假保存。
 
 ## 前端结构约定
 
@@ -50,16 +58,17 @@ python firmware/scripts/gen_assets.py firmware/web firmware/modules/console/cons
 - **能力驱动 UI（R0）**：`GET /api/v1/system/info` 返回 `caps`（硬件）+ `features`（功能合成）+ `modules`（模块态）。
   - 前端用 `IPC.feat(id)` / `IPC.S.features` 决定导航与页签显隐，**禁止**在 JS 写死型号/芯片能力。
   - `router.js` 的 `NAV[].feat`、`SUB_FEAT`、`TOP_FEAT` 是功能 ID → 入口映射表；**新增入口必须挂 feature ID**。
-  - `file://` 本地预览时 features 为 null，走开发态全量树；一旦 API 返回，false 必须隐藏（无假开关）。
+  - `IPC.feat(id)` 只在设备上报 `true` 时可见，**未上报的 ID 同样隐藏**。没有后端实现的入口挂一个设备不会上报的 ID（如 `network.ports`、`network.ftp`、`system.diag`），就会一直隐藏；后端实现后再上报。
   - 功能 ID 与 `console_api.c` 的 `build_features_object` 一一对应，改一侧必须同步另一侧。
 - **能力与模块管理（R1）**：页签在「系统设置 → 能力与模块」（`js/views/modules.js`）。
   - 数据源 `GET /api/v1/system/capabilities`（features 明细 + modules 目录）。
-  - 模块开关写 `module.<name>.enabled`（`console_api_register_rules` 登记，**需重启生效**）。
+  - 模块开关写 `module.<name>.enabled`（`console_api_register_rules` 登记，**需重启生效**）；只有固件里已注册的模块 `toggleable=true`，其余开关禁用。
   - 目录在 `console_api.c` 的 `MODULE_CATALOG`：加模块必须同步目录、profile 门控与前端。
 
 ## 与后端契约
 
-- REST：`/api/v1/config`、`/api/v1/system/*`、鉴权 `/api/v1/auth/*`（`console_api.c` / `console_auth.c`）。
+- REST：`/api/v1/config`、`/api/v1/system/{info,status,capabilities,log,time,net/apply,reboot,reset}`、`/api/v1/storage/info`、鉴权 `/api/v1/auth/*`（`console_api.c` / `console_auth.c`）。
+- 会改地址或断连的操作（重启、恢复出厂、网络应用）设备先回响应再执行：前端要显示等待遮罩并轮询 `auth/state`，改静态 IP 后按 `new_ip` 跳转；配置未变化时设备返回 `unchanged:true`。
 - 配置键走 `core/config`（`register_common_rules` + profile seed）；**不要**在前端另造一套校验/键名。远程配置三处对齐见根 `AGENTS.md`（平台 / 模拟器 / 固件规则表）——本地控制台读写的是**同一套** `cfg_*` 键。
 - 静态路由：`console_static.c` 注册 `/` 兜底，未命中 → `index.html`；响应恒带 `Content-Encoding: gzip` + ETag。
 
@@ -70,3 +79,4 @@ python firmware/scripts/gen_assets.py firmware/web firmware/modules/console/cons
 3. 在 `web/` 引 npm / 外链 CDN → 设备无外网、无 node 构建链。
 4. 与 `platform/web` 混淆 → 那是云平台 SPA，依赖、COOP/COEP、h265web 都不同。
 5. 生成物含 `GK7205` 等 → CMake configure 直接失败。
+6. 用 Python 脚本批量改 `js/*.js` 时注意换行转义：`'\n'` 被写成真换行会让整页脚本报错（改完 `node --check` 每个文件）。
