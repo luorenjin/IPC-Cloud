@@ -26,7 +26,7 @@ cd platform && docker compose up -d --build
 
 首次登录后按设置向导添加媒体节点（apiUrl 填 `http://zlm:80`，secret 见 ZLM 容器 `config.ini` 的 `api.secret`，publicHost 填宿主机 IP）。
 
-不使用 Docker 的本地开发、固件构建/测试、模拟器运行方式，详见各子目录的 README / CLAUDE.md。
+不使用 Docker 的本地开发、固件构建/测试、模拟器运行方式，详见各子目录的 README / CLAUDE.md（根级约束见 [`AGENTS.md`](AGENTS.md)）。
 
 ## 关键设计文档
 
@@ -41,4 +41,4 @@ cd platform && docker compose up -d --build
 
 ## 面向 AI 编码助手
 
-进入子目录工作前请先读对应的 `CLAUDE.md`（[根目录](CLAUDE.md) → [platform](platform/CLAUDE.md) / [firmware](firmware/CLAUDE.md) / [simulator](simulator/CLAUDE.md)），其中约定了应答语言、跨领域注意事项（协议来源字面判别值等）以及各自的架构与命令速查。
+根级规范正文见 [`AGENTS.md`](AGENTS.md)（Claude Code 的 [`CLAUDE.md`](CLAUDE.md) 仅作指针）。进入子目录前再读对应详细文档：[platform](platform/CLAUDE.md) / [firmware](firmware/CLAUDE.md) / [simulator](simulator/CLAUDE.md)。

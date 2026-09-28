@@ -1,14 +1,12 @@
 # CLAUDE.md（firmware/）
 
-本文件为 Claude Code 在 `firmware/` 目录（IPC 固件通用层：HAL v1 / core / profiles / mock）下工作时提供指导。根目录总览见 `../CLAUDE.md`。
-
-## 应答语言
-
-必须使用中文应答用户（代码、标识符、命令行等技术内容保持原样）。
+本文件为 Claude Code 在 `firmware/` 目录（IPC 固件通用层：HAL v1 / core / profiles / mock / console）下工作时提供指导。根级规范（应答语言、PRD 溯源、硬件未冻结等）见 [`../AGENTS.md`](../AGENTS.md)。
 
 ## 状态与依据
 
-**HAL v1 + L2 core 已实现并通过 x86 测试**；真实芯片平台（`platform/gk7205*` 等）尚未加入——待芯片/传感器/ISP/Flash 选型完成后再加入。**不要向 `core/` 或 `modules/` 添加任何芯片相关假设**，也不要为了赶实现进度而提前对未决的硬件参数做决策。
+**HAL v1 + L2 core 已实现并通过 x86 测试**；`modules/console` + `common/http_server` + `app/` 已落地；**`platform/gk7205v200/` 为倾向性骨架**（交叉编译见 `docker/`），**芯片/传感器/ISP/Flash 选型仍未冻结**——不要向 `core/` 或 `modules/` 添加芯片假设，待定项只做接口预留。
+
+本机控制台前端源在 **`web/`**（改后必须 `scripts/gen_assets.py` 重生成 `console_assets.c`）：见 [`web/AGENTS.md`](web/AGENTS.md)。
 
 设计依据：
 - `../Docs/PRD/IPC固件平台化架构_HAL适配方案.md`
@@ -23,13 +21,18 @@ firmware/
 ├── core/                     L2 核心服务（已实现）
 │   ├── include/core/         os / json / log / profile / event_bus / config / frame_bus / module
 │   └── src/                  对应 .c 实现（Windows + POSIX 同源）
-├── modules/                  L3 功能模块（接口约定见 core/module.h，实现待下一步）
+├── modules/                  L3：console + common/http_server 已实现；idp/rtsp/… 待后续
+├── web/                      本机控制台前端源（见 web/AGENTS.md）
+├── app/                      主程序入口 main.c
 ├── profiles/                 L4 能力清单：schema/profile.v1.schema.json、SP-R1-02.json、mock-x86.json
-├── platform/mock/             L0 x86 模拟平台（合成 H.264/H.265 帧、OTA 文件槽、软安全存储）
-├── tests/hal_conformance/     HAL 一致性测试（任何平台必须全过）
-├── tests/core_test/           core 层单元测试（json/os/log/profile/event/config/framebus/loader）
+├── platform/mock/            L0 x86 模拟平台；platform/gk7205v200/ 倾向性骨架（选型未冻结）
+├── scripts/gen_assets.py     web/ → console_assets.c（手动、生成物入库）
+├── tests/hal_conformance/    HAL 一致性测试（任何平台必须全过）
+├── tests/core_test/          core 层单元测试
+├── tests/console_test/       控制台/API 单测（仅 IPC_PLATFORM=mock）
+├── docker/                   GOKE SDK 交叉编译与 rootfs 打包（见 docker/README.md）
 ├── docs/模块划分与依赖规则.md
-└── CMakeLists.txt             -DIPC_PLATFORM=mock|gk7205v200|…  -DIPC_PROFILE=<name>
+└── CMakeLists.txt            -DIPC_PLATFORM=mock|gk7205v200|…  -DIPC_PROFILE=<name>
 ```
 
 ## 构建与测试
@@ -48,9 +51,11 @@ cmake -S firmware -B firmware/build && cmake --build firmware/build
 (cd firmware && ./build/tests/hal_conformance/hal_conformance profiles/mock-x86.json)
 ```
 
-期望输出：`RESULT: platform=mock pass=252 fail=0` 与 `RESULT: core pass=121 fail=0`（用例数随测试演进变化，**`fail` 必须为 0**）。
+期望输出：`RESULT: platform=mock pass=… fail=0` 与 `RESULT: core pass=… fail=0`（用例数随测试演进变化，**`fail` 必须为 0**）。
 
 单独运行某个测试套件：直接执行 `firmware/build*/tests/<套件名>/`（MSVC 下为 `.../Debug/<套件名>.exe`）下生成的可执行文件，传入对应 profile JSON 路径作为参数，不必通过 `ctest` 过滤器。
+
+交叉编译 / rootfs：`docker/`（GnuWin32 make 建议 `make -f Makefile …`；宿主路径勿在 make 变量阶段用 `$(CURDIR)`，recipe 内 `$$(pwd)` 现算——见 `docker/README.md`）。
 
 ## HAL v1 一览
 
@@ -70,7 +75,7 @@ cmake -S firmware -B firmware/build && cmake --build firmware/build
 
 ## 分层规则（CMake 强制，非靠约定）
 
-`CMakeLists.txt` 会扫描 `core/*.c core/*.h modules/*.c modules/*.h`，一旦发现 `#include "platform/` 或芯片宏（`PLATFORM_|GK7205|RV1106|HI35...`）即在 configure 阶段 `FATAL_ERROR` 失败。**不要为了绕过这个门禁而把平台相关代码塞进 `core/`/`modules/`**——应在 `platform/<soc>/` 下新增 HAL 操作或平台实现，或在 `hal/` 增加新的通用接口。
+`CMakeLists.txt` 会扫描 `core/*.c core/*.h modules/*.c modules/*.h`（含生成的 `console_assets.c`），一旦发现 `#include "platform/` 或芯片宏（`PLATFORM_|GK7205|RV1106|HI35...`）即在 configure 阶段 `FATAL_ERROR` 失败。**不要为了绕过这个门禁而把平台相关代码塞进 `core/`/`modules/`**——应在 `platform/<soc>/` 下新增 HAL 操作或平台实现，或在 `hal/` 增加新的通用接口。前端资源文案里也不要出现 `GK7205` 等字样。
 
 ## 平台实现约定（新增芯片平台时遵守）
 
@@ -101,9 +106,4 @@ cmake -S firmware -B firmware/build && cmake --build firmware/build
 
 ## 下一步
 
-见 `docs/模块划分与依赖规则.md` §8：core 实现 → modules/common → rtsp → idp → recorder → gb28181 → onvif → console/ota/ivs/snapshot；硬件定后再加 `platform/<soc>/`。
-
-## 跨领域注意事项
-
-- 代码注释与文档均为中文；保持一致。
-- 涉及"待定"硬件参数（见决策记录 §2.3）的改动，只做接口预留，不做实现决策。
+见 `docs/模块划分与依赖规则.md` §8 与 `Docs/superpowers/specs/2026-09-07-ipc-local-web-console-design.md`（A 线 Task 9–11：flv_mux / WS-FLV / OTA 仍待 video HAL）。已落地：console + 静态前端 + `app/` + `platform/gk7205v200` 交叉编译骨架。硬件选型冻结前勿扩 `core/`/`modules/` 芯片假设。

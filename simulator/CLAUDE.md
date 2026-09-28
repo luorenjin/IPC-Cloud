@@ -1,10 +1,6 @@
 # CLAUDE.md（simulator/）
 
-本文件为 Claude Code 在 `simulator/` 目录（IPC 终端多协议模拟器）下工作时提供指导。根目录总览见 `../CLAUDE.md`。
-
-## 应答语言
-
-必须使用中文应答用户（代码、标识符、命令行等技术内容保持原样）。
+本文件为 Claude Code 在 `simulator/` 目录（IPC 终端多协议模拟器）下工作时提供指导。根级规范（应答语言、与 adapter 的双向契约原则）见 [`../AGENTS.md`](../AGENTS.md)。
 
 ## 用途
 
@@ -47,5 +43,4 @@ cd simulator && go run . -mode=all \
 
 ## 跨领域注意事项
 
-- 代码注释为中文；保持一致。
-- 修改某协议的模拟行为时，注意与 `platform/server/internal/adapter/<同名协议>/` 的假设保持同步（如 IDP 设备 ID 位数、GB28181 编号规则、流命名等），两侧一旦不一致会导致联调"看起来正常但生产环境失败"。
+- 修改某协议的模拟行为时，注意与 `platform/server/internal/adapter/<同名协议>/` 的假设保持同步（如 IDP 设备 ID 位数、GB28181 编码规则、流命名等），两侧一旦不一致会导致联调"看起来正常但生产环境失败"。

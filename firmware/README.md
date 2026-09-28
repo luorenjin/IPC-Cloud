@@ -1,6 +1,7 @@
-# IpcCloud 固件 —— 通用层接口（HAL v1 / core / profiles / mock）
+# IpcCloud 固件 —— 通用层接口（HAL v1 / core / profiles / mock / console）
 
-> 状态：**HAL v1 + L2 core 已实现并通过 x86 测试**。`platform/gk7205*` 等真实平台目录待芯片/传感器/ISP/Flash 选型后加入。
+> 状态：**HAL v1 + L2 core 已实现并通过 x86 测试**；`modules/console` + `common/http_server` + `app/` 已落地。`platform/gk7205v200/` 为**倾向性骨架**（交叉编译见 `docker/`），**芯片/传感器/ISP/Flash 选型未冻结**——勿向 `core/`/`modules/` 加芯片假设。
+> 本机控制台前端源：`web/`（改后 `scripts/gen_assets.py` 重生成 `console_assets.c`，见 [`web/AGENTS.md`](web/AGENTS.md)）。
 > 设计依据：[IPC固件平台化架构_HAL适配方案](../Docs/PRD/IPC固件平台化架构_HAL适配方案.md)、[设备接入规范 v1.0](../Docs/PRD/IpcCloud设备接入规范_v1.0.md)。
 
 ## 目录
@@ -11,11 +12,16 @@ firmware/
 ├── core/                     L2 核心服务（已实现）
 │   ├── include/core/         os / json / log / profile / event_bus / config / frame_bus / module
 │   └── src/                  对应 .c 实现（Windows + POSIX 同源）
-├── modules/                  L3 功能模块（接口约定见 core/module.h，实现待下一步）
+├── modules/                  L3：console + common/http_server 已实现；idp/rtsp/… 待后续
+├── web/                      本机控制台前端源（见 web/AGENTS.md）
+├── app/                      主程序入口 main.c
 ├── profiles/                 L4 能力清单：schema/profile.v1.schema.json、SP-R1-02.json、mock-x86.json
-├── platform/mock/            L0 x86 模拟平台（合成 H.264/H.265 帧、OTA 文件槽、软安全存储）
+├── platform/mock/            L0 x86 模拟平台；platform/gk7205v200/ 倾向性骨架（选型未冻结）
+├── scripts/gen_assets.py     web/ → console_assets.c（手动、生成物入库）
 ├── tests/hal_conformance/    HAL 一致性测试（任何平台必须全过）
-├── tests/core_test/          core 层单元测试（json/os/log/profile/event/config/framebus/loader）
+├── tests/core_test/          core 层单元测试
+├── tests/console_test/       控制台/API 单测（仅 IPC_PLATFORM=mock）
+├── docker/                   GOKE SDK 交叉编译与 rootfs 打包（见 docker/README.md）
 ├── docs/模块划分与依赖规则.md
 └── CMakeLists.txt            -DIPC_PLATFORM=mock|gk7205v200|…  -DIPC_PROFILE=<name>
 ```
@@ -35,10 +41,16 @@ cmake -S firmware -B firmware/build && cmake --build firmware/build
 (cd firmware && ./build/tests/hal_conformance/hal_conformance profiles/mock-x86.json)
 ```
 
-期望输出：`RESULT: platform=mock pass=252 fail=0` 与 `RESULT: core pass=121 fail=0`（用例数随测试演进变化，`fail` 必须为 0）。
+期望输出：`RESULT: … fail=0`（用例数随测试演进变化，`fail` 必须为 0）。
 
 ```powershell
 ctest --test-dir firmware/build-msvc -C Debug   # 一次跑全部
+```
+
+改控制台前端后：
+
+```bash
+python firmware/scripts/gen_assets.py firmware/web firmware/modules/console/console_assets.c
 ```
 
 ## HAL v1 一览
@@ -86,4 +98,4 @@ ctest --test-dir firmware/build-msvc -C Debug   # 一次跑全部
 
 ## 下一步
 
-见 `docs/模块划分与依赖规则.md` §8：core 实现 → modules/common → rtsp → idp → recorder → gb28181 → onvif → console/ota/ivs/snapshot；硬件定后再加 `platform/<soc>/`。
+见 `docs/模块划分与依赖规则.md` §8 与本地 Web 设计 spec：A 线 Task 9–11（flv_mux / WS-FLV / OTA）仍待 video HAL；B 线录像子系统待实现。硬件选型冻结前勿扩芯片假设。交叉编译见 [`docker/README.md`](docker/README.md)。
