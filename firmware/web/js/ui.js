@@ -93,7 +93,8 @@
       a.onclick = () => {
         a.disabled = true;
         Promise.resolve().then(onSave)
-          .then(() => toast('保存成功'))
+          /* onSave 可 resolve 一个字符串作为提示（以设备回复为准），否则提示保存成功 */
+          .then((msg) => toast(typeof msg === 'string' && msg ? msg : '保存成功'))
           .catch((e) => toast((e && e.message) || '保存失败'))
           .finally(() => { a.disabled = false; });
       };

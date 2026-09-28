@@ -87,7 +87,11 @@
             <button type="button" class="btn ghost" id="tm-pc">与计算机时间同步</button></div>`));
         } else {
           rows.push(h(`<div class="frow"><div class="lab">服务器地址</div>
-            <input type="text" id="tm-ntp" value="${esc(t.ntp_server || 'ntp.aliyun.com')}" maxlength="128"></div>`));
+            <input type="text" id="tm-ntp" value="${esc(t.ntp_server || 'ntp.aliyun.com')}" maxlength="127"></div>`));
+          if (t.ntp_enable) {
+            rows.push(h(`<div class="frow"><div class="lab">同步状态</div>
+              <span class="${t.ntp_synced ? '' : 'muted'}">${t.ntp_synced ? '已与服务器同步' : '同步中（尚未与服务器完成校时，请检查服务器地址与网络）'}</span></div>`));
+          }
         }
         b.append(sec('', rows));
         const clock = $('#sys-clock', b);
@@ -97,13 +101,15 @@
         IPC._clockT = setInterval(() => { if (!clock.isConnected) clearInterval(IPC._clockT); else tick(); }, 1000);
         $('#tm-mode', b).onchange = (e) => { manual = e.target.value === 'manual'; draw(); };
 
+        /* 提示以设备回复为准：开启 NTP 时设备只说"正在同步"，不能替它说"已生效" */
         const put = (body) => IPC.api('PUT', '/api/v1/system/time', body)
-          .then(() => { toast('时间设置已生效'); IPC.render(); });
+          .then((r) => { setTimeout(() => IPC.render(), 1500); return (r && r.msg) || '时间设置已保存'; });
         if (manual) {
           const set = $('#tm-set', b);
           const d = new Date(Date.now() + base);
           set.value = `${fmtDate(d)}T${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
-          $('#tm-pc', b).onclick = () => put({ ntp_enable: false, utc: Math.floor(Date.now() / 1000) }).catch((e) => toast(e.message));
+          $('#tm-pc', b).onclick = () => put({ ntp_enable: false, utc: Math.floor(Date.now() / 1000) })
+            .then((m) => toast(m)).catch((e) => toast(e.message));
           b.append(IPC.ui.saveRow(() => {
             const ms = new Date(set.value).getTime();
             if (!set.value || isNaN(ms)) return Promise.reject(new Error('请选择时间'));
@@ -112,7 +118,7 @@
         } else {
           b.append(IPC.ui.saveRow(() => {
             const v = $('#tm-ntp', b).value.trim();
-            if (!/^[A-Za-z0-9.-]{1,128}$/.test(v)) return Promise.reject(new Error('服务器地址只能包含字母、数字、点和横线'));
+            if (!/^[A-Za-z0-9.-]{1,127}$/.test(v)) return Promise.reject(new Error('服务器地址只能包含字母、数字、点和横线，最多 127 个字符'));
             return put({ ntp_enable: true, ntp_server: v });
           }));
         }
@@ -197,8 +203,8 @@
     b.append(sec('', [
       h(`<div class="frow"><div class="lab">用户名</div><input type="text" value="${esc(S.user)}" disabled></div>`),
       h('<div class="frow"><div class="lab">旧密码</div><input type="password" id="pw-old" autocomplete="current-password"></div>'),
-      h('<div class="frow"><div class="lab">新密码</div><input type="password" id="pw-new" maxlength="63" placeholder="8-63 个字符" autocomplete="new-password"></div>'),
-      h('<div class="frow"><div class="lab">确认密码</div><input type="password" id="pw-conf" maxlength="63" autocomplete="new-password"></div>')
+      h('<div class="frow"><div class="lab">新密码</div><input type="password" id="pw-new" placeholder="8-63 字节（汉字占 3 字节）" autocomplete="new-password"></div>'),
+      h('<div class="frow"><div class="lab">确认密码</div><input type="password" id="pw-conf" autocomplete="new-password"></div>')
     ]));
     const btn = h('<div class="save-row"><button class="btn primary" type="button" id="pw-save">修改密码</button></div>');
     b.append(btn);
@@ -206,7 +212,8 @@
       const oldP = $('#pw-old', b).value;
       const nP = $('#pw-new', b).value;
       if (!oldP) return toast('请输入旧密码');
-      if (nP.length < 8 || nP.length > 63) return toast('新密码长度为 8-63 位');
+      const bad = IPC.pwdError(nP);
+      if (bad) return toast(bad);
       if (nP !== $('#pw-conf', b).value) return toast('两次密码不一致');
       if (nP === oldP) return toast('新密码不能与旧密码相同');
       const el = $('#pw-save', b);

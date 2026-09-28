@@ -365,7 +365,8 @@
       const fd = new FormData(form);
       const p1 = String(fd.get('p1') || '');
       if (p1 !== fd.get('p2')) return toast('两次密码不一致');
-      if (p1.length < 8 || p1.length > 63) return toast('密码长度为 8-63 位');
+      const bad = IPC.pwdError(p1);
+      if (bad) return toast(bad);
       busy(form, true);
       IPC.auth.activate(p1)
         .then(() => IPC.auth.login('admin', p1))

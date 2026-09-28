@@ -206,6 +206,18 @@ window.IPC = {
       .catch(() => this.showAuth('login'));
   },
 
+  /**
+   * 口令规则与设备一致：按 UTF-8 **字节**计 8–63（设备端 CONSOLE_PWD_MIN/MAX）。
+   * 不能用 str.length（UTF-16 单元）：22 个汉字 length=22 却有 66 字节。
+   * 合法返回 null，否则返回中文原因。
+   */
+  pwdError(p) {
+    const n = new TextEncoder().encode(String(p || '')).length;
+    if (n < 8) return '密码至少 8 个字节（约 8 个英文字符或 3 个汉字）';
+    if (n > 63) return '密码最多 63 个字节（约 63 个英文字符或 21 个汉字）';
+    return null;
+  },
+
   /** 写配置：设备逐键校验，有被拒的键即视为失败并列出键名 */
   saveCfg(obj) {
     return this.api('PUT', '/api/v1/config', obj).then((r) => {
