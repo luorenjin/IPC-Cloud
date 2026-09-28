@@ -1118,6 +1118,14 @@ static hal_err_t ep_net_apply(const http_req_t *req, char *out, size_t out_cap,
         return HAL_EINVAL;
     }
     if (req->body && req->body_len > 0) {
+        console_net_cfg_t cur;
+        console_net_read(&cur);
+        /* 与已保存配置相同：不重启网络（否则无谓断网，DHCP 下还可能换地址） */
+        if (cur.dhcp == c.dhcp &&
+            (c.dhcp || (strcmp(cur.ip, c.ip) == 0 && strcmp(cur.mask, c.mask) == 0 &&
+                        strcmp(cur.gw, c.gw) == 0 && strcmp(cur.dns, c.dns) == 0)))
+            return fmt_safe(out, out_cap, "{\"code\":0,\"msg\":\"网络设置未变化\",\"new_ip\":\"%s\",\"unchanged\":true}",
+                            c.dhcp ? "" : c.ip);
         if (cfg_set_bool("net.dhcp", c.dhcp) != HAL_OK) return HAL_EIO;
         if (!c.dhcp &&
             (cfg_set_str("net.ip", c.ip) != HAL_OK || cfg_set_str("net.mask", c.mask) != HAL_OK ||

@@ -62,7 +62,9 @@
               const m = n(form.mask);
               if (form.gw && (n(form.gw) & m) >>> 0 !== (n(form.ip) & m) >>> 0)
                 return Promise.reject(new Error('网关与 IP 不在同一网段'));
-              if (!confirm('设备地址将改为 ' + form.ip + '，浏览器会跳转到新地址，继续？')) return Promise.reject(new Error('已取消'));
+              const same = cfg.dhcp === false && cfg.ip === form.ip && (cfg.mask || '') === form.mask &&
+                (cfg.gw || '') === form.gw && (cfg.dns || '') === form.dns;
+              if (!same && !confirm('设备地址将改为 ' + form.ip + '，浏览器会跳转到新地址，继续？')) return Promise.reject(new Error('已取消'));
             } else if (cfg.dhcp === false && !confirm('切换为自动获取后设备地址会改变，当前页面将无法访问，继续？')) {
               return Promise.reject(new Error('已取消'));
             }
@@ -71,7 +73,8 @@
               : { dhcp: false, ip: form.ip, mask: form.mask, gw: form.gw, dns: form.dns };
             return IPC.api('POST', '/api/v1/system/net/apply', body)
               .then((r) => {
-                cfg.dhcp = form.dhcp;
+                Object.assign(cfg, form);
+                if (r.unchanged) return;
                 if (r.new_ip && r.new_ip !== location.hostname) jumpTo(r.new_ip);
                 else if (!r.new_ip) toast('已切换为自动获取，请在路由器中查看设备新地址');
               });

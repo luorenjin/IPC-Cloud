@@ -1519,6 +1519,22 @@ static void test_api_net_apply(void)
         req_make(&req, "POST", "/api/v1/system/net/apply",
                  "{\"dhcp\":false,\"ip\":\"+1.2.3.4\",\"mask\":\"255.0.0.0\",\"gw\":\"\",\"dns\":\"\"}", cookie);
         CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_EINVAL, "带 + 号的 IP 被拒（评审 minor 4）");
+
+        /* 小问题 4：配置未变化时不重启网络（DHCP→DHCP、静态→同一静态） */
+        cfg_set_bool("net.dhcp", true);
+        req_make(&req, "POST", "/api/v1/system/net/apply", "{\"dhcp\":true}", cookie);
+        deferred = true;
+        CHECK(console_api_test_dispatch(&req, body, sizeof(body), &deferred) == HAL_OK, "DHCP→DHCP 请求成功");
+        CHECK(deferred == false, "配置未变不登记网络重启");
+        CHECK(strstr(body, "未变化") != NULL, "提示未变化，实际：%s", body);
+        req_make(&req, "POST", "/api/v1/system/net/apply",
+                 "{\"dhcp\":false,\"ip\":\"192.168.1.60\",\"mask\":\"255.255.255.0\",\"gw\":\"192.168.1.1\",\"dns\":\"223.5.5.5\"}", cookie);
+        CHECK(console_api_test_dispatch(&req, body, sizeof(body), &deferred) == HAL_OK && deferred, "切到静态会应用");
+        req_make(&req, "POST", "/api/v1/system/net/apply",
+                 "{\"dhcp\":false,\"ip\":\"192.168.1.60\",\"mask\":\"255.255.255.0\",\"gw\":\"192.168.1.1\",\"dns\":\"223.5.5.5\"}", cookie);
+        deferred = true;
+        CHECK(console_api_test_dispatch(&req, body, sizeof(body), &deferred) == HAL_OK && !deferred,
+              "同一静态配置再次保存不重启网络");
     }
 
     cfg_deinit();

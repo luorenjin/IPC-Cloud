@@ -55,7 +55,11 @@ stop_dhcp() {
 }
 
 start_static() {
-    ifconfig "$IFACE" "$IP" netmask "$MASK" up
+    if ! ifconfig "$IFACE" "$IP" netmask "$MASK" up; then
+        echo "[S81dhcp] static $IP failed, falling back to DHCP"
+        start_dhcp
+        return
+    fi
     # bounded: an unbounded "until route fails" loop hangs rcS if route never fails
     n=0; while [ $n -lt 5 ] && route del default dev "$IFACE" 2>/dev/null; do n=$((n+1)); done
     [ -n "$GW" ] && route add default gw "$GW" dev "$IFACE"
@@ -72,13 +76,30 @@ start_dhcp() {
     "$UDHCPC" -b -i "$IFACE" -s "$SCRIPT" -p "$PIDFILE"
 }
 
+# Parse net.conf line by line instead of sourcing it: a corrupted file must not
+# be able to run code or abort this script (which would leave eth0 down).
+load_conf() {
+    [ -f "$NET_CONF" ] || return
+    while IFS='=' read -r k v; do
+        case "$k" in
+            MODE) MODE=$v ;;
+            IP) IP=$v ;;
+            MASK) MASK=$v ;;
+            GW) GW=$v ;;
+            DNS) DNS=$v ;;
+        esac
+    done < "$NET_CONF"
+}
+
 MODE=dhcp
 IP= MASK= GW= DNS=
-[ -f "$NET_CONF" ] && . "$NET_CONF"
+load_conf
 if [ "$MODE" = "static" ] && ! { valid_ip "$IP" && valid_ip "$MASK"; }; then
     echo "[S81dhcp] invalid static config, falling back to DHCP"
     MODE=dhcp
 fi
+[ -n "$GW" ] && ! valid_ip "$GW" && GW=
+[ -n "$DNS" ] && ! valid_ip "$DNS" && DNS=
 
 case "$1" in
     restart)
