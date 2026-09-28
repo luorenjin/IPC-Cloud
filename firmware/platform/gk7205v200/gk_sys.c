@@ -23,6 +23,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <sys/reboot.h>
+#include <sys/stat.h>
 #endif
 
 /* 平台标识常量，用于 platform_id/soc_name/chip_id 的回退值。曾经由
@@ -291,6 +292,11 @@ static bool host_chars_ok(const char *s)
     return true;
 }
 
+/* ntpd 每次校时成功后执行 -S 指定的程序；用它落一个标记文件，
+   控制台据此如实显示"已同步/同步中"，而不是一启动就宣称生效 */
+#define GK_NTP_MARK "/tmp/ntp_synced"
+#define GK_NTP_HOOK "/tmp/ntp_hook.sh"
+
 static hal_err_t sys_apply_ntp(const char *server)
 {
 #ifdef _WIN32
@@ -298,14 +304,31 @@ static hal_err_t sys_apply_ntp(const char *server)
     return HAL_ENOTSUP;
 #else
     char cmd[256];
-    if (server && strlen(server) > 128) return HAL_EINVAL;
+    FILE *fp;
+
+    if (server && strlen(server) > 127) return HAL_EINVAL;
     if (!host_chars_ok(server)) return HAL_EINVAL;
     if (system("killall ntpd >/dev/null 2>&1") < 0) return HAL_EIO;
+    remove(GK_NTP_MARK);
     if (!server || !server[0]) return HAL_OK;
-    /* busybox ntpd：-p 指定服务器，默认后台常驻持续校时 */
-    snprintf(cmd, sizeof(cmd), "ntpd -p %s >/dev/null 2>&1", server);
+    fp = fopen(GK_NTP_HOOK, "w");
+    if (!fp) return HAL_EIO;
+    fprintf(fp, "#!/bin/sh\n[ \"$1\" = step ] || [ \"$1\" = stratum ] || [ \"$1\" = periodic ] && touch " GK_NTP_MARK "\n");
+    fclose(fp);
+    chmod(GK_NTP_HOOK, 0700);
+    /* busybox ntpd：-p 指定服务器，-S 校时后回调，默认后台常驻持续校时 */
+    snprintf(cmd, sizeof(cmd), "ntpd -p %s -S " GK_NTP_HOOK " >/dev/null 2>&1", server);
     if (system(cmd) != 0) return HAL_EIO;
     return HAL_OK;
+#endif
+}
+
+static bool sys_ntp_synced(void)
+{
+#ifdef _WIN32
+    return false;
+#else
+    return access(GK_NTP_MARK, F_OK) == 0;
 #endif
 }
 
@@ -336,5 +359,6 @@ const hal_sys_ops_t gk_sys_ops = {
     sys_ota_abort,
     sys_apply_net,
     sys_apply_ntp,
-    sys_get_wallclock
+    sys_get_wallclock,
+    sys_ntp_synced
 };

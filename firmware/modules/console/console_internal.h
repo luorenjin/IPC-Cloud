@@ -91,6 +91,9 @@ hal_err_t console_hmac_sha256(const uint8_t *key, size_t key_len,
  * 留在"看似已激活"的错误状态，见 `ep_activate` 实现注释。
  */
 /* ---- 配置下发（console_apply.c）---- */
+/** NTP 服务器名最大字节数（与 core/config.c 的 time.ntp.server 规则一致） */
+#define CONSOLE_NTP_HOST_MAX 127
+
 typedef struct {
     bool dhcp;
     char ip[16], mask[16], gw[16], dns[16];

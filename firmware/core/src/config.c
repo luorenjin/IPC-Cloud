@@ -165,6 +165,12 @@ static hal_err_t validate(const cfg_rule_t *r, cfg_type_t type, int64_t i, const
             *why = "length"; return HAL_EINVAL;
         }
     }
+    if (type == CFG_T_STR && r->charset && s) {
+        const char *p;
+        for (p = s; *p; p++) {
+            if (!strchr(r->charset, *p)) { *why = "invalid"; return HAL_EINVAL; }
+        }
+    }
     if ((type == CFG_T_STR || type == CFG_T_JSON) && r->enum_csv) {
         char list[CFG_STR_MAX * 4];
         size_t n = strlen(r->enum_csv);
@@ -298,9 +304,12 @@ static void seed_channel(const profile_channel_t *c)
     }
 }
 
+#define CFG_CHARSET_HOST "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-"
+#define CFG_CHARSET_TZ   "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/_+-:"
+
 static void register_common_rules(void)
 {
-    static const struct { const char *k; cfg_type_t t; int64_t lo, hi; const char *en; bool rb; bool wo; } common[] = {
+    static const struct { const char *k; cfg_type_t t; int64_t lo, hi; const char *en; bool rb; bool wo; const char *cs; } common[] = {
         { "record.enabled",          CFG_T_BOOL, 0, 1, NULL, false },
         { "record.mode",             CFG_T_STR,  0, 0, "continuous,event,schedule", false },
         { "record.channel",          CFG_T_INT,  0, 2, NULL, false },
@@ -311,9 +320,10 @@ static void register_common_rules(void)
         { "image.sharpness",         CFG_T_INT,  0, 100, NULL, false },
         { "image.flip",              CFG_T_INT,  0, 1, NULL, false },
         { "image.mirror",            CFG_T_INT,  0, 1, NULL, false },
-        { "time.timezone",           CFG_T_STR,  0, 0, NULL, false },
+        /* 时区与 NTP 服务器会拼进平台命令/配置：限定字符集，长度与 console 缓冲一致 */
+        { "time.timezone",           CFG_T_STR,  1, 63, NULL, false, false, CFG_CHARSET_TZ },
         { "time.ntp.enable",         CFG_T_BOOL, 0, 1, NULL, false },
-        { "time.ntp.server",         CFG_T_STR,  0, 0, NULL, false },
+        { "time.ntp.server",         CFG_T_STR,  1, 127, NULL, false, false, CFG_CHARSET_HOST },
         { "net.dhcp",                CFG_T_BOOL, 0, 1, NULL, true },
         { "net.ip",                  CFG_T_STR,  0, 0, NULL, true },
         /* 静态地址四件套的其余三项：与 dhcp 一样改动后需重启网络栈才生效。
@@ -364,6 +374,7 @@ static void register_common_rules(void)
         r.min = common[i].lo; r.max = common[i].hi;
         r.enum_csv = common[i].en; r.reboot_required = common[i].rb;
         r.write_only = common[i].wo;
+        r.charset = common[i].cs;
         cfg_register_rules(&r, 1);
     }
 }

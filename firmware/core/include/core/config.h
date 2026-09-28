@@ -78,6 +78,12 @@ typedef struct {
      * 接入规范 §5.7 的 cfg 最小集里 localUser.password、wifi.psk 属于这一类。
      */
     bool        write_only;
+    /**
+     * STR 允许的字符集（每个字节都必须出现在此串中）；NULL 不限。
+     * 用于会被拼进平台命令/配置文件的键（如 NTP 服务器名）。
+     * 必须指向静态存储：登记时不复制。
+     */
+    const char *charset;
 } cfg_rule_t;
 
 hal_err_t cfg_register_rules(const cfg_rule_t *rules, size_t n);

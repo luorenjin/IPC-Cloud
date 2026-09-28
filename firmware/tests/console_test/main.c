@@ -1526,6 +1526,45 @@ static void test_api_time(void)
     req_make(&req, "PUT", "/api/v1/system/time", "{\"ntp_enable\":false,\"utc\":-5}", cookie);
     CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_EINVAL, "负时间被拒");
 
+    /* 小问题 1：服务器名上限与缓冲一致，128 字节的名字不得被静默截断 */
+    {
+        char name[160], put[256];
+        memset(name, 'a', 127);
+        name[127] = '\0';
+        snprintf(put, sizeof(put), "{\"ntp_enable\":true,\"ntp_server\":\"%s\"}", name);
+        req_make(&req, "PUT", "/api/v1/system/time", put, cookie);
+        CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "127 字节服务器名接受");
+        mock_sys_last_ntp(last, sizeof(last));
+        CHECK(strcmp(last, name) == 0, "127 字节服务器名完整下发，实际长度 %u", (unsigned)strlen(last));
+        memset(name, 'a', 128);
+        name[128] = '\0';
+        snprintf(put, sizeof(put), "{\"ntp_enable\":true,\"ntp_server\":\"%s\"}", name);
+        req_make(&req, "PUT", "/api/v1/system/time", put, cookie);
+        CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_EINVAL, "128 字节服务器名被拒（不截断）");
+    }
+
+    /* 小问题 2：经 PUT /config 写入的时间键同样受校验，GET 响应必须是合法 JSON */
+    req_make(&req, "PUT", "/api/v1/config", "{\"time.ntp.server\":\"a\\\"b;reboot\"}", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "PUT config 请求");
+    CHECK(strstr(body, "\"rejected_total\":1") != NULL, "含非法字符的 NTP 服务器被配置规则拒绝，实际：%s", body);
+    req_make(&req, "PUT", "/api/v1/config", "{\"time.timezone\":\"CST\\\"-8\"}", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "PUT timezone 请求");
+    req_make(&req, "GET", "/api/v1/system/time", NULL, cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "读时间");
+    {
+        json_t *jt = json_parse(body, strlen(body), NULL, 0);
+        CHECK(jt != NULL, "time 响应是合法 JSON（带引号的时区被正确转义），实际：%s", body);
+        json_free(jt);
+    }
+
+    /* 小问题 8：NTP 未完成同步前不得宣称已生效 */
+    req_make(&req, "PUT", "/api/v1/system/time", "{\"ntp_enable\":true,\"ntp_server\":\"ntp.aliyun.com\"}", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "开启 NTP");
+    CHECK(strstr(body, "已生效") == NULL, "开启 NTP 不应直接宣称已生效，实际：%s", body);
+    req_make(&req, "GET", "/api/v1/system/time", NULL, cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "读时间");
+    CHECK(strstr(body, "\"ntp_synced\":") != NULL, "GET 返回 NTP 同步状态，实际：%s", body);
+
     cfg_deinit();
     remove("console_test_cfg_time.json");
 }

@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"math"
+	"strings"
 )
 
 // 模拟设备的本地配置。
@@ -43,7 +44,15 @@ type cfgRule struct {
 	t        cfgType
 	min, max int
 	enum     []string
+	// charset 非空时，字符串的每个字节都必须出现在其中（与固件 cfg_rule_t.charset 一致）
+	charset string
 }
+
+// 与固件 core/config.c 的 CFG_CHARSET_HOST / CFG_CHARSET_TZ 逐字一致
+const (
+	cfgCharsetHost = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-"
+	cfgCharsetTZ   = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/_+-:"
+)
 
 // cfgRules 与固件 register_common_rules() + video 规则一致。
 var cfgRules = map[string]cfgRule{
@@ -90,8 +99,8 @@ var cfgRules = map[string]cfgRule{
 
 	// 时间同步
 	"time.ntp.enable": {t: cfgBool},
-	"time.ntp.server": {t: cfgStr},
-	"time.timezone":   {t: cfgStr},
+	"time.ntp.server": {t: cfgStr, min: 1, max: 127, charset: cfgCharsetHost},
+	"time.timezone":   {t: cfgStr, min: 1, max: 63, charset: cfgCharsetTZ},
 
 	// 网络（固件规则表四项均为 reboot_required=true)
 	"net.dhcp": {t: cfgBool},
@@ -323,6 +332,13 @@ func coerceCfg(rule cfgRule, v any) (any, bool) {
 		// 与固件 core/config.c 一致：min>0 时 min/max 是字节长度上下限
 		if rule.min > 0 && (len(s) < rule.min || (rule.max > 0 && len(s) > rule.max)) {
 			return nil, false
+		}
+		if rule.charset != "" {
+			for i := 0; i < len(s); i++ {
+				if !strings.ContainsRune(rule.charset, rune(s[i])) {
+					return nil, false
+				}
+			}
 		}
 		return s, true
 	case cfgInt:

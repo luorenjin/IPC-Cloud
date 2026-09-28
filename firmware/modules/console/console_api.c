@@ -994,17 +994,22 @@ static bool ntp_host_ok(const char *s)
         if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
               c == '.' || c == '-')) return false;
     }
-    return n > 0 && n <= 128;
+    return n > 0 && n <= CONSOLE_NTP_HOST_MAX;
 }
 
 /**
- * GET /api/v1/system/time → {"code":0,"utc":秒,"timezone":"CST-8","ntp_enable":bool,"ntp_server":".."}
+ * GET /api/v1/system/time →
+ * {"code":0,"utc":秒,"timezone":"CST-8","ntp_enable":bool,"ntp_server":"..","ntp_synced":bool}
+ * ntp_synced：平台能否确认 NTP 已完成同步（不支持查询时恒 false，前端据此显示"同步中"）。
  */
 static hal_err_t ep_time_get(char *out, size_t out_cap)
 {
     int64_t utc = 0;
-    bool en = false;
-    char server[129] = "", tz[64] = "";
+    bool en = false, synced = false;
+    char server[CONSOLE_NTP_HOST_MAX + 1] = "", tz[64] = "";
+    json_t *root;
+    char *txt;
+    hal_err_t rc;
 
     if (!hal_has(HAL_MOD_SYS) || !hal()->sys->get_wallclock) return HAL_ENOTSUP;
     if (hal()->sys->get_wallclock(&utc) != HAL_OK) return HAL_EIO;
@@ -1012,9 +1017,24 @@ static hal_err_t ep_time_get(char *out, size_t out_cap)
     cfg_get_str("time.ntp.server", server, sizeof(server));
     if (cfg_get_str("time.timezone", tz, sizeof(tz)) != HAL_OK || !tz[0])
         snprintf(tz, sizeof(tz), "CST-8");
-    return fmt_safe(out, out_cap,
-                    "{\"code\":0,\"utc\":%lld,\"timezone\":\"%s\",\"ntp_enable\":%s,\"ntp_server\":\"%s\"}",
-                    (long long)utc, tz, en ? "true" : "false", server);
+    if (en && hal()->sys->ntp_synced) synced = hal()->sys->ntp_synced();
+
+    /* 用 json_* 构造：配置里的字符串不能直接拼进 JSON */
+    root = json_new_object();
+    if (!root) return HAL_ENOMEM;
+    json_object_set(root, "code", json_new_int(0));
+    json_object_set(root, "utc", json_new_int(utc));
+    json_object_set(root, "timezone", json_new_string(tz));
+    json_object_set(root, "ntp_enable", json_new_bool(en));
+    json_object_set(root, "ntp_server", json_new_string(server));
+    json_object_set(root, "ntp_synced", json_new_bool(synced));
+    txt = json_dump(root, false);
+    json_free(root);
+    if (!txt) return HAL_ENOMEM;
+    rc = (strlen(txt) < out_cap) ? HAL_OK : HAL_ENOMEM;
+    if (rc == HAL_OK) strcpy(out, txt);
+    free(txt);
+    return rc;
 }
 
 /**
@@ -1049,7 +1069,10 @@ static hal_err_t ep_time_put(const http_req_t *req, char *out, size_t out_cap)
     json_free(j);
     if (rc != HAL_OK) return rc;
     if (console_apply_time() != HAL_OK) return HAL_EIO;
-    return fmt_safe(out, out_cap, "{\"code\":0,\"msg\":\"时间设置已生效\"}");
+    /* 开启 NTP 只是启动了同步进程，是否成功要等 ntpd 实际校时；如实说明 */
+    return fmt_safe(out, out_cap, en
+        ? "{\"code\":0,\"msg\":\"已开启 NTP 自动校时，正在与服务器同步\"}"
+        : "{\"code\":0,\"msg\":\"时间设置已生效\"}");
 }
 
 static void do_apply_net(void *arg)

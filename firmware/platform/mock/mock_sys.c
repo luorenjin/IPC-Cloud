@@ -263,6 +263,8 @@ static hal_err_t s_get_wallclock(int64_t *utc)
     return HAL_OK;
 }
 
+static bool s_ntp_synced(void) { return false; }   /* mock 没有真实 NTP */
+
 void mock_sys_last_net(char *buf, size_t cap) { snprintf(buf, cap, "%s", g_last_net); }
 void mock_sys_last_ntp(char *buf, size_t cap) { snprintf(buf, cap, "%s", g_last_ntp); }
 
@@ -270,7 +272,7 @@ const hal_sys_ops_t mock_sys_ops = {
     s_get_info, s_get_stats, s_boot_reason, s_monotonic_us, s_set_wallclock,
     s_reboot, s_factory_reset, s_wdt_enable, s_wdt_feed, s_wdt_disable,
     s_ota_get_state, s_ota_begin, s_ota_write, s_ota_end, s_ota_switch, s_ota_confirm, s_ota_abort,
-    s_apply_net, s_apply_ntp, s_get_wallclock
+    s_apply_net, s_apply_ntp, s_get_wallclock, s_ntp_synced
 };
 
 /* ---- 安全存储（文件模拟）---- */

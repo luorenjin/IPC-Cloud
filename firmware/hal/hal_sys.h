@@ -87,6 +87,8 @@ typedef struct hal_sys_ops {
     hal_err_t (*apply_ntp)(const char *server);
     /** 读系统墙钟（UTC 秒）。 */
     hal_err_t (*get_wallclock)(int64_t *utc_seconds);
+    /** 自最近一次 apply_ntp 起，NTP 是否已成功校时至少一次。 */
+    bool      (*ntp_synced)(void);
 } hal_sys_ops_t;
 
 #ifdef __cplusplus

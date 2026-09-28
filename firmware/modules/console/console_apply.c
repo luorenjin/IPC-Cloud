@@ -99,7 +99,7 @@ hal_err_t console_apply_net(void)
 hal_err_t console_apply_time(void)
 {
     bool en = false;
-    char server[128] = "";
+    char server[CONSOLE_NTP_HOST_MAX + 1] = "";
     hal_err_t rc;
 
     if (!hal_has(HAL_MOD_SYS) || !hal()->sys->apply_ntp) return HAL_ENOTSUP;
