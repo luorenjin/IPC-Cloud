@@ -199,6 +199,8 @@ hal_err_t console_caps_json(char *buf, size_t cap);
  */
 hal_err_t console_api_test_dispatch(const http_req_t *req, char *body, size_t body_cap,
                                     bool *deferred_out);
+/** 测试桩：执行最近一次 console_api_test_dispatch 登记的延后动作（模拟响应已送达） */
+hal_err_t console_api_test_run_deferred(void);
 /**
  * 测试桩：直接跑真正的 console_api_handler（而非绕过它的 api_dispatch），
  * 用于钉住"先 http_respond_json 入队、再 http_conn_defer_after_flush 登记"

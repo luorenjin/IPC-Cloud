@@ -204,7 +204,10 @@ static hal_err_t c_delete(const char *key)
     char path[256];
     if (!key) return HAL_EINVAL;
     if (!sec_path(key, path, sizeof(path))) return HAL_EINVAL;
-    return remove(path) == 0 ? HAL_OK : HAL_ENODEV;
+    if (remove(path) == 0) return HAL_OK;
+    /* 只有"本来就不存在"才算 ENODEV；权限/只读等失败必须如实报错，
+       否则恢复出厂会以为凭据已清除，重启后旧密码仍在 */
+    return errno == ENOENT ? HAL_ENODEV : HAL_EIO;
 }
 
 static hal_err_t c_exists(const char *key, bool *ex)

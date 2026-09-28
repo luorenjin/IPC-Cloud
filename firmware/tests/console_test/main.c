@@ -1624,6 +1624,9 @@ static void test_api_time(void)
     remove("console_test_cfg_time.json");
 }
 
+/* mock 平台测试钩子：临时让 secure_delete 为 NULL */
+void mock_crypto_disable_delete(bool off);
+
 /** 恢复出厂必须清除本地管理员凭据、使旧会话失效，并回到"未激活"。 */
 static void test_reset_wipes_credentials(void)
 {
@@ -1643,6 +1646,19 @@ static void test_reset_wipes_credentials(void)
     req_make(&req, "POST", "/api/v1/system/reset", NULL, cookie);
     CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "reset 成功");
 
+    /* 小问题 6：清除动作在响应发出后才执行——响应没送达（连接提前断开、延后动作
+       被放弃）时设备保持原状，不会停在"已未激活却未重启"的半重置状态 */
+    req_make(&req, "GET", "/api/v1/auth/state", NULL, NULL);
+    CHECK(console_auth_test_dispatch(&req, "192.168.50.12", body, sizeof(body), setck, sizeof(setck)) == HAL_OK,
+          "state 可读");
+    CHECK(strstr(body, "\"activated\":true") != NULL, "延后动作执行前仍已激活，实际：%s", body);
+    {
+        char nm[32] = "";
+        CHECK(cfg_get_str("localUser.name", nm, sizeof(nm)) == HAL_OK && strcmp(nm, "admin") == 0,
+              "延后动作执行前配置未被清空");
+    }
+    CHECK(console_api_test_run_deferred() == HAL_OK, "执行恢复出厂延后动作");
+
     req_make(&req, "GET", "/api/v1/auth/state", NULL, NULL);
     CHECK(console_auth_test_dispatch(&req, "192.168.50.12", body, sizeof(body), setck, sizeof(setck)) == HAL_OK,
           "state 可读");
@@ -1650,6 +1666,13 @@ static void test_reset_wipes_credentials(void)
 
     req_make(&req, "GET", "/api/v1/system/status", NULL, cookie);
     CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_EUNAUTH_, "旧会话失效");
+
+    /* 小问题 5：平台提供安全存储却没有 secure_delete 时，不得谎报清除成功 */
+    CHECK(console_auth_seed("Admin@12345", "admin", false) == HAL_OK, "重新激活");
+    mock_crypto_disable_delete(true);
+    CHECK(console_auth_wipe() != HAL_OK, "无 secure_delete 时清除凭据报告失败");
+    mock_crypto_disable_delete(false);
+    CHECK(console_auth_wipe() == HAL_OK, "有 secure_delete 时清除成功");
 
     cfg_deinit();
     remove("console_test_cfg_reset.json");

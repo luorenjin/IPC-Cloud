@@ -334,12 +334,17 @@ static hal_err_t c_write(const char *key, const uint8_t *data, size_t len)
     return HAL_OK;
 }
 
+static bool g_delete_off;   /* 测试钩子：模拟平台不支持 secure_delete */
+void mock_crypto_disable_delete(bool off) { g_delete_off = off; }
+
 static hal_err_t c_delete(const char *key)
 {
     char path[128];
     if (!key) return HAL_EINVAL;
+    if (g_delete_off) return HAL_ENOTSUP;
     sec_path(key, path, sizeof(path));
-    return remove(path) == 0 ? HAL_OK : HAL_ENODEV;
+    if (remove(path) == 0) return HAL_OK;
+    return errno == ENOENT ? HAL_ENODEV : HAL_EIO;
 }
 
 static hal_err_t c_exists(const char *key, bool *ex)

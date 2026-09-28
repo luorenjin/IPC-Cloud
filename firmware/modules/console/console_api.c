@@ -974,6 +974,12 @@ static void do_reset(void *arg)
        用到这条豁免的回调；新增"以终态收尾"的回调前，请先确认是否真的
        满足"随后立即重启/关机、不再服务任何请求"这个前提。 */
     bool keep_network = (bool)(intptr_t)arg;
+    /* 清配置与凭据放在这里（响应已送出、紧接着重启），而不是 handler 里：
+       响应没送达、延后动作被放弃时设备保持原状，不会出现"已回到未激活、
+       却没重启"的窗口——那个窗口里局域网内任何人都能抢先激活设备 */
+    cfg_reset(NULL, 0);
+    if (console_auth_wipe() != HAL_OK)
+        LOGE(MOD, "恢复出厂：凭据清除失败，设备重启后仍保留原密码");
     if (!hal_has(HAL_MOD_SYS)) return;
     if (hal()->sys->factory_reset) hal()->sys->factory_reset(keep_network);
     if (hal()->sys->reboot) hal()->sys->reboot();
@@ -1172,9 +1178,11 @@ static hal_err_t ep_system_reset(const http_req_t *req, char *out, size_t out_ca
         }
     }
 
-    cfg_reset(NULL, 0);
-    /* 出厂 = 回到"未激活"：凭据不清掉的话忘记密码就无法通过出厂找回 */
-    if (console_auth_wipe() != HAL_OK) return HAL_EIO;
+    /* 出厂 = 清配置 + 清凭据（回到"未激活"）+ 重启，全部在 do_reset 里、
+       响应发出之后执行。平台连凭据都删不了时直接拒绝，不假装会成功。 */
+    if (hal_has(HAL_MOD_CRYPTO) && hal()->crypto->secure_read && hal()->crypto->secure_write &&
+        !hal()->crypto->secure_delete)
+        return HAL_ENOTSUP;
 
     rc = fmt_safe(out, out_cap, "{\"code\":0,\"msg\":\"设备将恢复出厂设置并重启\"}");
     if (rc != HAL_OK) return rc;
@@ -1419,6 +1427,10 @@ hal_err_t console_api_init(void)
 }
 
 #ifdef IPC_TESTING
+/* 测试：记住最近一次登记的延后动作，供 console_api_test_run_deferred 执行 */
+static void (*s_test_last_dfn)(void *);
+static void *s_test_last_darg;
+
 hal_err_t console_api_test_dispatch(const http_req_t *req, char *body, size_t body_cap,
                                     bool *deferred_out)
 {
@@ -1426,8 +1438,18 @@ hal_err_t console_api_test_dispatch(const http_req_t *req, char *body, size_t bo
     void *darg = NULL;
     hal_err_t rc = api_dispatch(req, body, body_cap, &dfn, &darg);
     if (deferred_out) *deferred_out = (rc == HAL_OK) && (dfn != NULL);
-    (void)darg;
+    s_test_last_dfn = (rc == HAL_OK) ? dfn : NULL;
+    s_test_last_darg = darg;
     return rc;
+}
+
+hal_err_t console_api_test_run_deferred(void)
+{
+    void (*fn)(void *) = s_test_last_dfn;
+    if (!fn) return HAL_ESTATE;
+    s_test_last_dfn = NULL;
+    fn(s_test_last_darg);
+    return HAL_OK;
 }
 
 int console_api_test_full_handler(http_req_t *req)

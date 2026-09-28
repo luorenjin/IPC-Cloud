@@ -249,6 +249,7 @@ static void test_crypto_ops(void)
     CHECK(len == 1 && buf[0] == 0xAA, "覆盖写后长度应为 1，实际 %u", (unsigned)len);
 
     CHECK(gk_crypto_ops.secure_delete("test_key") == HAL_OK, "删除应成功");
+    CHECK(gk_crypto_ops.secure_delete("test_key") == HAL_ENODEV, "删除不存在的键应为 ENODEV（而非 EIO）");
     CHECK(gk_crypto_ops.secure_exists("test_key", &exists) == HAL_OK && !exists,
           "删除后 exists 应为 false");
     CHECK(gk_crypto_ops.secure_read("test_key", buf, sizeof(buf), &len) == HAL_ENODEV,

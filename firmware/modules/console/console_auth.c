@@ -963,19 +963,23 @@ hal_err_t console_auth_wipe(void)
     sessions_clear();
     nonces_clear();
     if (crypto_store_available()) {
-        if (hal()->crypto->secure_delete) {
-            hal_err_t d = hal()->crypto->secure_delete(HAL_SEC_KEY_LOCAL_USER);
-            if (d != HAL_OK && d != HAL_ENODEV) rc = HAL_EIO;
-        }
+        /* 平台有安全存储却删不掉（未实现 / 失败）：必须报错，不能谎报已清除 */
+        hal_err_t d = hal()->crypto->secure_delete
+                    ? hal()->crypto->secure_delete(HAL_SEC_KEY_LOCAL_USER) : HAL_ENOTSUP;
+        if (d != HAL_OK && d != HAL_ENODEV) rc = (d == HAL_ENOTSUP) ? HAL_ENOTSUP : HAL_EIO;
     } else if (remove(console_auth_cred_path()) != 0 && errno != ENOENT) {
         rc = HAL_EIO;
+    }
+    if (rc != HAL_OK) {
+        /* 存储里的凭据还在：内存态保持不变（会话已清，需重新登录） */
+        LOGE(MOD, "清除本地账号凭据失败：%s", hal_strerror(rc));
+        return rc;
     }
     secure_wipe(&s_cred, sizeof(s_cred));
     s_cred_loaded = true;            /* 已知"无凭据"，不必再读存储 */
     s_cred_load_rc = HAL_ENODEV;     /* activation_gate 据此判定可重新激活 */
-    if (rc == HAL_OK) LOGI(MOD, "本地账号凭据已清除，设备回到未激活状态");
-    else LOGE(MOD, "清除本地账号凭据失败");
-    return rc;
+    LOGI(MOD, "本地账号凭据已清除，设备回到未激活状态");
+    return HAL_OK;
 }
 
 hal_err_t console_auth_challenge_from(const char *user, char *salt_hex, size_t salt_cap,
