@@ -149,12 +149,14 @@ const (
 )
 
 // StartRecord 启动录制（typ 取 RecordTypeMP4/RecordTypeHLS）。
-// max_second 控制分段时长：分段完成才触发 on_record_mp4 落库回放索引；
+// maxSecond 控制分段时长：分段完成才触发 on_record_mp4 落库回放索引；
 // config.ini 的 fileSecond 键名无效（正确键为 mp4_max_second），故经 API 显式指定。
-func (z *ZLM) StartRecord(app, stream string, typ int) error {
+// 调用方按模板类型传入不同粒度——timer 模板传 60（常规连续录像分段），
+// event 模板传较短的预录精度（见 engine/record.go 的 record.eventPreSec 设置）。
+func (z *ZLM) StartRecord(app, stream string, typ, maxSecond int) error {
 	_, err := z.Call(context.Background(), "startRecord",
 		url.Values{"type": {fmt.Sprint(typ)}, "vhost": {"__defaultVhost__"},
-			"app": {app}, "stream": {stream}, "max_second": {"60"}})
+			"app": {app}, "stream": {stream}, "max_second": {fmt.Sprint(maxSecond)}})
 	return err
 }
 

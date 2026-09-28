@@ -362,11 +362,17 @@ func (e *Engine) platformEvent(ev bus.Event, kind string) {
 	}
 	// ALM-08 告警联动快照：优先用协议直传的图 URL（设备上报事件时已自行截图并上传，
 	// 如 IDP 的 event.snapshot_done），没有则由平台在落库后补抓，见 captureAlarmSnapshot。
+	alarmTs := models.NowMilli()
 	direct, _ := ev.Data["snapshotUrl"].(string)
 	id := createAlarmEvent(ev.ProjectID, ev.DeviceID, ev.ChannelID, kind, "warn", ev.Data, direct)
 	// 平台侧事件（设备离线/节点离线等）与无通道的告警没有画面可抓，不补图。
 	if id != "" && direct == "" && isDeviceSideKind(kind) && ev.ChannelID != "" {
 		go e.captureAlarmSnapshot(id, ev.ProjectID, ev.DeviceID, ev.ChannelID)
+	}
+	// REC-06 事件录像（真正前缓冲）：设备侧告警命中时，把该通道 event 模板布防窗口内
+	// 已录的 pending 分段转正为 event，并延长"直接落 event"窗口，见 record.go。
+	if isDeviceSideKind(kind) && ev.ChannelID != "" {
+		go e.triggerEventRecording(ev.ProjectID, ev.ChannelID, alarmTs)
 	}
 }
 

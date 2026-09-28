@@ -1,11 +1,11 @@
-﻿# IpcCloud 平台
+# IpcCloud 平台
 
 IpcCloud 摄像头接入与管理平台的云端实现（PRD v1.0）。
 
 ## 架构
 
 ```
-web (Nuxt3 + Element Plus + h265web.js)
+web (Nuxt3 + Tailwind/Reka UI + h265web.js)
   └─ REST / WS ──▶ server (Go + Gin + GORM)
                      ├─ adapters: idp(MQTT) | gb28181(SIP) | onvif | rtsp
                      ├─ engine: 起播编排 / ZLM Hook / 告警 / 录像计划
@@ -36,6 +36,9 @@ cd server && go run ./cmd/ipccloud
 cd web && npm install && npm run dev
 ```
 
+改后端后常规门禁：`cd server && go build ./... && go vet ./internal/... && go test ./...`。
+改文案后：`cd web && python scripts/i18n-check.py`。
+
 ## 功能覆盖（对照 PRD 附录 A）
 
 - ACC-01~08：登录锁定/向导/项目/分组/RBAC/成员/操作日志/个人中心
@@ -48,5 +51,4 @@ cd web && npm install && npm run dev
 - DASH-01：仪表盘
 - SET-01/02：全局设置、IDP 服务配置
 
-说明：GB28181 MVP 仅 UDP/5060；播放器 h265web.js 需部署到 web/public/vendor/h265web.js
-（缺库时播放器显示错误卡片，其余功能不受影响）。
+说明：GB28181 MVP 仅 UDP/5060；播放器资源在 `web/public/vendor/`（`h265web.js` 等）**已入库**；缺失时仅播放器报错，其余功能可用。协议/起停流改动请用 `../simulator` 闭环验证，勿只靠 `go test`。

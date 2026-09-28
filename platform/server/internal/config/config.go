@@ -12,6 +12,7 @@ type Config struct {
 	RedisAddr       string
 	JWTSecret       string
 	DataDir         string // 快照/录像等本地存储根目录
+	RecordDir       string // ZLM 录像目录在 server 容器内的挂载点（REC-07 GC 需按此路径删物理文件）
 	EncryptionKey   string // 凭据 AES-256-GCM 密钥（32 字节 hex 或原文）
 	AccessTTLMin    int
 	RefreshTTLDays  int
@@ -57,6 +58,7 @@ func Load() *Config {
 		RedisAddr:       getenv("REDIS_ADDR", "redis:6379"),
 		JWTSecret:       getenv("JWT_SECRET", "change-me-in-production"),
 		DataDir:         getenv("DATA_DIR", "./data"),
+		RecordDir:       getenv("ZLM_RECORD_DIR", ""),
 		EncryptionKey:   getenv("ENCRYPTION_KEY", "ipccloud-default-encryption-key-32b"),
 		AccessTTLMin:    getenvInt("ACCESS_TTL_MIN", 120),
 		RefreshTTLDays:  getenvInt("REFRESH_TTL_DAYS", 7),

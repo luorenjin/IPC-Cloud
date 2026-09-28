@@ -1,15 +1,11 @@
 # CLAUDE.md（platform/）
 
-本文件为 Claude Code 在 `platform/` 目录（IpcCloud 云平台：服务端 + Web）下工作时提供指导。根目录总览见 `../CLAUDE.md`。
-
-## 应答语言
-
-必须使用中文应答用户（代码、标识符、命令行等技术内容保持原样）。
+本文件为 Claude Code 在 `platform/` 目录（IpcCloud 云平台：服务端 + Web）下工作时提供指导。根级规范（应答语言、PRD 溯源、跨协议字面值等）见 [`../AGENTS.md`](../AGENTS.md)；本文件只写 platform 子系统细节。
 
 ## 架构
 
 ```
-web (Nuxt3 + Element Plus + h265web.js)
+web (Nuxt3 + Tailwind/Reka UI + h265web.js)
   └─ REST / WS ──▶ server (Go + Gin + GORM)
                      ├─ adapters: idp(MQTT) | gb28181(SIP) | onvif | rtsp
                      ├─ engine: 起播编排 / ZLM Hook / 告警 / 录像计划
@@ -35,7 +31,7 @@ cd platform/server && go run ./cmd/ipccloud
 cd platform/web && npm install && npm run dev
 ```
 
-`platform/` 目前没有自动化测试套件——需通过实际运行技术栈来验证行为，最好配合 `../simulator` 一起联调（见 `../simulator/CLAUDE.md`）。修改前端后应实际在浏览器里走一遍直播/回放等关键路径，不要只凭类型检查判断功能是否正常。
+`platform/` **没有**端到端自动化测试；服务端有少量单测（`media` / `engine` / `rtsp` / `timeutil` 等）。改协议或起停流后用 `../simulator` 闭环验证（接入-鉴权-心跳-起播-告警）。改前端后必须在真实浏览器走直播/回放，构建通过≠功能正确；改文案后跑 `cd web && python scripts/i18n-check.py`。改后端后常规门禁：`go build ./... && go vet ./internal/... && go test ./...`。
 
 ## 服务端（`server/`）
 
@@ -59,16 +55,18 @@ cd platform/web && npm install && npm run dev
 
 ### 流命名约定（关键约定）
 
-`engine.streamNames`（对应 PRD §8.3）——协议行为正确与否依赖于此：
+PRD §8.3。命名逻辑**内联在** `engine.go` 的 `StartPlay` / `StopPlay` 的 `switch dev.Source`（`streamNames` / `pullURL` 为辅助；`record.go` 等处还有平行构造）：
 - `idp`：app=`live`，stream=`{deviceID}_{channelIdx}_{profile}`
 - `gb28181`：app=`rtp`，stream 取自 `channel.Meta["gbStream"/"gbStreamSub"]`（已含 profile 后缀），缺失时回退为 `{gbChannelId}_{profile}`
 - `onvif`/`rtsp`：app=`proxy`，stream=`{channelID}_{profile}`
 
-新增设备来源类型时，必须同时扩展 `StartPlay` 与 `StopPlay` 中的 switch（以及 `streamNames`/`pullURL`）——这两处刻意保持并行而非合并抽象，因为各协议的起停流生命周期不同（推流 vs. 拉流 vs. RTP INVITE）。
+新增设备来源类型时，必须同时扩展 `StartPlay` 与 `StopPlay` 中的 switch（以及 `streamNames`/`pullURL` 及录像/抓图等按 source 分支）——刻意保持并行而非合并抽象，因为各协议的起停流生命周期不同（推流 vs. 拉流 vs. RTP INVITE）。
+
+**远程配置键三处逐字对齐**：平台 `api/devices.go` 的 `cfgKeys` ↔ 模拟器 `simulator/idp/config.go` 的 `cfgRules` ↔ 固件 `firmware/core/src/config.c` 规则表。键名写错只进 `rejected[]`，表现为「保存成功但没生效」。
 
 ## Web（`web/`）
 
-Nuxt3 + Element Plus，SSR 关闭（`ssr: false`，纯 SPA）。脚本（`package.json`）：
+Nuxt3 + **Tailwind CSS 4 + 自维护 `components/ui/*`（Reka UI）**，SSR 关闭（`ssr: false`，纯 SPA）；**不是** Element Plus（以 `package.json` 为准）。脚本：
 ```bash
 npm run dev       # 开发
 npm run build     # 生产构建
@@ -77,11 +75,11 @@ npm run preview   # 预览生产构建
 ```
 
 - `nuxt.config.ts`：`API_ORIGIN` 环境变量决定后端代理目标（本地默认 `http://localhost:8080`，Docker Compose 内为 `http://server:8080`）；`/api/v1/**`、`/ws/v1/**`（WS）、`/hooks/zlm/**` 均代理到后端；额外设置了 COOP/COEP 响应头（`same-origin`/`require-corp`），这是 h265web.js 多线程 WASM 解码的硬性要求（PRD §6.4），修改路由规则或响应头时不要破坏这两个头。
-- 播放器依赖 `h265web.js` 部署到 `public/vendor/h265web.js`（该文件在仓库里不提供，需单独部署；缺失时播放器显示错误卡片，其余功能不受影响），并通过 `app.head.script` 在页面头部以 `async` 方式引入。
+- 播放器资源在 `public/vendor/`（`h265web.js`、`h265web_wasm.*`、`ext*.js` 等）**已入库**；缺失时仅播放器报错，其余功能可用。经 `app.head.script` 以 `async` 引入。
 - `composables/useApi.ts`、`useAuth.ts`、`useWs.ts` 封装了 REST 调用、鉴权状态与 WebSocket 事件订阅，新增页面/组件优先复用这些 composable 而不是直接写 `fetch`。
 - 直播页 `pages/live.vue`、回放页 `pages/playback.vue` 是与 `server/internal/engine` 交互最深的页面（起播/停播/回放控制），改动这两个页面前建议先读一遍对应的服务端 handler（`api/records.go`、`engine/playback.go`）。
+- Docker 内 WS 依赖运行时 `WS_UPSTREAM`（`server/plugins/ws-proxy.ts`），缺失会回落到容器自身 `localhost:8080` 导致握手失败。
 
-## 跨领域注意事项
+## 补充注意
 
-- 代码注释、错误信息、页面文案均为中文；新增内容保持一致。
-- 协议/设备来源字符串（`idp`、`gb28181`、`onvif`、`rtsp`）在 `models`、`adapter`、`engine` 中作为字面判别值使用——追踪某个协议的端到端行为时，应搜索该来源字符串本身，而不仅仅是对应的 Go 类型。
+- 直播/回放改动必须在真实浏览器验证，不要只凭类型检查判断功能是否正常。

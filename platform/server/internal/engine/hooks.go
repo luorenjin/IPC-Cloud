@@ -237,7 +237,7 @@ func (e *Engine) onRecordMP4(c *gin.Context) {
 	rec := models.RecordIndex{
 		ID: "ri_" + models.NewID(), ChannelID: ch.ID, Source: "platform",
 		StartTs: int64(startTs * 1000), EndTs: int64((startTs + durS) * 1000),
-		Type: "timer", Path: path, Size: int64(size),
+		Type: classifyRecordType(app, stream), Path: path, Size: int64(size),
 	}
 	store.DB.Create(&rec)
 	hookOK(c, nil)

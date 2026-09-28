@@ -56,6 +56,7 @@ func main() {
 	eng.StartRecordRunner()
 	eng.StartRebootRunner()
 	eng.StartNodeStatsRunner()
+	eng.StartRecordGC()
 
 	// 任务中心生命周期治理（P-18）：回收僵尸任务 + 清理过期任务
 	task.StartGC()

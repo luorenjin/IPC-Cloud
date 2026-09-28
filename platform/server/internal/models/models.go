@@ -347,7 +347,7 @@ type RecordIndex struct {
 	Source    string `gorm:"size:16" json:"source"` // device|platform
 	StartTs   int64  `json:"startTs"`
 	EndTs     int64  `json:"endTs"`
-	Type      string `gorm:"size:16" json:"type"` // timer|event|manual
+	Type      string `gorm:"size:16" json:"type"` // timer|event|manual|pending
 	Path      string `gorm:"size:256" json:"path"`
 	Size      int64  `json:"size"`
 }

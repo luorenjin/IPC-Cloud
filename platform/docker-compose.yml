@@ -75,8 +75,10 @@ services:
       ADMIN_USER: "admin"
       ADMIN_PASSWORD: "Admin@12345"
       STREAM_IDLE_SEC: "30"
+      ZLM_RECORD_DIR: "/opt/media/record"
     volumes:
       - serverdata:/app/data
+      - zlmdata:/opt/media/record
 
   web:
     build:
