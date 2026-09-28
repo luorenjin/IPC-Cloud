@@ -185,9 +185,10 @@
 | 传输 | MQTT 5.0 over TLS，8883/443；Keepalive 60s，3 周期判离线，LWT 即时离线 |
 | Topic | `idp/v1/{DeviceID}/up|down/{status\|event\|ack\|cmd\|cfg\|ota\|media\|record\|p2p}` |
 | 状态机 | 出厂未激活 → 在线未绑定 → 绑定中 → 已绑定 →（离线/解绑） |
+| 归属 | **首绑归属**：第一次绑定成功的项目为唯一 Owner；排他 |
 | 绑定 | ID+验证码 / 扫码 / 批量导入 / 预添加（7 天）/ 局域网 UDP 发现（私有化部署） |
-| 冲突 | `E7001 已被绑定` → 转移/分享、原项目删除、解绑申请工单 |
-| 解绑 | 平台 `cmd.unbind`；设备 Reset 5s 仅解绑；Reset 10s 复位 |
+| 冲突 | `E7001 已被绑定` → 原项目转移/删除；或**设备 Reset 重新获取控制权**后再绑 |
+| 解绑/夺回 | 平台 `cmd.unbind`/删除；**Reset 5s 解绑、Reset 10s 复位（保留证书与 VerifyCode）**；**后期 APP + 局域网工具**协助重新获取权限 |
 | 管理 | reboot(定时)、reset、cfg.get/set、ota(A/B+回滚)、status.report(30s)、event.*、snapshot、diag.run、ptz(预留) |
 | 媒体 | `media.start{ch,profile,url,token,ttl}` → RTMP(S) 推流；`media.stop`；无人观看由 ZLM `on_stream_none_reader` 触发 |
 | 回放 | `record.query/play/ctrl(pause\|resume\|seek\|speed)/stop`；二期 `record.download` |
