@@ -10,16 +10,20 @@ window.IPC = {
     top: 'preview',
     mod: '画面显示',
     tab: '图像',
-    mirror: '关闭', daynight: '日夜通用', scene: '普通模式',
+    mirror: '关闭', daynight: '日夜自动切换', scene: '普通模式',
     bright: 50, contrast: 50, sat: 50, sharp: 50,
-    expo: '自动', expoLv: 0, flicker: '关闭',
-    ir: '自动', sens: 4, delay: 5, wdr: '关闭', blc: '关闭', awb: '自动',
+    expo: '自动', expoLv: 1, flicker: '关闭',   /* 曝光等级默认 1 = 对齐实机 expLevelSel */
+    ir: '自动', sens: 4, delay: 5, wdr: '关闭',
+    /* blc = 区域补偿，真键 image.blc（布尔），与 wdr 的文案型状态不同 */
+    blc: false, awb: '自动',
     ledMode: '白光照明', ledStr: '自动', humanExp: true,
     osdMode: '普通模式', osdName: '门口摄像机', osdSync: true,
     osdDateShow: true, osdWeekShow: true, osdNameShow: false,
     osdC1: '', osdC2: '', osdC3: '', osdC4: '',
     osdC1Show: false, osdC2Show: false, osdC3Show: false, osdC4Show: false,
     osdFlicker: '不闪烁', osdSize: '自适应', osdColor: '默认',
+    /* 最小边距对齐实机 0/1/2（默认 1），OSD 距画面边缘的格数 */
+    osdMargin: '1',
     privacy: '关闭',
     sp: '均衡配置', st: '主码流', codec: 'H265', res: '2560*1440', fps: 25, rc: '变码率',
     smartEnc: true, br: 3072, quality: 5,
@@ -41,7 +45,7 @@ window.IPC = {
     tfPresent: false,
     netMode: '自动获取', ip: '172.16.1.180', mask: '255.255.255.0', gw: '172.16.1.1',
     dns: '172.16.1.1', dns2: '0.0.0.0', mtu: 1480,
-    httpPort: 80, rtspPort: 554,
+    httpPort: 8080, rtspPort: 554,   /* PRD LC-NET-02：默认 HTTP 8080 */
     platOn: false, platType: 'IpcCloud 平台', platIp: '', platPort: 60443, platVendor: '', platNote: '',
     /** GB28181 平台接入（对齐实机 SIP 表单） */
     gbCrypt: false, gbLocalSipPort: 5060,
@@ -236,6 +240,131 @@ window.IPC = {
     return this.api('GET', '/api/v1/config?prefix=' + encodeURIComponent(prefix));
   },
 
+  /** 1×1 透明 GIF。断流时用它顶替 src：直接 removeAttribute('src') 会让浏览器
+   *  显示“破损图像”图标，观感很差。 */
+
+  /**
+   * 把一个 <img> 接成实时预览。
+   *
+   * 板端把子码流编成 MJPEG，经 /ws/v1/preview 以二进制 WS 帧推来，这里逐帧
+   * 换成 img.src：浏览器原生解 JPEG，不需要 WASM 解码器（16MB Flash 的板子
+   * 换不下 h265web 那套）。
+   *
+   * 页面切换是 SPA 内部换 DOM，img 被拆掉时必须收掉连接，否则板端编码器会
+   * 一直被占着（表现为“退出预览后 CPU 仍满载”），所以用轮询检测 img 是否
+   * 还在文档里。返回 stop 函数供调用方主动断开。
+   */
+  attachPreview(img, stream) {
+    if (img._previewStop) img._previewStop();   /* 同一 img 被重复接管时先断旧的 */
+    let ws = null;
+    let tick = null;
+    let retry = 0;
+    let stopped = false;
+    const stop = () => {
+      stopped = true;
+      img._previewClosed = true;
+      if (ws) { try { ws.close(); } catch (e) { /* 已断开 */ } ws = null; }
+      if (tick) { clearInterval(tick); tick = null; }
+      if (img._previewStop === stop) img._previewStop = null;
+      IPC.setStreamHint(img, false);   /* 主动停（切页/切码流）不留提示，由新连接接管 */
+    };
+    img._previewStop = stop;
+    img._previewStream = stream || 'sub';
+    img._previewClosed = false;
+
+    const connect = () => {
+      if (stopped) return;
+      const proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
+      ws = new WebSocket(proto + location.host + '/ws/v1/preview?stream=' + (stream || 'sub'));
+      ws.binaryType = 'blob';
+      ws.onmessage = (ev) => {
+        retry = 0;
+        /* 有帧到达说明通了：撤掉“已断开”提示 */
+        IPC.setStreamHint(img, false);
+        const url = URL.createObjectURL(ev.data);
+        const old = img.dataset.url;
+        img.src = url;
+        img.dataset.url = url;
+        if (old) URL.revokeObjectURL(old);   /* 上一帧用完就放，否则内存持续涨 */
+      };
+      ws.onclose = () => {
+        img._previewClosed = true;
+        /* 用透明像素顶替，而不是 removeAttribute('src') */
+        img.src = IPC.BLANK_PIXEL;
+        img.dataset.url = '';
+        /* 退避重连：前几次 250ms 递增（网络抖动一下就能恢复），之后固定 2s
+           一直重试到 img 被拆掉为止。**不设次数上限**——服务重启要十几秒，
+           设上限会让画面永远黑在那里，必须手动刷新页面。
+           板端预览是单消费者：切码流时会有"旧连接还没断、新连接已到"的瞬间
+           （服务端已改成后来者胜，不再回 409）。 */
+        if (!stopped) {
+          retry++;
+          IPC.setStreamHint(img, true, '画面已断开，正在重连…');
+          setTimeout(connect, Math.min(250 * retry, 2000));
+          /* 每重连 6 次探一次活：板端 ipc_app 重启会清空会话表（会话特意
+             不持久化），此后 WS 握手永远 401，纯重连永远回不来。
+             必须用**需要鉴权**的端点——/api/v1/auth/state 是免鉴权的，
+             永远返 200，测不出会话失效。走统一 REST 出口后 401 会由
+             IPC.api → onUnauth → showAuth 把用户送回登录页，那里会
+             detachPreviews，重连自然停下。 */
+          if (retry % 6 === 0) {
+            IPC.loadFeatures().catch(() => { /* 401 已由 onUnauth 处理 */ });
+          }
+        }
+      };
+      ws.onerror = () => { /* 统一交给 onclose 处理，避免双弹窗 */ };
+    };
+    connect();
+
+    /* SPA 换页不会刷新文档，img 被拆掉时必须收掉连接，否则板端编码器会一直被
+       占着（表现为"退出预览后 CPU 仍满载"，且下一个页面的连接会拿到 409）。 */
+    tick = setInterval(() => { if (!document.body.contains(img)) stop(); }, 500);
+    return stop;
+  },
+
+  /** 断开当前文档里所有预览。router 在换页**之前**调用：那时旧 img 还在
+   *  DOM 里、能拿到它的 stop 函数；等重新渲染完再断就已经和"新页面连流"
+   *  撞在一起了（单消费者服务端会直接回 409）。 */
+  detachPreviews() {
+    document.querySelectorAll('img[data-preview]').forEach((img) => {
+      if (img._previewStop) img._previewStop();
+    });
+    /* 主码流（<video> + MSE）同理：不收掉的话旧连接还占着板端的**单消费者**，
+       新页面刚连上就会被它下一次重连顶掉（表现成“进页黑一下又黑回去”）。
+       预览页的 IPC._h264Stop 也在这里一起收——它是 shell.js 自己管的同一条连接。 */
+    document.querySelectorAll('[data-preview-h264]').forEach((el) => {
+      if (el._h264Stop) { el._h264Stop(); el._h264Stop = null; el._h264Url = ''; }
+    });
+    if (this._h264Stop) { this._h264Stop(); this._h264Stop = null; }
+  },
+
+  /** 扫描 root 下所有预览元素并接流（由 router 在 render 末尾调用）。
+   *  - `img[data-preview=sub]` → MJPEG，直接进 <img>；
+   *  - `[data-preview-h264]` → 主码流 H.264 裸流，进 <video> 由 preview-player
+   *    transmux 到 MSE（裸流 <img> 解不了，直接当 src 会得到一张解不开的图）。 */
+  attachPreviews(root) {
+    (root || document).querySelectorAll('[data-preview-h264]').forEach((el) => {
+      const url = el.dataset.previewH264;
+      if (el.hidden) return;
+      /* 同元素 + 同源 + 还连着就复用，免得连着 render 两次时画面闪一下 */
+      if (el._h264Stop && el._h264Url === url) return;
+      if (el._h264Stop) { el._h264Stop(); el._h264Stop = null; }
+      el._h264Url = url;
+      el._h264Stop = this.attachH264(el, url);
+    });
+    (root || document).querySelectorAll('img[data-preview]').forEach((img) => {
+      const want = img.dataset.preview || 'sub';
+      /* 隐藏的图不接流：预览页默认走主码流时 img 是 hidden 的，而板端预览是
+         **单消费者**，这时再连一条子码流会把主码流那条顶掉（表现成“进预览页
+         就切回子码流”）。切换到子码流时由 shell.js 的 switchStream 主动接。 */
+      if (img.hidden) return;
+      /* render 可能被连着调两次（顶栏与侧栏各自触发），每次都断开重连会让
+         画面闪一下。同一元素 + 同一码流 + 连接还活着就直接复用。 */
+      if (img._previewStop && img._previewStream === want && !img._previewClosed) return;
+      this.attachPreview(img, want);
+    });
+  },
+
   /** 设备鉴权（挑战-应答；口令不离开浏览器，proof 由 crypto.js 计算） */
   auth: {
     state() {
@@ -283,4 +412,36 @@ window.IPC = {
   render() {},
   renderSettings() {},
   showAuth() {}
+};
+
+/* --------------------------------------------------------------- 预览提示 */
+/* 注意：以下必须放在上面那个对象字面量**之后**——window.IPC = {...} 是字面量，
+   往里面塞 const/function 语句会让整个 core.js 解析失败（前端全部模块报
+   "Cannot read properties of undefined (reading 'S')"）。 */
+
+/** 1×1 透明 GIF。断流时用它顶替 img.src：直接 removeAttribute('src') 会让
+ *  浏览器显示"破损图像"图标，观感很差。 */
+IPC.BLANK_PIXEL = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+
+/**
+ * 在画面容器（.video-box）上盖/收一层"已断开"提示。
+ * 容器里没有就现建一个，这样各页面不必各自写一份提示 DOM。
+ * @param {Element} el 画面元素（img 或 video）
+ * @param {boolean} on true 显示 / false 收起
+ */
+IPC.setStreamHint = function (el, on, text) {
+  const box = el && el.closest ? el.closest('.video-box') : null;
+  if (!box) return;
+  let hint = box.querySelector('.stream-off');
+  if (on) {
+    if (!hint) {
+      hint = document.createElement('div');
+      hint.className = 'stream-off';
+      box.appendChild(hint);
+    }
+    hint.textContent = text || '画面已断开，正在重连…';
+    hint.hidden = false;
+  } else if (hint) {
+    hint.hidden = true;
+  }
 };

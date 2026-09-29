@@ -39,6 +39,27 @@ python firmware/tools/console_e2e.py --skip-reboot --skip-reset   # 快速回归
 
 覆盖 13 个用例：激活、错误口令被拒、只显示可用菜单、设备信息真实值、设备名持久化、与计算机时间同步、系统日志导出、修改密码、会话失效回登录页、连续错误口令锁定、重启、恢复出厂（结束后自动用同一口令重新激活）。退出码 0 = 全过；截图在 `firmware/tools/logs/e2e-<时间>/`。
 
+## gen_sn.py / burn_sn.py：序列号生成与工厂烧录
+
+规范：[`Docs/PRD/IpcCloud设备序列号生成规则_v1.0.md`](../../Docs/PRD/IpcCloud设备序列号生成规则_v1.0.md)
+（单码体系：17 位 DeviceID 即序列码，`TTTT` 为配置码登记表，`YYWW`/`SSSSS` 按 base32 编码）。
+
+| 命令 | 用途 |
+|---|---|
+| `python firmware/tools/gen_sn.py selftest` | 规则回归：码表登记、Luhn mod32、年周/流水 base32、边界与 0/1 年周 |
+| `python firmware/tools/gen_sn.py gen --model-code SPRA --seq 1 --qr` | 只生成 DeviceID + 验证码 + QR 文本（不连设备） |
+| `python firmware/tools/gen_sn.py decode <DeviceID>` | 解码：厂商 / 配置码→硬件配置 / 年周 / 流水 / 校验 |
+| `python firmware/tools/burn_sn.py gen --model-code SPRA --seq 1 --json` | 同上，另出一行 JSON（接 MES） |
+| `python firmware/tools/burn_sn.py burn --port COM6 --model-code SPRA --seq 1` | **烧录到模组**（串口）→ 回读逐字节校验 + Luhn 验真 |
+| `python firmware/tools/burn_sn.py verify --port COM6` | 复检已烧录模组（退出码 0/1） |
+| `python firmware/tools/burn_sn.py burn --target mock ...` / `--dry-run` | 写本地 `mock_state/`（开发）/ 只演练不连设备 |
+
+工厂化要点：
+
+- **防重烧**：目标已有 `device_id` → 拒绝，覆盖必须显式 `--force`；
+- 写入 `/etc/ipc/sec/{device_id,verify_code}`，用 `printf '%s'`（无换行、无 shell 展开）+ `chmod 600` + `sync`，与固件 `c_write` 同目录同文件名；**固件按需读取，写完无需重启**，控制台/二维码立即生效；
+- 年周缺省取当前 ISO 年周，`--seq` 由 MES 下发（重号责任在 MES）；`--json` 输出 `{device_id, verify_code, hw, qr, result, ...}`。
+
 - 锁定用例会让本机 IP 被设备锁定 60 秒起（重复触发翻倍，最长 15 分钟），脚本会轮询直到解锁。
 - 「改为静态 IP」不在自动化里：会把测试机与设备的连接改断。需要时手工在「网络设置 → 连接」验证。
 

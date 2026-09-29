@@ -23,7 +23,21 @@ from playwright.sync_api import sync_playwright
 
 LOG_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
 ALT_PWD = "Admin@54321"
-HIDDEN_MENUS = ["摄像头", "事件侦测", "云服务", "算法赋能"]
+# 无论设备上报什么能力都**不该出现**的菜单（能力位恒 false 的那几个）。
+# 注意：「摄像头」曾因图像页是占位而列在这里，图像页接线后已从名单移除
+# （它的显隐由 image.basic 决定，下面 NAV_FEAT 会跟着设备实际上报走）。
+HIDDEN_MENUS = ["事件侦测", "云服务", "算法赋能"]
+
+# 与 firmware/web/js/router.js 的 NAV / TOP_FEAT 一一对应的 feature ID。
+# 写在这里是为了让 E4 **按设备当时上报的能力**推导期望（而不是写死成
+# “顶栏只剩设置”）：能力位会随固件演进变真（gk 视频 HAL 落地后 preview.live /
+# tools.download 就从 false 变 true），写死的断言会跟着过时。
+NAV_FEAT = {
+    "摄像头": "image.basic", "事件侦测": "event.any", "存储": "storage.tf",
+    "网络设置": "network.config", "云服务": "cloud.bind", "系统设置": None,
+    "算法赋能": "event.smart",
+}
+TOP_FEAT = {"preview": "preview.live", "tools": "tools.download", "settings": None}
 
 
 class E2E:
@@ -174,13 +188,27 @@ class E2E:
             def e4():
                 self.login(self.pwd)
                 self.expect(self.pg.is_visible("#shell"), "正确口令未进入控制台")
-                menus = self.pg.eval_on_selector_all(".side-item[data-kind=p]", "e=>e.map(x=>x.dataset.id)")
+                # 顶栏/侧栏的显隐由设备上报的能力决定（router.js 的 TOP_FEAT/NAV + IPC.feat()），
+                # 所以期望值从设备自己上报的 features 推导，不写死。必须先等前端把 features
+                # 载入：未载入时 feat() 是“全可见”兜底态，会把本来正确的设备读成失败。
+                self.pg.wait_for_function(
+                    "window.IPC && IPC.S && IPC.S.features !== null", timeout=5000)
+                feats = self.pg.evaluate("IPC.S.features")
                 tops = self.pg.eval_on_selector_all(".topnav button", "e=>e.filter(x=>!x.hidden).map(x=>x.dataset.top)")
+                want = [t for t, fid in TOP_FEAT.items() if fid is None or feats.get(fid) is True]
+                self.expect(tops == want, f"顶栏应为 {want}（按上报能力推导），实际：{tops}")
+                self.expect("settings" in tops, "顶栏必须保留设置入口")
+
+                # 进设置页再看侧栏：落地页可能是预览（preview.live=true 时），那时侧栏没渲染
+                self.pg.click(".topnav button[data-top=settings]")
+                self.pg.wait_for_timeout(600)
+                menus = self.pg.eval_on_selector_all(".side-item[data-kind=p]", "e=>e.map(x=>x.dataset.id)")
+                want_m = [m for m, fid in NAV_FEAT.items() if fid is None or feats.get(fid) is True]
+                self.expect(menus == want_m, f"侧栏应为 {want_m}（按上报能力推导），实际：{menus}")
                 bad = [m for m in HIDDEN_MENUS if m in menus]
                 self.expect(not bad, f"未实现的菜单仍可见：{bad}")
-                self.expect(tops == ["settings"], f"顶栏应只剩设置，实际：{tops}")
                 self.shot("E4-menus")
-                return "菜单：" + "、".join(menus)
+                return "顶栏：" + "、".join(tops) + "；菜单：" + "、".join(menus)
             self.case("E4", "登录且只显示可用功能", e4)
 
             def e5():
@@ -312,8 +340,10 @@ class E2E:
 
             if not skip_reset:
                 def e13():
-                    self.go("系统设置", "系统配置", "系统维护")
-                    self.pg.click("#factory")
+                    # 恢复出厂已对齐实机挪到「配置管理」（PRD LC-SYS-04：配置管理=简单/完全恢复+导出+导入），
+                    # 「系统维护」只剩重启与定时重启
+                    self.go("系统设置", "系统配置", "配置管理")
+                    self.pg.click("#cfg-factory")
                     self.pg.wait_for_timeout(1500)
                     self.expect(self.pg.is_visible("#reboot-mask"), "未显示等待遮罩")
                     cost = self.wait_device(False)

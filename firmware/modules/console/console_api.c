@@ -16,6 +16,7 @@
 #include "core/module.h"
 #include "core/json.h"
 #include "core/log.h"
+#include "core/os.h"
 #include "hal/hal.h"
 #include <stdarg.h>
 #include <stdint.h>
@@ -189,18 +190,30 @@ static bool cap_ivs_smart(const profile_t *p)
 static bool mod_up(const char *name) { return module_state(name) != MOD_STATE_UNLOADED; }
 
 /** 视频真在出流（通道 0 已 set_encoder/start）。GK 视频 HAL 未落地时恒 false。 */
+/**
+ * 视频是否**可用**（能力，而不是"此刻是否正在出流"）。
+ *
+ * 判据必须是 HAL 的函数指针是否齐全，**不能**用"get_encoder 能否返回参数"：
+ * 编码器只在真正有预览消费者时才 open/start（没人看就不出流，省电是刻意的），
+ * 空闲态下 get_encoder 返回 HAL_ESTATE 是正确行为——若拿它当能力判据，预览
+ * 入口会在空闲时消失，用户永远进不去（自锁）。真出不出得了图，由预览连接
+ * 自己发现（收不到帧就提示），而不是靠能力位替它预判。
+ */
 static bool video_live(void)
 {
-    hal_enc_cfg_t c;
-    return hal_has(HAL_MOD_VIDEO) && hal()->video->get_encoder &&
-           hal()->video->get_encoder(0, &c) == HAL_OK;
+    return hal_has(HAL_MOD_VIDEO) && hal()->video &&
+           hal()->video->open && hal()->video->start &&
+           hal()->video->get_frame && hal()->video->release_frame;
 }
 
+/** 图像调节能力：按 HAL 是否**实现**接口判断，不按「当前能否读到值」。
+ * @note 与 video_live() 同一个坑：若用 get_image()==HAL_OK 当判据，设备空闲时
+ * （视频尚未打开）能力恒为 false，图像设置模块会被一直隐藏，用户也就永远没
+ * 机会打开它。图像参数本身是**配置**，未出流时也有值。 */
 static bool image_ok(void)
 {
-    hal_image_t img;
-    return hal_has(HAL_MOD_VIDEO) && hal()->video->get_image &&
-           hal()->video->get_image(&img) == HAL_OK;
+    return hal_has(HAL_MOD_VIDEO) && hal()->video &&
+           hal()->video->get_image && hal()->video->set_image;
 }
 
 /**
@@ -297,6 +310,8 @@ static json_t *build_features_object(void)
         json_object_set(obj, "storage.format", json_new_bool(false)) != 0 ||
         json_object_set(obj, "network.eth", json_new_bool(p->eth)) != 0 ||
         json_object_set(obj, "network.config", json_new_bool(p->eth)) != 0 ||
+        /* 端口页已落地（port.http/port.rtsp + POST /system/port/apply），如实上报 */
+        json_object_set(obj, "network.ports", json_new_bool(p->eth)) != 0 ||
         json_object_set(obj, "network.wifi", json_new_bool(cap_wifi(p))) != 0 ||
         json_object_set(obj, "network.wifi_ap", json_new_bool(cap_wifi_ap())) != 0 ||
         json_object_set(obj, "netplatform.idp", json_new_bool(np_idp)) != 0 ||
@@ -311,6 +326,11 @@ static json_t *build_features_object(void)
         json_object_set(obj, "system.time", json_new_bool(true)) != 0 ||
         json_object_set(obj, "system.log", json_new_bool(true)) != 0 ||
         json_object_set(obj, "system.device", json_new_bool(true)) != 0 ||
+        /* 配置导入导出（cfg_dump_json/PUT /config 已具备）与定时重启
+           （system.reboot.plan.* + console_maint 的调度）本轮已实现，如实上报 */
+        json_object_set(obj, "system.cfgfile", json_new_bool(true)) != 0 ||
+        json_object_set(obj, "system.reboot_plan", json_new_bool(true)) != 0 ||
+        json_object_set(obj, "system.diag", json_new_bool(true)) != 0 ||
         json_object_set(obj, "module.admin", json_new_bool(true)) != 0 ||
         json_object_set(obj, "cloud.bind", json_new_bool(np_idp)) != 0) {
         json_free(obj);
@@ -494,6 +514,8 @@ static json_t *build_feature_detail_array(void)
     FEAT("storage.format", "存储卡格式化", false, "always", "本期未实现");
     FEAT("network.eth", "以太网", p->eth, "hardware", "profile.network.eth");
     FEAT("network.config", "网络设置", p->eth, "hardware", "有线 DHCP/静态地址");
+    FEAT("network.ports", "端口", p->eth, "hardware",
+         "port.http/port.rtsp，保存即重绑监听（POST /system/port/apply）");
     FEAT("network.wifi", "WiFi", cap_wifi(p), "hardware", "需 WiFi 模组与 HAL");
     FEAT("network.wifi_ap", "AP 配网", cap_wifi_ap(), "hardware", "需 AP 能力");
     FEAT("netplatform.idp", "IDP 接入", p->idp_enabled && mod_up("idp"), "mixed", "protocols.idp + idp 模块");
@@ -507,6 +529,9 @@ static json_t *build_feature_detail_array(void)
     FEAT("system.time", "时间设置", true, "always", "NTP / 手动校时");
     FEAT("system.log", "系统日志", true, "always", "内存环形日志");
     FEAT("system.device", "设备名称", true, "always", "device.name");
+    FEAT("system.cfgfile", "配置导入导出", true, "always", "cfg_dump_json / PUT /config");
+    FEAT("system.reboot_plan", "定时重启", true, "always", "system.reboot.plan.*");
+    FEAT("system.diag", "网络诊断", true, "always", "Ping / Tracert");
     FEAT("module.admin", "模块管理", true, "always", "本页");
     FEAT("cloud.bind", "云服务绑定", p->idp_enabled && mod_up("idp"), "mixed", "依赖 IDP 模块");
     }
@@ -700,25 +725,39 @@ static hal_err_t ep_config_put(const http_req_t *req, char *out, size_t out_cap)
  * 四、GET /api/v1/system/{info,status}、POST /api/v1/system/{reboot,reset}
  * ========================================================================== */
 
-/** 设备序列号：优先取安全存储里的 17 位 DeviceID；无 hal_crypto 或尚未
- *  产线烧录（真机开发早期、mock 环境常见）时留空，不视为错误。 */
-static void device_serial(char *out, size_t cap)
+/** 读安全存储里的短文本键（出厂烧录的 DeviceID/SN/验证码）：
+ *  没有该模块/没这个键/读失败 → 返回 false 且 out 为空串（调用方显示「未烧录」，
+ *  **不编造、不回落到派生值**）。读到后统一剥尾部换行与空白。 */
+static bool read_sec_str(const char *key, char *out, size_t cap)
 {
     size_t len = 0;
     out[0] = '\0';
-    if (!hal_has(HAL_MOD_CRYPTO) || !hal()->crypto->secure_read) return;
-    if (hal()->crypto->secure_read(HAL_SEC_KEY_DEVICE_ID, (uint8_t *)out, cap - 1, &len) != HAL_OK)
-        return;
+    if (!hal_has(HAL_MOD_CRYPTO) || !hal()->crypto->secure_read) return false;
+    if (hal()->crypto->secure_read(key, (uint8_t *)out, cap - 1, &len) != HAL_OK) {
+        out[0] = '\0';
+        return false;
+    }
     if (len >= cap) len = cap - 1;
     out[len] = '\0';
     while (len > 0 && (out[len - 1] == '\n' || out[len - 1] == '\r' ||
                        out[len - 1] == ' '  || out[len - 1] == '\t')) out[--len] = '\0';
+    return out[0] != '\0';
+}
+
+/** 设备序列号（唯一身份，即序列码）：安全存储里的 17 位 DeviceID；未烧录时留空。 */
+static void device_serial(char *out, size_t cap)
+{
+    if (!read_sec_str(HAL_SEC_KEY_DEVICE_ID, out, cap)) out[0] = '\0';
 }
 
 /**
  * GET /api/v1/system/info：型号/序列号/固件版本/运行时长 + caps/features/modules。
- * 响应：{"code":0,"model":..,"vendor":..,"serial":..,"fw_version":..,
- *        "uptime_s":..,"caps":{...},"features":{...},"modules":[...]}
+ * 响应：{"code":0,"model":..,"vendor":..,"serial":..,"qr_content":..,
+ *        "fw_version":..,"uptime_s":..,"caps":{...},"features":{...},"modules":[...]}
+ * serial = 17 位 DeviceID（**唯一身份，同时就是序列码**，单码体系见
+ * Docs/PRD/IpcCloud设备序列号生成规则_v1.0.md）；未烧录时为空串，前端显示
+ * 「未烧录」（不编造）。qr_content 仅在 DeviceID 与验证码都已烧录时给出：
+ * IPC1:<DeviceID>:<VerifyCode>:<Model>（接入规范 QR 条目）。
  * 唯一在强制改密期间仍可访问的业务端点（console_auth_check 已豁免），
  * 前端在改密页也要能读到型号与能力清单渲染页面外壳。
  * features/modules 为能力驱动 UI 的权威来源，前端不得另算一套。
@@ -728,7 +767,7 @@ static hal_err_t ep_system_info(char *out, size_t out_cap)
     const profile_t *p = profile_get();
     hal_sys_stats_t st;
     hal_ota_state_t ota;
-    char serial[64];
+    char serial[64], verify[16] = "", qr[160] = "";
     json_t *root, *caps_obj, *feat_obj, *mods_arr;
     char *txt;
     hal_err_t rc;
@@ -740,6 +779,9 @@ static hal_err_t ep_system_info(char *out, size_t out_cap)
     memset(&ota, 0, sizeof(ota));
     if (hal_has(HAL_MOD_SYS) && hal()->sys->ota_get_state) hal()->sys->ota_get_state(&ota);
     device_serial(serial, sizeof(serial));
+    read_sec_str(HAL_SEC_KEY_VERIFY_CODE, verify, sizeof(verify));
+    if (serial[0] && verify[0])
+        snprintf(qr, sizeof(qr), "IPC1:%s:%s:%s", serial, verify, p->model);
 
     caps_obj = build_caps_object();
     feat_obj = build_features_object();
@@ -778,6 +820,7 @@ static hal_err_t ep_system_info(char *out, size_t out_cap)
         json_object_set(root, "ip", json_new_string(ns.ip));
     }
     json_object_set(root, "serial", json_new_string(serial));
+    if (qr[0]) json_object_set(root, "qr_content", json_new_string(qr));
     json_object_set(root, "fw_version", json_new_string(ota.current_version));
     json_object_set(root, "uptime_s", json_new_int((int64_t)st.uptime_s));
     json_object_set(root, "caps", caps_obj);       /* 接管所有权 */
@@ -928,6 +971,19 @@ static hal_err_t ep_system_log(const http_req_t *req, char *out, size_t out_cap)
 
     json_object_set(root, "code", json_new_int(0));
     json_object_set(root, "total", json_new_int(count));
+    /*
+     * 两个时间锚点：行首是**单调毫秒**，要显示成年月日必须同时知道「此刻的
+     * 墙钟」与「此刻的单调钟」，前端按 utc −(mono_ms − 行ms) 换算。设备无
+     * RTC，未校时（NTP 还没同步）时 utc 仍停在 1970，前端据此显示 "--"，
+     * 不硬算一个看起来像真的假时间。
+     */
+    {
+        int64_t utc = 0;
+        if (hal_has(HAL_MOD_SYS) && hal()->sys->get_wallclock &&
+            hal()->sys->get_wallclock(&utc) == HAL_OK)
+            json_object_set(root, "utc", json_new_int(utc));
+        json_object_set(root, "mono_ms", json_new_int((int64_t)(os_monotonic_us() / 1000ULL)));
+    }
     json_object_set(root, "lines", arr);
     txt = json_dump(root, false);
     json_free(root);
@@ -1013,10 +1069,11 @@ static hal_err_t ep_time_get(char *out, size_t out_cap)
 
     if (!hal_has(HAL_MOD_SYS) || !hal()->sys->get_wallclock) return HAL_ENOTSUP;
     if (hal()->sys->get_wallclock(&utc) != HAL_OK) return HAL_EIO;
-    if (cfg_get_bool("time.ntp.enable", &en) != HAL_OK) en = false;
-    cfg_get_str("time.ntp.server", server, sizeof(server));
+    /* 与 console_apply_time 同源读取：cfg 未写入时报「默认开启 + 缺省服务器」，
+       否则页面会显示 NTP 关闭、而设备其实正按默认值在跑 ntpd（或反过来）。 */
+    console_ntp_read(&en, server, sizeof(server));
     if (cfg_get_str("time.timezone", tz, sizeof(tz)) != HAL_OK || !tz[0])
-        snprintf(tz, sizeof(tz), "CST-8");
+        snprintf(tz, sizeof(tz), CONSOLE_TZ_DEFAULT);   /* 与 console_maint 的定时重启同一缺省 */
     if (en && hal()->sys->ntp_synced) synced = hal()->sys->ntp_synced();
 
     /* 用 json_* 构造：配置里的字符串不能直接拼进 JSON */
@@ -1106,6 +1163,7 @@ static hal_err_t ep_net_apply(const http_req_t *req, char *out, size_t out_cap,
     if (!hal_has(HAL_MOD_SYS) || !hal()->sys->apply_net) return HAL_ENOTSUP;
     if (req->body && req->body_len > 0) {
         json_t *j = json_parse(req->body, req->body_len, NULL, 0);
+        bool has_mtu;
         if (!j || !json_is(j, JSON_OBJECT)) { json_free(j); return HAL_EINVAL; }
         memset(&c, 0, sizeof(c));
         c.dhcp = json_bool(json_get(j, "dhcp"), true);
@@ -1113,7 +1171,14 @@ static hal_err_t ep_net_apply(const http_req_t *req, char *out, size_t out_cap,
         body_str_copy(j, "mask", c.mask, sizeof(c.mask));
         body_str_copy(j, "gw", c.gw, sizeof(c.gw));
         body_str_copy(j, "dns", c.dns, sizeof(c.dns));
+        /* mtu 可选：不带 = 本次不动 MTU（向后兼容旧调用方），带了才校验与写入 */
+        has_mtu = json_get(j, "mtu") != NULL;
+        c.mtu = has_mtu ? (int)json_int(json_get(j, "mtu"), -1) : -1;
         json_free(j);
+        if (has_mtu && (c.mtu < 576 || c.mtu > 1500)) {
+            fmt_safe(out, out_cap, "{\"code\":%d,\"msg\":\"MTU 范围应为 576-1500\"}", (int)HAL_EINVAL);
+            return HAL_EINVAL;
+        }
     } else {
         console_net_read(&c);
     }
@@ -1126,8 +1191,9 @@ static hal_err_t ep_net_apply(const http_req_t *req, char *out, size_t out_cap,
     if (req->body && req->body_len > 0) {
         console_net_cfg_t cur;
         console_net_read(&cur);
-        /* 与已保存配置相同：不重启网络（否则无谓断网，DHCP 下还可能换地址） */
-        if (cur.dhcp == c.dhcp &&
+        /* 与已保存配置相同：不重启网络（否则无谓断网，DHCP 下还可能换地址）。
+         * mtu 未随本次提交（-1）或与已保存值一致，都算“没变”。 */
+        if (cur.dhcp == c.dhcp && (c.mtu == -1 || c.mtu == cur.mtu) &&
             (c.dhcp || (strcmp(cur.ip, c.ip) == 0 && strcmp(cur.mask, c.mask) == 0 &&
                         strcmp(cur.gw, c.gw) == 0 && strcmp(cur.dns, c.dns) == 0)))
             return fmt_safe(out, out_cap, "{\"code\":0,\"msg\":\"网络设置未变化\",\"new_ip\":\"%s\",\"unchanged\":true}",
@@ -1137,6 +1203,7 @@ static hal_err_t ep_net_apply(const http_req_t *req, char *out, size_t out_cap,
             (cfg_set_str("net.ip", c.ip) != HAL_OK || cfg_set_str("net.mask", c.mask) != HAL_OK ||
              cfg_set_str("net.gw", c.gw) != HAL_OK || cfg_set_str("net.dns", c.dns) != HAL_OK))
             return HAL_EIO;
+        if (c.mtu != -1 && cfg_set_int("net.mtu", c.mtu) != HAL_OK) return HAL_EIO;
     }
     rc = fmt_safe(out, out_cap, "{\"code\":0,\"msg\":\"网络设置即将生效\",\"new_ip\":\"%s\"}",
                   c.dhcp ? "" : c.ip);
@@ -1144,6 +1211,89 @@ static hal_err_t ep_net_apply(const http_req_t *req, char *out, size_t out_cap,
     *dfn = do_apply_net;
     *darg = NULL;
     return HAL_OK;
+}
+
+/* ---- 端口（PRD LC-NET-02）：HTTP 保存后立即重绑监听，RTSP 只落盘 ---- */
+
+#define CONSOLE_HTTP_DEFAULT_PORT 8080   /**< 与 app/main.c 的 DEFAULT_PORT 一致 */
+#define CONSOLE_RTSP_DEFAULT_PORT 554    /**< 与 profile protocols.rtsp.port 默认一致 */
+
+/* do_apply_port 要用的切换参数：端口是人手改的，同时只可能有一次在途切换 */
+static int s_port_new, s_port_old;
+
+/** 响应发出后（after_flush 回调，http_server 线程内）把重绑任务投给维护线程 */
+static void do_apply_port(void *arg)
+{
+    (void)arg;
+    if (console_maint_post_port(s_port_new, s_port_old) != HAL_OK)
+        LOGE(MOD, "端口切换任务投递失败：仍监听旧端口 %d", s_port_old);
+}
+
+/**
+ * POST /api/v1/system/port/apply：保存 HTTP/RTSP 端口（对齐实机「网络设置→端口」）。
+ * 请求体 {"http":int,"rtsp":int}（均需 1-65535）。
+ *  - 先做**占用预检**，把「端口被占用」挡在配置落盘之前；
+ *  - HTTP 端口变化 → 响应带 new_port，*dfn 在响应发出后投递重绑（维护线程
+ *    stop+start，失败回滚旧端口）；前端按 new_port 倒计时跳转；
+ *  - RTSP 只落盘：固件暂无 RTSP 服务，值供 RTSP 模块/平台后续使用。
+ * 响应：{"code":0,"msg":..,"new_port":N[,"unchanged":true]}
+ */
+static hal_err_t ep_port_apply(const http_req_t *req, char *out, size_t out_cap,
+                               void (**dfn)(void *), void **darg)
+{
+    json_t *j;
+    int64_t hv, rv, v;
+    int cur_http, cur_rtsp;
+
+    (void)darg;
+    if (!req->body || req->body_len <= 0) {
+        fmt_safe(out, out_cap, "{\"code\":-1,\"msg\":\"缺少请求体\"}");
+        return HAL_EINVAL;
+    }
+    j = json_parse(req->body, req->body_len, NULL, 0);
+    if (!j || !json_is(j, JSON_OBJECT)) {
+        json_free(j);
+        fmt_safe(out, out_cap, "{\"code\":-1,\"msg\":\"请求体不是合法 JSON\"}");
+        return HAL_EINVAL;
+    }
+    hv = json_int(json_get(j, "http"), -1);
+    rv = json_int(json_get(j, "rtsp"), -1);
+    json_free(j);
+    if (hv < 1 || hv > 65535) {
+        fmt_safe(out, out_cap, "{\"code\":-1,\"msg\":\"HTTP 端口需为 1-65535\"}");
+        return HAL_EINVAL;
+    }
+    if (rv < 1 || rv > 65535) {
+        fmt_safe(out, out_cap, "{\"code\":-1,\"msg\":\"RTSP 端口需为 1-65535\"}");
+        return HAL_EINVAL;
+    }
+
+    /* 当前值：HTTP 优先取**正在监听的端口**（开机 --port 可覆盖 cfg）；服务
+       未运行（单测桩）时退而取已保存配置，缺省 8080。RTSP 没有服务在跑，
+       以已保存配置为准（未写入按默认 554 比较）。 */
+    cur_http = (int)http_server_port();
+    if (cur_http <= 0)
+        cur_http = (cfg_get_int("port.http", &v) == HAL_OK) ? (int)v : CONSOLE_HTTP_DEFAULT_PORT;
+    cur_rtsp = (cfg_get_int("port.rtsp", &v) == HAL_OK) ? (int)v : CONSOLE_RTSP_DEFAULT_PORT;
+
+    if ((int)hv == cur_http && (int)rv == cur_rtsp)
+        return fmt_safe(out, out_cap,
+                        "{\"code\":0,\"msg\":\"端口未变化\",\"new_port\":%d,\"unchanged\":true}", cur_http);
+
+    if ((int)hv != cur_http && http_port_available((uint16_t)hv) != HAL_OK) {
+        fmt_safe(out, out_cap, "{\"code\":-1,\"msg\":\"HTTP 端口 %d 已被占用\"}", (int)hv);
+        return HAL_EINVAL;
+    }
+    if (cfg_set_int("port.http", hv) != HAL_OK) return HAL_EIO;
+    if (cfg_set_int("port.rtsp", rv) != HAL_OK) return HAL_EIO;
+
+    if ((int)hv != cur_http) {
+        s_port_new = (int)hv;
+        s_port_old = cur_http;
+        *dfn = do_apply_port;
+        return fmt_safe(out, out_cap, "{\"code\":0,\"msg\":\"端口即将生效\",\"new_port\":%d}", (int)hv);
+    }
+    return fmt_safe(out, out_cap, "{\"code\":0,\"msg\":\"端口已保存\",\"new_port\":%d}", (int)hv);
 }
 
 /** POST /api/v1/system/reboot。响应：{"code":0,"msg":"设备将重启"} */
@@ -1189,6 +1339,31 @@ static hal_err_t ep_system_reset(const http_req_t *req, char *out, size_t out_ca
     *dfn = do_reset;
     *darg = (void *)(intptr_t)keep_network;
     return HAL_OK;
+}
+
+/**
+ * POST /api/v1/system/config/reset：对齐实机「配置管理 → 恢复默认值 → 简单恢复」。
+ *
+ * 语义：把**除网络与管理员账号之外**的参数全部丢弃，回到 profile 默认值。
+ * 保留表的两条理由：net.* 不保留 → 恢复完设备就换地址、当前页面直接失联；
+ * localUser.* 不保留 → 用户把自己锁在门外（完全恢复本来就要重走激活，那是
+ * 另一个端点 /system/reset 的语义，两者刻意并存、不合并成带 scope 的端点——
+ * 差别正在"要不要重置账号与凭据"）。
+ *
+ * 不触发重启：多数键读取时即生效；被标 reboot_required 的键（net.* 五件套 + MTU）
+ * 恰好都在保留表里，因此也用不着重启。配置落盘与 PUT /api/v1/config 一样，
+ * 属于本模块"handler 内做一次性磁盘 I/O"的既有例外。
+ */
+static hal_err_t ep_config_reset(char *out, size_t out_cap)
+{
+    static const char *keep[] = {
+        "net.dhcp", "net.ip", "net.mask", "net.gw", "net.dns", "net.mtu",
+        "localUser.name", "localUser.password"
+    };
+    hal_err_t rc = cfg_reset(keep, sizeof(keep) / sizeof(keep[0]));
+    if (rc != HAL_OK) return rc;
+    LOGI(MOD, "配置管理：简单恢复已执行（网络与管理员账号保留）");
+    return fmt_safe(out, out_cap, "{\"code\":0,\"msg\":\"已恢复默认参数，网络与管理员账号保持不变\"}");
 }
 
 /* ==========================================================================
@@ -1257,6 +1432,638 @@ static hal_err_t ep_video_params(char *out, size_t out_cap)
     return rc;
 }
 
+/* ---- 图像参数（PRD 图像调节）：GET 读当前值，POST 部分更新。
+ *
+ * 字段名与配置键 image.* 的后缀一致，前端可直接与配置页共用一套命名。
+ * POST 采用「部分更新」：未出现的字段不动（HAL 契约里 -1 = 不修改），
+ * 因为界面上的滑块是逐个提交的，不能要求每次带上全部字段。 */
+
+static void image_fill_json(json_t *o, const hal_image_t *img)
+{
+    json_object_set(o, "brightness", json_new_int(img->brightness));
+    json_object_set(o, "contrast",   json_new_int(img->contrast));
+    json_object_set(o, "saturation", json_new_int(img->saturation));
+    json_object_set(o, "sharpness",  json_new_int(img->sharpness));
+    json_object_set(o, "hue",        json_new_int(img->hue));
+    json_object_set(o, "flip",       json_new_int(img->flip));
+    json_object_set(o, "mirror",     json_new_int(img->mirror));
+    /* 区域补偿：0/1，配置键 image.blc（本页唯一一个真接了后端的"补光设置"类项） */
+    json_object_set(o, "blc",        json_new_bool(img->backlight_comp != 0));
+}
+
+/** 曝光组/白平衡/补光组的"枚举 ↔ 字符串"映射。
+ *
+ * 这几个项**没有 HAL 读回入口**（hal_image_t 只有 set_image，没有对应的 get_ext），
+ * 所以 GET 一律以 **cfg** 为准——cfg 就是用户选择的持久源头，HAL 只是执行器。
+ * 这样做同时保证"保存后重启"回读一致：重启时 image_apply_cfg() 拿同一批 cfg
+ * 重新下发（见该函数注释：不回放的话界面会"保存成功但重启回默认"）。 */
+static const char *const IMG_EXPO_MODES[] = { "auto", "manual" };
+static const char *const IMG_FLICKERS[]   = { "off", "50hz", "60hz" };
+static const char *const IMG_AWB_MODES[]  = { "auto", "indoor", "outdoor" };
+static const char *const IMG_IR_MODES[]   = { "auto", "off", "on" };
+/* 日夜配置三态：与 cfg 键 image.daynight 的字符集、前端 camera.js 的 DN_TO_API
+   逐字一致，也必须与实机 dayNightMode 的三项一一对应（日夜通用/日夜定时切换/
+   日夜自动切换）。timed 目前只落 cfg —— HAL 只有 day/auto 两态（LEG-UI-13）。 */
+static const char *const IMG_DN_MODES[]   = { "common", "timed", "auto" };
+
+/** 按枚举表取 n 元组中的第 idx 个；越界/未知一律回第 0 个（= 默认档），不编造 */
+static const char *name_of(const char *const *tab, int n, int idx)
+{
+    return (idx >= 0 && idx < n) ? tab[idx] : tab[0];
+}
+
+/** 在枚举表里找 s 的下标；找不到回 -1 */
+static int idx_of(const char *const *tab, int n, const char *s)
+{
+    for (int i = 0; i < n; i++) if (strcmp(tab[i], s) == 0) return i;
+    return -1;
+}
+
+static hal_err_t ep_image_get(char *out, size_t out_cap)
+{
+    hal_image_t img;
+    json_t *root;
+    char *txt;
+    hal_err_t rc;
+
+    if (!image_ok()) return HAL_ENOTSUP;
+    if (hal()->video->get_image(&img) != HAL_OK) return HAL_EIO;
+
+    root = json_new_object();
+    if (!root) return HAL_ENOMEM;
+    json_object_set(root, "code", json_new_int(0));
+    image_fill_json(root, &img);
+    /* 中性值由后端告知：免得前端把 50 这种魔法数字再写一遍 */
+    json_object_set(root, "neutral", json_new_int(50));
+
+    /* 日夜与宽动态跟图像参数同页，一并返回，前端一次请求拿全 */
+    {
+        bool night = false;
+        hal_isp_mode_t isp = HAL_ISP_LINEAR;
+        char s[16];
+        int m = 2;   /* 出厂默认 auto（日夜自动切换），与 HAL 初值一致 */
+
+        /* daynight 以 **cfg 为准**，不从 HAL 读：三态里的 timed（日夜定时切换）
+           在 HAL 里根本没有对应状态，从 HAL 读回来只能得到 auto —— 界面会把
+           用户选的「日夜定时切换」显示成「日夜自动切换」，看着就是“没保存”。
+           HAL 只用来取“此刻是不是夜视”，供预览上的状态点用。 */
+        if (cfg_get_str("image.daynight", s, sizeof(s)) == HAL_OK) {
+            int i = idx_of(IMG_DN_MODES, 3, s);
+            if (i >= 0) m = i;
+        }
+        if (hal()->video->get_daynight) {
+            hal_daynight_t dn = HAL_DAYNIGHT_AUTO;
+            if (hal()->video->get_daynight(&dn, &night) == HAL_OK)
+                json_object_set(root, "night_now", json_new_bool(night));
+        }
+        json_object_set(root, "daynight", json_new_string(IMG_DN_MODES[m]));
+        if (hal()->video->get_isp_mode &&
+            hal()->video->get_isp_mode(&isp) == HAL_OK)
+            json_object_set(root, "wdr", json_new_bool(isp == HAL_ISP_WDR));
+    }
+
+    /* 图像页其它项：HAL 无读回入口，以 cfg 为准（见 IMG_EXPO_MODES 注释）。
+     * cfg 里没写过的键用**与 HAL 初值一致的默认档**：曝光 auto/0 档、防闪烁 off、
+     * 白平衡 auto、补光灯 auto/灵敏度 4/延迟 5。 */
+    {
+        char s[16];
+        int64_t iv;
+        int m = 0;
+
+        if (cfg_get_str("image.exposure.mode", s, sizeof(s)) == HAL_OK)
+            m = idx_of(IMG_EXPO_MODES, 2, s);
+        json_object_set(root, "exposure", json_new_string(name_of(IMG_EXPO_MODES, 2, m < 0 ? 0 : m)));
+
+        json_object_set(root, "exposure_level",
+            json_new_int(cfg_get_int("image.exposure.level", &iv) == HAL_OK ? (int)iv : 0));
+
+        m = 0;
+        if (cfg_get_str("image.antiflicker", s, sizeof(s)) == HAL_OK)
+            m = idx_of(IMG_FLICKERS, 3, s);
+        json_object_set(root, "antiflicker", json_new_string(name_of(IMG_FLICKERS, 3, m < 0 ? 0 : m)));
+
+        m = 0;
+        if (cfg_get_str("image.awb", s, sizeof(s)) == HAL_OK)
+            m = idx_of(IMG_AWB_MODES, 3, s);
+        json_object_set(root, "awb", json_new_string(name_of(IMG_AWB_MODES, 3, m < 0 ? 0 : m)));
+
+        m = 0;
+        if (cfg_get_str("image.ir.mode", s, sizeof(s)) == HAL_OK)
+            m = idx_of(IMG_IR_MODES, 3, s);
+        json_object_set(root, "ir_mode", json_new_string(name_of(IMG_IR_MODES, 3, m < 0 ? 0 : m)));
+
+        json_object_set(root, "ir_sensitivity",
+            json_new_int(cfg_get_int("image.ir.sensitivity", &iv) == HAL_OK ? (int)iv : 4));
+        json_object_set(root, "ir_delay",
+            json_new_int(cfg_get_int("image.ir.delay", &iv) == HAL_OK ? (int)iv : 5));
+    }
+
+    txt = json_dump(root, false);
+    json_free(root);
+    if (!txt) return HAL_ENOMEM;
+    rc = (strlen(txt) < out_cap) ? HAL_OK : HAL_ENOMEM;
+    if (rc == HAL_OK) strcpy(out, txt);
+    free(txt);
+    return rc;
+}
+
+static hal_err_t ep_image_set(const http_req_t *req, char *out, size_t out_cap)
+{
+    json_t *j;
+    hal_image_t img;
+    hal_err_t r;
+
+    if (!image_ok()) return HAL_ENOTSUP;
+    if (!req->body || req->body_len <= 0)
+        return fmt_safe(out, out_cap, "{\"code\":%d,\"msg\":\"请求体为空\"}", (int)HAL_EINVAL);
+
+    j = json_parse(req->body, req->body_len, NULL, 0);
+    if (!j || !json_is(j, JSON_OBJECT)) { json_free(j); return HAL_EINVAL; }
+
+    /* memset(-1)：本次未带上的字段一律"不改"（HAL 契约） */
+    memset(&img, -1, sizeof(img));
+#define IMG_TAKE(fld) do { json_t *n = json_get(j, #fld); if (n) img.fld = (int)json_int(n, -1); } while (0)
+    IMG_TAKE(brightness); IMG_TAKE(contrast); IMG_TAKE(saturation);
+    IMG_TAKE(sharpness);  IMG_TAKE(hue);
+    IMG_TAKE(flip);       IMG_TAKE(mirror);
+#undef IMG_TAKE
+    /* 区域补偿是**布尔**（前端开关发 true/false，cfg 也是 CFG_T_BOOL）：
+       不能走 IMG_TAKE 的 json_int——JSON true 会被读成兜底 -1（=不修改），
+       表现为"保存成功但值没变"。与下面 wdr 的读法保持一致。 */
+    {
+        json_t *blc = json_get(j, "blc");
+        if (blc) img.backlight_comp = json_bool(blc, false) ? 1 : 0;
+    }
+
+    /* 曝光组 / 白平衡 / 补光组：枚举传字符串、数值传整数（同 cfg 键的取值）。
+       越界**当场报错**——用户要知道是哪一项超了，不能靠 set_image 的通用 EINVAL。
+       `img_*` 临时变量在 set_image 之后写给 cfg（顺序：先下发后落盘，
+       与 daynight/wdr 一致，避免"cfg 已改但 HAL 拒了"的不一致态）。
+
+       ⚠️ “未提供”的哨兵必须用 **-999**，不能用 -1：exposure_level 的**合法**
+       范围就含 -1/-2/-3（实机 expLevelSel 是 -3..3），用 -1 当哨兵会把
+       "把曝光等级改成 -2" 当成"没传这个字段"而静默丢掉（写测试时当场踩到）。 */
+    int img_expo_mode = -1, img_expo_lvl = -999, img_flicker = -1;
+    int img_awb = -1, img_ir_mode = -1, img_ir_sens = -1, img_ir_delay = -1;
+    {
+        json_t *n;
+        const char *s;
+
+        if ((n = json_get(j, "exposure")) != NULL) {
+            s = json_string(n, NULL);
+            img_expo_mode = s ? idx_of(IMG_EXPO_MODES, 2, s) : -1;
+            if (img_expo_mode < 0) {
+                json_free(j);
+                return fmt_safe(out, out_cap, "{\"code\":%d,\"msg\":\"曝光模式只支持 auto/manual\"}",
+                                (int)HAL_EINVAL);
+            }
+            img.exposure_mode = img_expo_mode;
+        }
+        if ((n = json_get(j, "exposure_level")) != NULL) {
+            img_expo_lvl = (int)json_int(n, 999);
+            if (img_expo_lvl < -3 || img_expo_lvl > 3) {
+                json_free(j);
+                return fmt_safe(out, out_cap, "{\"code\":%d,\"msg\":\"曝光等级范围应为 -3~3\"}",
+                                (int)HAL_EINVAL);
+            }
+            img.exposure_level = img_expo_lvl;
+        }
+        if ((n = json_get(j, "antiflicker")) != NULL) {
+            s = json_string(n, NULL);
+            img_flicker = s ? idx_of(IMG_FLICKERS, 3, s) : -1;
+            if (img_flicker < 0) {
+                json_free(j);
+                return fmt_safe(out, out_cap, "{\"code\":%d,\"msg\":\"防闪烁只支持 off/50hz/60hz\"}",
+                                (int)HAL_EINVAL);
+            }
+            img.antiflicker = img_flicker;
+        }
+        if ((n = json_get(j, "awb")) != NULL) {
+            s = json_string(n, NULL);
+            img_awb = s ? idx_of(IMG_AWB_MODES, 3, s) : -1;
+            if (img_awb < 0) {
+                json_free(j);
+                return fmt_safe(out, out_cap, "{\"code\":%d,\"msg\":\"白平衡只支持 auto/indoor/outdoor\"}",
+                                (int)HAL_EINVAL);
+            }
+            img.awb_mode = img_awb;
+        }
+        if ((n = json_get(j, "ir_mode")) != NULL) {
+            s = json_string(n, NULL);
+            img_ir_mode = s ? idx_of(IMG_IR_MODES, 3, s) : -1;
+            if (img_ir_mode < 0) {
+                json_free(j);
+                return fmt_safe(out, out_cap, "{\"code\":%d,\"msg\":\"补光灯只支持 auto/off/on\"}",
+                                (int)HAL_EINVAL);
+            }
+            img.ir_mode = img_ir_mode;
+        }
+        if ((n = json_get(j, "ir_sensitivity")) != NULL) {
+            img_ir_sens = (int)json_int(n, 999);
+            if (img_ir_sens < 0 || img_ir_sens > 7) {
+                json_free(j);
+                return fmt_safe(out, out_cap, "{\"code\":%d,\"msg\":\"灵敏度范围应为 0~7\"}",
+                                (int)HAL_EINVAL);
+            }
+            img.ir_sensitivity = img_ir_sens;
+        }
+        if ((n = json_get(j, "ir_delay")) != NULL) {
+            img_ir_delay = (int)json_int(n, 999);
+            if (img_ir_delay < 5 || img_ir_delay > 60) {
+                json_free(j);
+                return fmt_safe(out, out_cap, "{\"code\":%d,\"msg\":\"切换延迟范围应为 5~60 秒\"}",
+                                (int)HAL_EINVAL);
+            }
+            img.ir_delay_s = img_ir_delay;
+        }
+    }
+
+    /* 日夜与宽动态：与图像参数同一端点提交。两者都可能因硬件缺失而不可用
+       （IRCUT 未映射 / sensor 不支持），ENOTSUP 如实上报而不是默默忽略。
+
+       ⚠️ 这一段**必须**排在下面 `set_image(&img)` 之前，且两者要能叠加：
+       夜视要去色（CSC 饱和度压到 0），而 set_image 恒用缓存里的 saturation
+       重算 CSC。两处各算各的就会"谁后调用谁赢"——2026-09-29 实测的真 bug：
+       切「夜晚」时 daynight_apply 刚写下去色，紧随其后的 set_image 立刻按
+       saturation=50 写回彩色，设备自报 night_now=true 而画面 chroma 纹丝不动
+       （31.5→31.6），用户侧看到的就是"调整日夜配置没有任何变化"。
+       现在 gk_video.c 用**同一个** csc_saturation() 计算，顺序先后都幂等。 */
+    {
+        json_t *dn = json_get(j, "daynight");
+        if (dn) {
+            const char *sv = json_string(dn, NULL);
+            int di = sv ? idx_of(IMG_DN_MODES, 3, sv) : -1;
+            if (di < 0) {
+                json_free(j);
+                return fmt_safe(out, out_cap,
+                    "{\"code\":%d,\"msg\":\"日夜配置只支持 common/timed/auto"
+                    "（日夜通用/日夜定时切换/日夜自动切换）\"}", (int)HAL_EINVAL);
+            }
+            /* 三态 → HAL：common 落到"不分昼夜、不切夜视"（DAY = 保持彩色），
+               auto 落到自动判定；**timed 在 HAL 里没有对应档**，需要时段表才
+               能实现，所以只记 cfg、不下发（遗留清单 LEG-UI-13）。 */
+            int hm = (di == 0) ? (int)HAL_DAYNIGHT_DAY
+                   : (di == 2) ? (int)HAL_DAYNIGHT_AUTO : -1;
+            if (hm >= 0 && hal()->video->set_daynight) {
+                hal_err_t e2 = hal()->video->set_daynight((hal_daynight_t)hm);
+                if (e2 != HAL_OK && e2 != HAL_ENOTSUP) { json_free(j); return e2; }
+            }
+            cfg_set_str("image.daynight", IMG_DN_MODES[di]);
+        }
+        if (json_get(j, "wdr")) {
+            bool on = json_bool(json_get(j, "wdr"), false);
+            if (hal()->video->set_isp_mode) {
+                hal_err_t e2 = hal()->video->set_isp_mode(on ? HAL_ISP_WDR : HAL_ISP_LINEAR);
+                if (e2 == HAL_ENOTSUP) {
+                    json_free(j);
+                    return fmt_safe(out, out_cap,
+                        "{\"code\":%d,\"msg\":\"本传感器不支持宽动态（线性 sensor 无多帧合成）\"}",
+                        (int)HAL_ENOTSUP);
+                }
+                if (e2 != HAL_OK) { json_free(j); return e2; }
+            }
+            cfg_set_bool("image.wdr", on);
+        }
+    }
+
+    json_free(j);
+
+    /* 亮度/对比度/饱和度/锐度/翻转交给 HAL，HAL 内部会做范围校验 */
+    r = hal()->video->set_image(&img);
+    if (r == HAL_EINVAL)
+        return fmt_safe(out, out_cap,
+                        "{\"code\":%d,\"msg\":\"参数超出范围（0-100，翻转/镜像 0-1，曝光等级 -3~3，灵敏度 0-7，切换延迟 5-60）\"}",
+                        (int)HAL_EINVAL);
+    if (r != HAL_OK) return r;
+
+    /* 落盘：参数已生效，写失败不影响本次响应（下次重启会回到旧值），但必须留痕 */
+    if (img.brightness >= 0 && cfg_set_int("image.brightness", img.brightness) != HAL_OK)
+        LOGW(MOD, "image.brightness 落盘失败");
+    if (img.contrast >= 0 && cfg_set_int("image.contrast", img.contrast) != HAL_OK)
+        LOGW(MOD, "image.contrast 落盘失败");
+    if (img.saturation >= 0 && cfg_set_int("image.saturation", img.saturation) != HAL_OK)
+        LOGW(MOD, "image.saturation 落盘失败");
+    if (img.sharpness >= 0 && cfg_set_int("image.sharpness", img.sharpness) != HAL_OK)
+        LOGW(MOD, "image.sharpness 落盘失败");
+    if (img.flip >= 0 && cfg_set_int("image.flip", img.flip) != HAL_OK)
+        LOGW(MOD, "image.flip 落盘失败");
+    if (img.mirror >= 0 && cfg_set_int("image.mirror", img.mirror) != HAL_OK)
+        LOGW(MOD, "image.mirror 落盘失败");
+    if (img.backlight_comp >= 0 && cfg_set_bool("image.blc", img.backlight_comp != 0) != HAL_OK)
+        LOGW(MOD, "image.blc 落盘失败");
+    /* 曝光组/白平衡/补光组：枚举按下标写回字符串（只用**直接下发的值**回写，
+       没传的项（-1）不动——否则一次部分提交会把其它项刷成默认档） */
+    if (img_expo_mode >= 0 && cfg_set_str("image.exposure.mode", IMG_EXPO_MODES[img_expo_mode]) != HAL_OK)
+        LOGW(MOD, "image.exposure.mode 落盘失败");
+    if (img_expo_lvl != -999 && cfg_set_int("image.exposure.level", img_expo_lvl) != HAL_OK)
+        LOGW(MOD, "image.exposure.level 落盘失败");
+    if (img_flicker >= 0 && cfg_set_str("image.antiflicker", IMG_FLICKERS[img_flicker]) != HAL_OK)
+        LOGW(MOD, "image.antiflicker 落盘失败");
+    if (img_awb >= 0 && cfg_set_str("image.awb", IMG_AWB_MODES[img_awb]) != HAL_OK)
+        LOGW(MOD, "image.awb 落盘失败");
+    if (img_ir_mode >= 0 && cfg_set_str("image.ir.mode", IMG_IR_MODES[img_ir_mode]) != HAL_OK)
+        LOGW(MOD, "image.ir.mode 落盘失败");
+    if (img_ir_sens >= 0 && cfg_set_int("image.ir.sensitivity", img_ir_sens) != HAL_OK)
+        LOGW(MOD, "image.ir.sensitivity 落盘失败");
+    if (img_ir_delay >= 0 && cfg_set_int("image.ir.delay", img_ir_delay) != HAL_OK)
+        LOGW(MOD, "image.ir.delay 落盘失败");
+
+    return fmt_safe(out, out_cap, "{\"code\":0,\"msg\":\"图像参数已生效\"}");
+}
+
+/* ---- 开机把 image.* 从 cfg 落实到 HAL（与 osd_apply_all 同一模式）。
+ *
+ * 没有这一步：保存只写 cfg，HAL 停在出厂默认，**重启后画面回默认、界面回读
+ * 也回默认**（实测：cfg 里 brightness=88/blc=true，重启后 HAL 回 50/false），
+ * 用户会认定“保存是假的”。
+ *
+ * 时机选在 console_api_init（模块启动、出流之前）是安全的：
+ *   · set_image / set_isp_mode 在未 open 时**只写缓存**，v_open 建通路后统一下发
+ *     （gk_video.c 明确写了这条契约，mock 则立即生效）；
+ *   · set_daynight 会先把 s_dn_mode 记下，此刻那次 daynight_apply 因 ISP 未起
+ *     会失败，但 v_open 会按 s_dn_mode 重放，所以这里不把失败当错误。
+ * auto 是 HAL 默认值，就不必白跑一次 set_daynight。 */
+static void image_apply_cfg(void)
+{
+    hal_image_t img;
+    int64_t v;
+    bool b;
+    char s[16];
+
+    if (!image_ok()) return;
+    /* memset(-1)：cfg 里没写过的键一律不动，保留 HAL 出厂默认 */
+    memset(&img, -1, sizeof(img));
+    if (cfg_get_int("image.brightness", &v) == HAL_OK) img.brightness = (int)v;
+    if (cfg_get_int("image.contrast",   &v) == HAL_OK) img.contrast   = (int)v;
+    if (cfg_get_int("image.saturation", &v) == HAL_OK) img.saturation = (int)v;
+    if (cfg_get_int("image.sharpness",  &v) == HAL_OK) img.sharpness  = (int)v;
+    if (cfg_get_int("image.flip",       &v) == HAL_OK) img.flip       = (int)v;
+    if (cfg_get_int("image.mirror",     &v) == HAL_OK) img.mirror     = (int)v;
+    if (cfg_get_bool("image.blc", &b) == HAL_OK) img.backlight_comp = b ? 1 : 0;
+    /* 图像页其它项（曝光组/白平衡/补光组）：同样只在 cfg 里有值时下发，
+       没设过就保留 HAL 初值。枚举值非法（键被外部手改）时按"不改"处理，
+       不让一个坏值把设备带进未知档位。 */
+    if (cfg_get_str("image.exposure.mode", s, sizeof(s)) == HAL_OK) {
+        int i = idx_of(IMG_EXPO_MODES, 2, s);
+        if (i >= 0) img.exposure_mode = i;
+    }
+    if (cfg_get_int("image.exposure.level", &v) == HAL_OK && v >= -3 && v <= 3)
+        img.exposure_level = (int)v;
+    if (cfg_get_str("image.antiflicker", s, sizeof(s)) == HAL_OK) {
+        int i = idx_of(IMG_FLICKERS, 3, s);
+        if (i >= 0) img.antiflicker = i;
+    }
+    if (cfg_get_str("image.awb", s, sizeof(s)) == HAL_OK) {
+        int i = idx_of(IMG_AWB_MODES, 3, s);
+        if (i >= 0) img.awb_mode = i;
+    }
+    if (cfg_get_str("image.ir.mode", s, sizeof(s)) == HAL_OK) {
+        int i = idx_of(IMG_IR_MODES, 3, s);
+        if (i >= 0) img.ir_mode = i;
+    }
+    if (cfg_get_int("image.ir.sensitivity", &v) == HAL_OK && v >= 0 && v <= 7)
+        img.ir_sensitivity = (int)v;
+    if (cfg_get_int("image.ir.delay", &v) == HAL_OK && v >= 5 && v <= 60)
+        img.ir_delay_s = (int)v;
+    if (hal()->video->set_image(&img) != HAL_OK)
+        LOGW(MOD, "开机落实 image.*（亮度/翻转/区域补偿/曝光/白平衡/补光）失败");
+
+    if (hal()->video->set_isp_mode && cfg_get_bool("image.wdr", &b) == HAL_OK) {
+        if (hal()->video->set_isp_mode(b ? HAL_ISP_WDR : HAL_ISP_LINEAR) != HAL_OK)
+            LOGW(MOD, "开机落实 image.wdr 失败");
+    }
+    if (hal()->video->set_daynight && cfg_get_str("image.daynight", s, sizeof(s)) == HAL_OK) {
+        /* common（日夜通用）= 不切夜视；auto = HAL 默认，不必白跑一次；
+           timed 需要时段表才能落实，本轮跳过（LEG-UI-13）。 */
+        if (strcmp(s, "common") == 0) {
+            if (hal()->video->set_daynight(HAL_DAYNIGHT_DAY) != HAL_OK)
+                LOGI(MOD, "开机落实 image.daynight=common：尚未出流，交给 v_open 重放");
+        }
+    }
+}
+
+#ifdef IPC_TESTING
+/** 测试桩：模拟“开机回放一次 image.*”（console_api_init 里那一步） */
+void console_api_test_image_apply_cfg(void) { image_apply_cfg(); }
+#endif
+
+/* ---- OSD 叠加（PRD 的 OSD 页）：配置落 osd.* 键，同时下发到 HAL。
+ *
+ * 两个固定项（通道名、时间）各占一个 HAL 区域；区域内只在**真的变了**时才
+ * 调 set_pos——那是一个 destroy+attach 的较重操作，每次提交都调会让 OSD 闪。 */
+
+#define OSD_POS_NAME 0
+#define OSD_POS_TIME 1
+
+static int   s_osd_id[2] = { -1, -1 };      /* region_id：[0]=通道名 [1]=时间 */
+static float s_osd_pos[2][2];               /* 已下发的归一化位置 */
+static bool  s_osd_pos_valid[2];
+static int   osd_scratch_int;               /* 宏用的暂存：避免在宏里重复解析 JSON 节点 */
+
+static bool osd_ok(void)
+{
+    return hal_has(HAL_MOD_OSD) && hal()->osd && hal()->osd->create_region &&
+           hal()->osd->update_text && hal()->osd->set_pos &&
+           hal()->osd->set_enable && hal()->osd->destroy_region;
+}
+
+/** 读 "osd.time.pos" 这类 JSON 二元组 [x,y]；缺失或非法就用传入的默认位置。
+ *  设备端只保证"是合法 JSON"（见 config.c 该键的注释），所以这里按最简形状解析，
+ *  解析不了就退回默认，不因为一个坐标把 OSD 整体关掉。 */
+static void osd_read_pos(const char *key, float *x, float *y, float def_x, float def_y)
+{
+    char buf[96];
+    const char *p;
+    float a, b;
+
+    *x = def_x;
+    *y = def_y;
+    if (cfg_get_str(key, buf, sizeof(buf)) != HAL_OK || buf[0] == '\0') return;
+    p = strchr(buf, '[');
+    if (!p) return;
+    if (sscanf(p, "[%f , %f", &a, &b) != 2) return;
+    if (a >= 0.0f && a <= 1.0f) *x = a;
+    if (b >= 0.0f && b <= 1.0f) *y = b;
+}
+
+/** 把一个固定叠加项按当前配置建/改/删。slot：OSD_POS_NAME / OSD_POS_TIME */
+static hal_err_t osd_apply_one(int slot, const char *enable_key, const char *pos_key,
+                               const char *font_key, hal_osd_kind_t kind,
+                               const char *text)
+{
+    const hal_osd_ops_t *o = hal()->osd;
+    hal_osd_cfg_t cfg;
+    bool en = false;
+    int font = 24, id;
+    float x, y;
+    hal_err_t e;
+
+    if (!osd_ok()) return HAL_ENOTSUP;
+    cfg_get_bool(enable_key, &en);
+    if (cfg_get_int(font_key, &font) != HAL_OK) font = 24;
+    if (font < 12) font = 12;
+    if (font > 72) font = 72;
+    osd_read_pos(pos_key, &x, &y, 0.02f, (kind == HAL_OSD_TEXT_TIME) ? 0.90f : 0.02f);
+
+    if (!en) {
+        if (s_osd_id[slot] >= 0) {
+            o->destroy_region(s_osd_id[slot]);
+            s_osd_id[slot] = -1;
+            s_osd_pos_valid[slot] = false;
+        }
+        return HAL_OK;
+    }
+
+    if (s_osd_id[slot] < 0) {
+        memset(&cfg, 0, sizeof(cfg));
+        cfg.kind = kind;
+        cfg.pos.x = x; cfg.pos.y = y;
+        cfg.font_px = (uint32_t)font;
+        cfg.color_argb = 0xFFFFFFFFu;      /* 白色，对齐实机默认 */
+        snprintf(cfg.text, sizeof(cfg.text), "%s", text);
+        id = -1;
+        e = o->create_region(0, &cfg, &id);
+        if (e != HAL_OK) return e;
+        s_osd_id[slot] = id;
+        s_osd_pos[slot][0] = x;
+        s_osd_pos[slot][1] = y;
+        s_osd_pos_valid[slot] = true;
+        return HAL_OK;
+    }
+
+    /* 已存在：文本每次都同步（通道名可能改过），位置只在变了才动 */
+    o->update_text(s_osd_id[slot], text);
+    if (!s_osd_pos_valid[slot] || s_osd_pos[slot][0] != x || s_osd_pos[slot][1] != y) {
+        hal_rect_t pos;
+        pos.x = x; pos.y = y; pos.w = 0.0f; pos.h = 0.0f;
+        if (o->set_pos(s_osd_id[slot], &pos) == HAL_OK) {
+            s_osd_pos[slot][0] = x;
+            s_osd_pos[slot][1] = y;
+            s_osd_pos_valid[slot] = true;
+        }
+    }
+    return HAL_OK;
+}
+
+/** 按当前配置重新落实所有 OSD 项（启动时与每次提交后各调一次） */
+static hal_err_t osd_apply_all(void)
+{
+    char name[64] = "IPC";
+
+    if (!osd_ok()) return HAL_ENOTSUP;
+    /* 设备名为空时给个固定串：整块空白在画面上看不出原因，用户会误判成
+       "OSD 没生效" */
+    if (cfg_get_str("device.name", name, sizeof(name)) != HAL_OK || name[0] == '\0')
+        snprintf(name, sizeof(name), "IPC");
+    osd_apply_one(OSD_POS_NAME, "osd.channelName.enable", "osd.channelName.pos",
+                  "osd.channelName.fontPx", HAL_OSD_TEXT, name);
+    /* 时间项：HAL 按 strftime 格式串每秒自刷新（见 hal_osd.h） */
+    osd_apply_one(OSD_POS_TIME, "osd.time.enable", "osd.time.pos",
+                  "osd.time.fontPx", HAL_OSD_TEXT_TIME, "%Y-%m-%d %H:%M:%S");
+    return HAL_OK;
+}
+
+static hal_err_t ep_osd_get(char *out, size_t out_cap)
+{
+    json_t *root;
+    char *txt;
+    char name[64] = "";
+    bool t_en = false, n_en = false;
+    int t_font = 24, n_font = 24;
+    float tx, ty, nx, ny;
+    hal_err_t rc;
+
+    if (!osd_ok()) return HAL_ENOTSUP;
+    cfg_get_bool("osd.time.enable", &t_en);
+    cfg_get_bool("osd.channelName.enable", &n_en);
+    if (cfg_get_int("osd.time.fontPx", &t_font) != HAL_OK) t_font = 24;
+    if (cfg_get_int("osd.channelName.fontPx", &n_font) != HAL_OK) n_font = 24;
+    osd_read_pos("osd.time.pos", &tx, &ty, 0.02f, 0.90f);
+    osd_read_pos("osd.channelName.pos", &nx, &ny, 0.02f, 0.02f);
+    cfg_get_str("device.name", name, sizeof(name));
+
+    root = json_new_object();
+    if (!root) return HAL_ENOMEM;
+    json_object_set(root, "code", json_new_int(0));
+    json_object_set(root, "time_enable", json_new_bool(t_en));
+    json_object_set(root, "time_font_px", json_new_int(t_font));
+    json_object_set(root, "time_x", json_new_int((int)(tx * 100.0f + 0.5f)));
+    json_object_set(root, "time_y", json_new_int((int)(ty * 100.0f + 0.5f)));
+    json_object_set(root, "name_enable", json_new_bool(n_en));
+    json_object_set(root, "name_font_px", json_new_int(n_font));
+    json_object_set(root, "name_x", json_new_int((int)(nx * 100.0f + 0.5f)));
+    json_object_set(root, "name_y", json_new_int((int)(ny * 100.0f + 0.5f)));
+    json_object_set(root, "name", json_new_string(name));
+
+    txt = json_dump(root, false);
+    json_free(root);
+    if (!txt) return HAL_ENOMEM;
+    rc = (strlen(txt) < out_cap) ? HAL_OK : HAL_ENOMEM;
+    if (rc == HAL_OK) strcpy(out, txt);
+    free(txt);
+    return rc;
+}
+
+/** 写一个 [x,y] 位置键（百分比：0~100，前端用整数百分比更好操作） */
+static void osd_write_pos(const char *key, int pct_x, int pct_y)
+{
+    char buf[64];
+    if (pct_x < 0) pct_x = 0;
+    if (pct_x > 100) pct_x = 100;
+    if (pct_y < 0) pct_y = 0;
+    if (pct_y > 100) pct_y = 100;
+    fmt_safe(buf, sizeof(buf), "[%.2f,%.2f]", (double)pct_x / 100.0, (double)pct_y / 100.0);
+    /* 这两个键登记为 CFG_T_JSON，必须走 cfg_set_json：用 cfg_set_str 会因类型
+     * 不符被拒（表现为"提交成功但回读还是默认位置"）。 */
+    cfg_set_json(key, buf);
+}
+
+static hal_err_t ep_osd_set(const http_req_t *req, char *out, size_t out_cap)
+{
+    json_t *j;
+
+    if (!osd_ok()) return HAL_ENOTSUP;
+    if (!req->body || req->body_len <= 0)
+        return fmt_safe(out, out_cap, "{\"code\":%d,\"msg\":\"请求体为空\"}", (int)HAL_EINVAL);
+
+    j = json_parse(req->body, req->body_len, NULL, 0);
+    if (!j || !json_is(j, JSON_OBJECT)) { json_free(j); return HAL_EINVAL; }
+#define OSD_TAKE_BOOL(fld, key) do { if (json_get(j, fld)) cfg_set_bool(key, json_bool(json_get(j, fld), false)); } while (0)
+#define OSD_TAKE_INT(fld, lo, hi) do { \
+        if (json_get(j, fld)) { \
+            int _v = (int)json_int(json_get(j, fld), lo); \
+            if (_v < (lo) || _v > (hi)) { json_free(j); \
+                return fmt_safe(out, out_cap, "{\"code\":%d,\"msg\":\"%s 超出范围 %d-%d\"}", \
+                                (int)HAL_EINVAL, fld, lo, hi); } \
+            osd_scratch_int = _v; \
+        } } while (0)
+    /* 逐字段可选：只提交变化的那几项（前端各控件各自提交） */
+    OSD_TAKE_BOOL("time_enable", "osd.time.enable");
+    OSD_TAKE_BOOL("name_enable", "osd.channelName.enable");
+
+    OSD_TAKE_INT("time_font_px", 12, 72);
+    if (json_get(j, "time_font_px")) cfg_set_int("osd.time.fontPx", osd_scratch_int);
+    OSD_TAKE_INT("name_font_px", 12, 72);
+    if (json_get(j, "name_font_px")) cfg_set_int("osd.channelName.fontPx", osd_scratch_int);
+#undef OSD_TAKE_BOOL
+#undef OSD_TAKE_INT
+
+    /* 位置：time_x/time_y 与 name_x/name_y 必须成对出现，否则只改一半会让
+       文字跑到奇怪的地方；成对时两个键一起写。 */
+    if (json_get(j, "time_x") && json_get(j, "time_y"))
+        osd_write_pos("osd.time.pos", (int)json_int(json_get(j, "time_x"), 2),
+                      (int)json_int(json_get(j, "time_y"), 90));
+    if (json_get(j, "name_x") && json_get(j, "name_y"))
+        osd_write_pos("osd.channelName.pos", (int)json_int(json_get(j, "name_x"), 2),
+                      (int)json_int(json_get(j, "name_y"), 2));
+
+    json_free(j);
+
+    if (osd_apply_all() != HAL_OK)
+        return fmt_safe(out, out_cap, "{\"code\":%d,\"msg\":\"OSD 下发失败\"}", (int)HAL_EIO);
+    return fmt_safe(out, out_cap, "{\"code\":0,\"msg\":\"OSD 设置已生效\"}");
+}
+
 /**
  * 响应：{"code":0,"present":..,"mounted":..,"mount_path":..,"fs":"exfat",
  *        "total_bytes":..,"free_bytes":..,"health":"ok","io_errors":0,
@@ -1317,8 +2124,8 @@ static hal_err_t ep_storage_info(char *out, size_t out_cap)
  * req->conn，也不调用 http_respond 系列或 http_conn_defer_after_flush——
  * 这样 console_api_test_dispatch 才能在没有真实/伪造连接的情况下驱动它。
  * 真正的 I/O 由 console_api_handler 在拿到结果之后统一做。
- * *dfn/*darg 非 NULL 表示该端点要求"响应发出后再执行"的动作（目前只有
- * 重启/恢复出厂两个端点会用到）。
+ * *dfn/*darg 非 NULL 表示该端点要求"响应发出后再执行"的动作（网络/端口应用、
+ * 重启、恢复出厂等，见各端点注释）。
  */
 static hal_err_t api_dispatch(const http_req_t *req, char *out, size_t out_cap,
                               void (**dfn)(void *), void **darg)
@@ -1349,14 +2156,34 @@ static hal_err_t api_dispatch(const http_req_t *req, char *out, size_t out_cap,
     }
     if (strcmp(req->path, "/api/v1/system/net/apply") == 0)
         return strcmp(req->method, "POST") == 0 ? ep_net_apply(req, out, out_cap, dfn, darg) : HAL_EINVAL;
+    if (strcmp(req->path, "/api/v1/system/port/apply") == 0)
+        return strcmp(req->method, "POST") == 0 ? ep_port_apply(req, out, out_cap, dfn, darg) : HAL_EINVAL;
     if (strcmp(req->path, "/api/v1/system/log") == 0)
         return strcmp(req->method, "GET") == 0 ? ep_system_log(req, out, out_cap) : HAL_EINVAL;
     if (strcmp(req->path, "/api/v1/system/reboot") == 0)
         return strcmp(req->method, "POST") == 0 ? ep_system_reboot(out, out_cap, dfn, darg) : HAL_EINVAL;
     if (strcmp(req->path, "/api/v1/system/reset") == 0)
         return strcmp(req->method, "POST") == 0 ? ep_system_reset(req, out, out_cap, dfn, darg) : HAL_EINVAL;
+    /* 配置管理（简单恢复）与网络诊断：见 ep_config_reset 与 console_maint.c */
+    if (strcmp(req->path, "/api/v1/system/config/reset") == 0)
+        return strcmp(req->method, "POST") == 0 ? ep_config_reset(out, out_cap) : HAL_EINVAL;
+    if (strcmp(req->path, "/api/v1/system/diag") == 0) {
+        if (strcmp(req->method, "GET") == 0) return console_maint_diag_state(out, out_cap);
+        if (strcmp(req->method, "POST") == 0) return console_maint_diag(req, out, out_cap);
+        return HAL_EINVAL;
+    }
     if (strcmp(req->path, "/api/v1/video/params") == 0)
         return strcmp(req->method, "GET") == 0 ? ep_video_params(out, out_cap) : HAL_EINVAL;
+    if (strcmp(req->path, "/api/v1/image/params") == 0) {
+        if (strcmp(req->method, "GET") == 0) return ep_image_get(out, out_cap);
+        if (strcmp(req->method, "POST") == 0) return ep_image_set(req, out, out_cap);
+        return HAL_EINVAL;
+    }
+    if (strcmp(req->path, "/api/v1/osd") == 0) {
+        if (strcmp(req->method, "GET") == 0) return ep_osd_get(out, out_cap);
+        if (strcmp(req->method, "POST") == 0) return ep_osd_set(req, out, out_cap);
+        return HAL_EINVAL;
+    }
     if (strcmp(req->path, "/api/v1/storage/info") == 0)
         return strcmp(req->method, "GET") == 0 ? ep_storage_info(out, out_cap) : HAL_EINVAL;
 
@@ -1423,6 +2250,12 @@ hal_err_t console_api_init(void)
 {
     hal_err_t e = console_api_register_rules();
     if (e != HAL_OK) return e;
+    /* 把已存的 OSD 配置落实一次：视频通路没起来时 HAL 会把区域先登记，
+       等首次 open 再真正建出来（见 gk_osd.c），所以这里不会因为
+       "此刻还没出流"而丢掉 OSD。 */
+    osd_apply_all();
+    /* 图像参数同理：不回放的话重启就回出厂默认（详见 image_apply_cfg 注释） */
+    image_apply_cfg();
     return http_route("/api/v1/", console_api_handler, NULL);
 }
 

@@ -2,14 +2,20 @@
  * @file gk_stub.c
  * @brief video 与 gpio 的 HAL_ENOTSUP 桩
  *
- * video 需对接 GOKE MPP 私有 SDK，gpio 需 pinmux 与 profile 引脚映射，
- * 两者均超出本里程碑范围（spec §1.2）。console 的每处调用都有 hal_has
- * 与函数指针双重判空，桩化不会导致崩溃，前端会显示"当前硬件不支持"。
+ * gpio 需 pinmux 与 profile 引脚映射，超出本里程碑范围。
+ * video 有两套实现，由构建时是否拿得到 GOKE MPP 决定：
+ *   - 拿不到 MPP（本机/MSVC 构建、只跑纯逻辑测试）：本文件的桩，全部
+ *     返回 HAL_ENOTSUP，前端显示"当前硬件不支持"；
+ *   - 拿得到 MPP（交叉编译到板子，CMake 传 -DIPC_MPP_DIR）：由
+ *     `gk_video.c` 提供真实实现，本文件里的 video 部分不参与编译
+ *     （IPC_HAVE_MPP 由 platform/gk7205v200/CMakeLists.txt 定义）。
  */
 #include "hal/hal.h"
 #include <string.h>
 
-/* ---- video ---- */
+/* ---- video（仅无 MPP 时提供桩）---- */
+
+#if !defined(IPC_HAVE_MPP)
 
 static hal_err_t v_open(void) { return HAL_ENOTSUP; }
 static hal_err_t v_close(void) { return HAL_ENOTSUP; }
@@ -88,34 +94,9 @@ const hal_video_ops_t gk_video_ops = {
     .lens_af_trigger = v_lens_af_trigger
 };
 
-/* ---- gpio ---- */
+#endif /* !IPC_HAVE_MPP */
 
-static hal_err_t g_get_mapped_mask(uint32_t *mask)
-{
-    if (!mask) return HAL_EINVAL;
-    *mask = 0;   /* 未映射任何引脚（profile 引脚映射超出本里程碑范围） */
-    return HAL_OK;
-}
-
-/* pinmux/引脚映射未实现：合法但未映射的引脚返回 HAL_ENOTSUP，
-   非法引脚（越界）返回 HAL_EINVAL——与 hal_gpio.h 的错误码契约一致，
-   也是 hal_conformance HAL-07 "invalid pin -> EINVAL" 要求的行为。 */
-static hal_err_t g_set(hal_gpio_pin_t pin, bool level) { (void)level; if (pin >= HAL_PIN_COUNT) return HAL_EINVAL; return HAL_ENOTSUP; }
-static hal_err_t g_get(hal_gpio_pin_t pin, bool *level) { if (pin >= HAL_PIN_COUNT || !level) return HAL_EINVAL; return HAL_ENOTSUP; }
-static hal_err_t g_pwm(hal_gpio_pin_t pin, uint32_t duty) { if (pin >= HAL_PIN_COUNT || duty > 100) return HAL_EINVAL; return HAL_ENOTSUP; }
-static hal_err_t g_read_adc(hal_gpio_pin_t pin, uint32_t *v) { if (pin >= HAL_PIN_COUNT || !v) return HAL_EINVAL; return HAL_ENOTSUP; }
-static hal_err_t g_wait_event(hal_key_event_t *evt, uint32_t timeout_ms)
-{
-    (void)timeout_ms;
-    if (!evt) return HAL_EINVAL;
-    return HAL_EAGAIN;   /* 无按键事件，非错误 */
-}
-
-const hal_gpio_ops_t gk_gpio_ops = {
-    .get_mapped_mask = g_get_mapped_mask,
-    .set = g_set,
-    .get = g_get,
-    .pwm = g_pwm,
-    .read_adc = g_read_adc,
-    .wait_event = g_wait_event
-};
+/* ---- gpio ----
+ * 真实实现在 gk_gpio.c（sysfs）。与 video 不同，它不依赖 MPP SDK，所以任何
+ * 构建都编译它——本机跑控制台时也走同一套逻辑，只是 sysfs 不存在时
+ * get_mapped_mask 会返回 0（所有引脚按未映射处理，调用方看到 ENOTSUP）。 */

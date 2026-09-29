@@ -2,13 +2,16 @@
  * @file console.c
  * @brief 本地 Web 管理端模块：生命周期、路由注册、错误响应
  *
- * 声明 threads=1：HTTP handler 本身仍复用 http_server 的事件循环线程、必须
- * 非阻塞；额外的 1 个线程是 console_net.c 的配网工作线程——`wifi_scan`/
- * `wifi_connect` 是阻塞调用，AP 网段的极简 DHCP 收发、配网失败 60 秒后
- * 重开 AP 的定时器也都需要一个不受 epoll 循环节奏约束的地方执行，
- * `core/event_bus.h` 没有任何定时/延迟执行设施，因此只能是一个独立线程
- * （resolution C）。由 console_start/console_stop 负责该线程的启停，
- * 见 console_net_start/console_net_stop。
+ * 声明 threads=2：HTTP handler 本身仍复用 http_server 的事件循环线程、必须
+ * 非阻塞；额外的 2 个线程是：
+ *  - console_net.c 的配网工作线程（`wifi_scan`/`wifi_connect` 是阻塞调用，
+ *    AP 网段的极简 DHCP 收发、配网失败 60 秒后重开 AP 的定时器也都需要一个
+ *    不受 epoll 循环节奏约束的地方执行，`core/event_bus.h` 没有任何定时/延迟
+ *    执行设施，因此只能是独立线程——resolution C）；
+ *  - console_maint.c 的维护工作线程（诊断要跑 ping/traceroute 子进程，定时
+ *    重启要按分钟节拍检查，同样不能进事件循环）。
+ * 由 console_start/console_stop 统一启停：console_net_start/console_net_stop、
+ * console_maint_start/console_maint_stop。
  */
 #include "console_internal.h"
 #include "core/module.h"
@@ -54,11 +57,17 @@ const char *console_err_msg(hal_err_t e)
     }
 }
 
-hal_err_t console_reply_err(http_conn_t *c, hal_err_t e)
+hal_err_t console_reply_err_msg(http_conn_t *c, hal_err_t e, const char *msg)
 {
     char body[256];
-    snprintf(body, sizeof(body), "{\"code\":%d,\"msg\":\"%s\"}", (int)e, console_err_msg(e));
+    snprintf(body, sizeof(body), "{\"code\":%d,\"msg\":\"%s\"}", (int)e,
+             (msg && msg[0]) ? msg : console_err_msg(e));
     return http_respond_json(c, console_http_status(e), body);
+}
+
+hal_err_t console_reply_err(http_conn_t *c, hal_err_t e)
+{
+    return console_reply_err_msg(c, e, NULL);
 }
 
 static bool console_enabled(void)
@@ -73,21 +82,41 @@ static hal_err_t console_init(void)
     if ((e = console_auth_init()) != HAL_OK) return e;
     if ((e = console_api_init()) != HAL_OK) return e;
     if ((e = console_net_init()) != HAL_OK) return e;
+    if ((e = console_maint_init()) != HAL_OK) return e;
+    if ((e = console_preview_init()) != HAL_OK) return e;
     /* 兜底路由最后注册，避免遮蔽上面的 API 路由 */
     if ((e = console_static_init()) != HAL_OK) return e;
     s_routes_registered = true;
     return HAL_OK;
 }
 
-/* 端口由 http_server 统一监听，本模块自身只需起停配网工作线程
+/* 端口由 http_server 统一监听，模块自身只起停两个工作线程：
+   配网（console_net.c）与维护（console_maint.c 的诊断/定时重启），
    （module.h 契约：init 不得起线程，start 才起线程——resolution C） */
 static hal_err_t console_start(void)
 {
+    hal_err_t e;
     /* 开机按已保存的设置启动 NTP；平台不支持或未启用都不影响控制台启动 */
     (void)console_apply_time();
-    return console_net_start();
+    e = console_net_start();
+    if (e != HAL_OK) return e;
+    e = console_maint_start();
+    if (e != HAL_OK) { (void)console_net_stop(); return e; }
+    e = console_preview_start();
+    if (e != HAL_OK) {
+        (void)console_maint_stop();
+        (void)console_net_stop();
+        return e;
+    }
+    return HAL_OK;
 }
-static hal_err_t console_stop(void)  { return console_net_stop(); }
+static hal_err_t console_stop(void)
+{
+    hal_err_t p = console_preview_stop();
+    hal_err_t a = console_maint_stop();
+    hal_err_t b = console_net_stop();
+    return p != HAL_OK ? p : (a != HAL_OK ? a : b);
+}
 static hal_err_t console_deinit(void) { s_routes_registered = false; return HAL_OK; }
 
 static hal_err_t console_health(char *detail, size_t cap)
@@ -106,7 +135,7 @@ const module_desc_t mod_console = {
     .name = "console",
     .version = 1,
     .deps = NULL,
-    .footprint = { .rss_kb_estimate = 64, .threads = 1 },   /* 1 个配网工作线程（console_net.c）；预览/回放队列在后续任务中计入，具体数值 Task 13 按实测回填 */
+    .footprint = { .rss_kb_estimate = 64, .threads = 3 },   /* 3 个工作线程：配网（console_net.c）+ 维护（console_maint.c：诊断/定时重启）+ 预览推流（console_preview.c）；预览/回放队列在后续任务中计入，具体数值 Task 13 按实测回填 */
     .enabled = console_enabled,
     .init = console_init,
     .start = console_start,

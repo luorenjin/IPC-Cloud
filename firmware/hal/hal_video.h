@@ -34,6 +34,35 @@ typedef enum {
     HAL_LENS_MOTORIZED = 1
 } hal_lens_type_t;
 
+/* ---- 图像页可调项的子枚举（都随 hal_image_t 一次下发） ----
+ * 为什么不各开一个 HAL op：这些项在 UI 上同属「画面显示 → 图像」一页、
+ * 由同一个 REST 端点一次提交，HAL 层没必要为每个控件加一个函数指针；
+ * 已有的 set_daynight / set_isp_mode 保留原样（它们是独立语义，且要读回状态）。 */
+
+typedef enum {
+    HAL_EXP_AUTO = 0,
+    HAL_EXP_MANUAL = 1
+} hal_exposure_mode_t;
+
+typedef enum {
+    HAL_FLICKER_OFF = 0,
+    HAL_FLICKER_50HZ = 1,
+    HAL_FLICKER_60HZ = 2
+} hal_antiflicker_t;
+
+typedef enum {
+    HAL_AWB_AUTO = 0,
+    HAL_AWB_INDOOR = 1,
+    HAL_AWB_OUTDOOR = 2
+} hal_awb_mode_t;
+
+/** 红外补光灯：自动 = 跟随日夜切换；关闭/常开 = 强制 */
+typedef enum {
+    HAL_IR_AUTO = 0,
+    HAL_IR_OFF = 1,
+    HAL_IR_ON = 2
+} hal_ir_mode_t;
+
 /** 编码通道配置 */
 typedef struct {
     hal_codec_t          codec;      /**< H264 / H265 / MJPEG */
@@ -58,7 +87,17 @@ typedef struct {
     int flip;      /**< 0/1，-1 不改 */
     int mirror;    /**< 0/1，-1 不改 */
     int denoise_3d; /**< 0~100 强度 */
-    int backlight_comp; /**< 0/1 */
+    int backlight_comp; /**< 0/1 区域补偿（背光补偿） */
+    /* ---- 以下不是 0~100 图像参数，而是「图像页」上同属一屏的其它项，
+     * 统一挂在这里随 set_image 一次下发（理由见上面 hal_exposure_mode_t 注释）。
+     * 全部遵守同一契约：**-1 = 不修改**，越界 = EINVAL。 ---- */
+    int exposure_mode;   /**< hal_exposure_mode_t */
+    int exposure_level;  /**< -3..3，AE 曝光补偿档位（0 = 基线） */
+    int antiflicker;     /**< hal_antiflicker_t */
+    int awb_mode;        /**< hal_awb_mode_t */
+    int ir_mode;         /**< hal_ir_mode_t */
+    int ir_sensitivity;  /**< 0..7，日夜自动切换灵敏度（越大越早切夜视） */
+    int ir_delay_s;      /**< 5..60，连续满足阈值多久才真的切（防抖） */
 } hal_image_t;
 
 /** 传感器信息 */

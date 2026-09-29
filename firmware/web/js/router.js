@@ -25,7 +25,8 @@
 
   /**
    * 子页 → 功能 ID：设备未上报 true 的入口不显示。
-   * network.ports / network.ftp 设备端尚无实现，永远不会上报，对应入口保持隐藏。
+   * network.ftp 设备端尚无实现、永远不会上报，对应入口保持隐藏；
+   * network.ports 已随端口页落地（port.* + POST /system/port/apply），设备会上报。
    */
   const SUB_FEAT = {
     画面显示: 'image.basic',
@@ -281,6 +282,10 @@
 
   function render() {
     const root = $('#root');
+    /* 换页前先断开旧预览：板端预览是单消费者，旧连接没断时新页面的连接会直接
+       拿到 409（表现为"切页回来预览是黑的"）。必须在这时断——旧 img 还在
+       DOM 里能拿到它的 stop 函数；等渲染完再断就和"新页面连流"撞一起了。 */
+    IPC.detachPreviews();
     root.innerHTML = '';
     /* 顶栏入口按能力过滤；当前页失效时回落到设置 */
     $$('.topnav button').forEach((b) => {
@@ -305,6 +310,9 @@
       renderSettings(root);
     }
     $$('.topnav button').forEach((b) => b.classList.toggle('on', b.dataset.top === S.top));
+    /* 预览放在 DOM 就位之后接：提前接的话 img 还没进文档，
+       attachPreview 的轮询会立刻判定“已被拆掉”并把连接收掉。 */
+    IPC.attachPreviews(root);
   }
 
   /** 登录后的落地页：预览可用进预览，否则进设置里第一个可见入口 */
@@ -321,15 +329,31 @@
     S.tab = DEFAULT_TAB[S.mod] || S.mod;
   }
 
+  /**
+   * 登录/激活失败提示：卡片内常驻（对齐实机 div.errMsg，位置 top:277px），
+   * 同时保留顶部 toast——`console_e2e.py` 的 E10 用例按 `#toast` 文本断言锁定提示。
+   */
+  function authErr(msg) {
+    const el = $('#auth-err');
+    if (!el) return;
+    el.textContent = msg || '';
+    el.hidden = !msg;
+  }
+
+  function authFail(msg) { authErr(msg); toast(msg); }
+
   function showAuth(mode) {
     $('#auth').hidden = false;
     $('#shell').hidden = true;
     const act = mode === 'activate';
     $('#f-activate').hidden = !act;
     $('#f-login').hidden = act;
-    $('#auth-h').textContent = act ? '欢迎使用' : '欢迎使用';
+    $('#auth-h').textContent = '欢迎使用';
     $('#auth-p').textContent = act ? '首次使用请设置管理密码' : '请登录以管理本机';
+    /* 登录页对齐实机：标题下不带副标题，仅激活页提示设置密码 */
+    $('#auth-p').hidden = !act;
     $('#forgot').hidden = act;
+    authErr('');
   }
 
   /** 进入控制台：拉能力清单，按 features 选第一个可见的入口 */
@@ -355,32 +379,47 @@
     $('#btn-help').onclick = () => toast('PRD：摄像机本地管理控制台PRD_v2.0');
     /* 机身 Reset 键长按恢复出厂尚未实现，这里不能承诺它 */
     $('#forgot').onclick = (e) => { e.preventDefault(); toast('忘记密码：请联系售后或通过串口维护恢复出厂'); };
+    /* 密码明文切换（对齐实机的眼睛图标） */
+    $$('.auth .eye').forEach((b) => {
+      b.onclick = () => {
+        const inp = b.parentNode.querySelector('input');
+        const show = inp.type === 'password';
+        inp.type = show ? 'text' : 'password';
+        b.classList.toggle('on', show);
+        b.title = show ? '隐藏密码' : '显示密码';
+        b.setAttribute('aria-label', b.title);
+      };
+    });
     if (!window.IPCCrypto || !IPCCrypto.selfTest()) {
       toast('浏览器加密自检失败，无法登录');
       return;
     }
+    /* 用户改动输入即清掉上一次的失败提示（对齐实机：改输后 errMsg 消失） */
+    $$('.auth input').forEach((i) => { i.oninput = () => authErr(''); });
     $('#f-activate').onsubmit = (e) => {
       e.preventDefault();
       const form = e.target;
+      authErr('');
       const fd = new FormData(form);
       const p1 = String(fd.get('p1') || '');
-      if (p1 !== fd.get('p2')) return toast('两次密码不一致');
+      if (p1 !== fd.get('p2')) return authFail('两次密码不一致');
       const bad = IPC.pwdError(p1);
-      if (bad) return toast(bad);
+      if (bad) return authFail(bad);
       busy(form, true);
       IPC.auth.activate(p1)
         .then(() => IPC.auth.login('admin', p1))
         .then(() => { toast('激活成功'); form.reset(); return enterShell(); })
-        .catch((err) => toast(err.message))
+        .catch((err) => authFail(err.message))
         .finally(() => busy(form, false));
     };
     $('#f-login').onsubmit = (e) => {
       e.preventDefault();
       const form = e.target;
+      authErr('');
       const fd = new FormData(form);
       const user = String(fd.get('u') || '').trim() || 'admin';
       const pwd = String(fd.get('p') || '');
-      if (!pwd) return toast('请输入密码');
+      if (!pwd) return authFail('请输入密码');
       busy(form, true);
       IPC.auth.login(user, pwd)
         .then((r) => {
@@ -388,7 +427,10 @@
           if (r && r.must_change_password) toast('请先修改初始密码');
           return enterShell();
         })
-        .catch((err) => toast(err.code === -100 || err.code === -101 ? '用户名或密码错误' : err.message))
+        /* -100/-101：设备端已在 /auth/{login,password} 把 HAL_EPERM_ 的文案改成
+           「用户名或密码错误」（原先复用强制改密的「无权限：请先修改初始密码」，
+           会误导）。此处仍按 code 兜底，兼容未升级的固件；-3 为按 IP 的失败锁定。 */
+        .catch((err) => authFail(err.code === -100 || err.code === -101 ? '用户名或密码错误' : err.message))
         .finally(() => busy(form, false));
     };
     /* 启动：未激活 → 激活页；已激活且会话有效（刷新页面）→ 直接进入；否则登录页 */

@@ -101,6 +101,11 @@ struct http_ws_state {
     /* 跨线程关闭请求：conn_close 限定只能在事件循环线程调用，而 http_ws_close
      * 可能来自任意线程，故这里只置位，由 http_ws_tick 代为执行真正的关闭。 */
     bool close_requested;
+
+    /* 连接销毁通知（http_ws_on_close）：给持有本连接指针的推送线程一个
+     * 安全清引用的时机，见 http_server.h 的声明注释。 */
+    http_ws_close_fn close_fn;
+    void            *close_user;
 };
 
 /** 已升级 WS 的连接登记表。add/remove/遍历三处都只在事件循环线程发生
@@ -730,6 +735,16 @@ hal_err_t http_ws_on_text(http_conn_t *c, http_ws_text_fn fn, void *user)
     return HAL_OK;
 }
 
+hal_err_t http_ws_on_close(http_conn_t *c, http_ws_close_fn fn, void *user)
+{
+    if (!c || !c->ws) return HAL_EINVAL;
+    os_mutex_lock(c->ws->mu);
+    c->ws->close_fn = fn;
+    c->ws->close_user = user;
+    os_mutex_unlock(c->ws->mu);
+    return HAL_OK;
+}
+
 hal_err_t http_ws_close(http_conn_t *c)
 {
     if (!c || !c->ws) return HAL_EINVAL;
@@ -817,6 +832,9 @@ void http_ws_flush(http_conn_t *c)
 
 void http_ws_conn_cleanup(http_conn_t *c)
 {
+    http_ws_close_fn fn = NULL;
+    void *user = NULL;
+
     /* #11：remove 提到判空之前——之前 "if (!c->ws) return;" 一旦命中会连带
      * 跳过 ws_registry_remove，把该连接指针错误地留在登记表里。当前不变量下
      * c->is_ws 为真时 c->ws 必非空，此调用点也只在 c->is_ws 为真时触发，故
@@ -824,8 +842,22 @@ void http_ws_conn_cleanup(http_conn_t *c)
      * 对不在表里的指针是安全的空操作，无条件调用没有副作用。 */
     ws_registry_remove(c);
     if (!c->ws) return;
+
+    /* 先把回调取出来（取时必须持 ws->mu，取完立刻释放），再销毁 ws，最后才
+     * 调用它：销毁之后 ws 那块内存已经没了。**回调里不能持着 ws->mu**——
+     * 调用方（推送线程）的锁序是“自己的锁 → ws->mu”（它要持着自己的锁调
+     * http_ws_send），若这里持着 ws->mu 去拿它的锁，就会形成反向锁序死锁。
+     * 这正是本文件顶部“临界区绝不调用调用方回调”那条约束的例外，也是它唯一
+     * 合法的例外：这里早已不在临界区内。 */
+    os_mutex_lock(c->ws->mu);
+    fn = c->ws->close_fn;
+    user = c->ws->close_user;
+    os_mutex_unlock(c->ws->mu);
+
     ws_state_destroy(c->ws);
     c->ws = NULL;
+
+    if (fn) fn(c, user);
 }
 
 void http_ws_tick(void)

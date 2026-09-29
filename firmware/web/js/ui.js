@@ -11,7 +11,7 @@
     const checked = (typeof v === 'boolean') ? v : (v === '开启' || v === '启 用');
     const el = h(`<div class="frow"><div class="lab">${label}</div>
       <label class="check" style="grid-template-columns:none;gap:10px">
-        <input type="checkbox" class="sw" ${checked ? 'checked' : ''}>
+        <input type="checkbox" class="sw" data-key="${key}" ${checked ? 'checked' : ''}>
         <span class="sw-lab">${checked ? onT : offT}</span>
       </label></div>`);
     const cb = el.querySelector('input.sw');
@@ -30,7 +30,7 @@
     const isBool = typeof cur === 'boolean';
     const norm = (v) => (v === true ? '开启' : v === false ? '关 闭' : String(v));
     const el = h(`<div class="frow"><div class="lab">${label}</div>
-      <select>${opts.map((o) => `<option ${norm(cur) === o || String(cur) === o ? 'selected' : ''}>${o}</option>`).join('')}</select>
+      <select data-key="${key}">${opts.map((o) => `<option ${norm(cur) === o || String(cur) === o ? 'selected' : ''}>${o}</option>`).join('')}</select>
       ${hint ? `<span class="unit">${hint}</span>` : ''}</div>`);
     el.querySelector('select').onchange = (e) => {
       const v = e.target.value;
@@ -41,8 +41,11 @@
   }
 
   function numRow(label, key, min, max, hint, labRight) {
+    /* data-key 必须有：页面插件靠 `input[data-key=<key>]` 找回控件做回填与下发
+       （rangeRow 一直有，numRow 早先漏了 → 曝光等级/灵敏度/切换延迟 三个数字框
+       既不下发也不回填，界面上“能改”、设备侧毫无反应）。 */
     const el = h(`<div class="frow"><div class="lab ${labRight ? 'r' : ''}">${label}</div>
-      <input type="number" min="${min}" max="${max}" value="${S[key]}">
+      <input type="number" data-key="${key}" min="${min}" max="${max}" value="${S[key]}">
       ${hint ? `<span class="unit">${hint}</span>` : ''}</div>`);
     el.querySelector('input').onchange = (e) => { S[key] = +e.target.value; };
     return el;
@@ -57,8 +60,8 @@
 
   function rangeRow(label, key) {
     const el = h(`<div class="range-row"><div class="lab">${label}</div>
-      <input type="range" min="0" max="100" value="${S[key]}">
-      <input type="number" class="narrow" value="${S[key]}" min="0" max="100"></div>`);
+      <input type="range" min="0" max="100" data-key="${key}" value="${S[key]}">
+      <input type="number" class="narrow" data-key="${key}" value="${S[key]}" min="0" max="100"></div>`);
     const r = el.querySelector('input[type=range]'), n = el.querySelector('input[type=number]');
     r.oninput = () => { S[key] = +r.value; n.value = r.value; };
     n.onchange = () => { let v = +n.value; v = Math.max(0, Math.min(100, v || 0)); S[key] = v; n.value = v; r.value = v; };
@@ -323,19 +326,54 @@
     if (root.matches && root.matches('td[data-h]')) root.className = '';
   }
 
+  /**
+   * 抓图（浏览器本地）：从 <video>（主码流 MSE）或 <img>（子码流 MJPEG）抓当前帧
+   * → 下载到本机。板端没有抓图执行端点（LEG-FW-12），与预览页同一结论：存用户
+   * 电脑，**与 TF 卡无关**。图像 / OSD / 区域覆盖三个页签共用这一份，避免三处重复。
+   * @param {Element} src video 或 img
+   */
+  function snapFrom(src) {
+    const w = src && (src.videoWidth || src.naturalWidth);
+    const hh = src && (src.videoHeight || src.naturalHeight);
+    const ready = src && (src.tagName === 'VIDEO'
+      ? (src.readyState >= 2 && src.videoWidth > 1)
+      : src.naturalWidth > 1);
+    if (!w || !hh || !ready) return toast('画面尚未就绪');
+    const canvas = document.createElement('canvas');
+    canvas.width = w; canvas.height = hh;
+    try { canvas.getContext('2d').drawImage(src, 0, 0, w, hh); }
+    catch (e) { return toast('抓图失败：画面不可读取（' + e.name + '）'); }
+    canvas.toBlob((blob) => {
+      if (!blob) return toast('抓图失败');
+      const url = URL.createObjectURL(blob);
+      const p = (n) => (n < 10 ? '0' : '') + n, d = new Date();
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `snap_${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}.jpg`;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 4000);
+      toast('已保存抓图');
+    }, 'image/jpeg', 0.92);
+  }
+
+  /**
+   * 页内实时预览块。**预览默认主码流**（用户 2026-09-29 指定，图像/OSD/区域覆盖
+   * 三页一致）：主码流是 H.264 裸流，必须用 <video> + MSE 播（core.js 的
+   * data-preview-h264 接流），<img> 只吃得了子码流的 MJPEG。
+   * 靠右的抓图按钮照实机 .lineConfMenu，点一下走 snapFrom 存本机。
+   */
   function livePreviewBlock(withToolbar) {
+    const vid = (id) => `<div class="video-box">` +
+      `<video ${id ? `id="${id}" ` : ''}data-preview-h264="/ws/v1/preview?stream=main" muted playsinline></video></div>`;
     const snap = `<button class="snap-btn" type="button" title="抓图">
       <svg width="18" height="18" viewBox="0 0 24 24"><rect x="3.5" y="7.5" width="17" height="12" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.6"/><circle cx="12" cy="13.5" r="3" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M8 7.5 9.2 5.5h5.6L16 7.5" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>
     </button>`;
-    if (withToolbar) {
-      return h(`<div class="live-block" style="width:720px;max-width:100%">
-        <div class="video-box"><img src="assets/preview-still.jpg" alt="预览"></div>
-        <div class="mirror-bar" style="justify-content:flex-end">${snap}</div>
-      </div>`);
-    }
-    return h(`<div class="live-block" style="width:720px;max-width:100%">
-      <div class="video-box"><img src="assets/preview-still.jpg" alt="预览"></div>
-    </div>`);
+    const wrap = h(withToolbar
+      ? `<div class="live-block" style="width:720px;max-width:100%">${vid()}<div class="mirror-bar" style="justify-content:flex-end">${snap}</div></div>`
+      : `<div class="live-block" style="width:720px;max-width:100%">${vid()}</div>`);
+    const btn = wrap.querySelector('.snap-btn');
+    if (btn) btn.onclick = () => snapFrom(wrap.querySelector('video'));
+    return wrap;
   }
 
   /** 对齐实机：报警音 / 提示音在前，再是预置话术 */
@@ -468,7 +506,7 @@
   IPC.ui = {
     switchRow, selRow, numRow, textRow, rangeRow, chkRow, saveRow,
     sec, collapsible, innerTabs, weekGrid, clearPlan,
-    livePreviewBlock, alarmNodes, SND_LIST, bindEventGate,
+    livePreviewBlock, snapFrom, alarmNodes, SND_LIST, bindEventGate,
     tfGate, tfEmpty
   };
 })(window.IPC);

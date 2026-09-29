@@ -81,8 +81,9 @@ typedef struct hal_sys_ops {
 
     /* ---- 以下为可选能力（NULL 表示平台不支持），追加在末尾以保持位置初始化兼容 ---- */
 
-    /** 应用有线网络。static_ip 为空串表示 DHCP；调用后网卡地址可能改变。 */
-    hal_err_t (*apply_net)(const char *static_ip, const char *mask, const char *gw, const char *dns);
+    /** 应用有线网络。static_ip 为空串表示 DHCP；调用后网卡地址可能改变。
+     *  mtu 为字节：>0 设置接口 MTU，0 表示保持系统默认（平台不处理）。 */
+    hal_err_t (*apply_net)(const char *static_ip, const char *mask, const char *gw, const char *dns, int mtu);
     /** 启停 NTP 同步。server 为空串表示停止。 */
     hal_err_t (*apply_ntp)(const char *server);
     /** 读系统墙钟（UTC 秒）。 */

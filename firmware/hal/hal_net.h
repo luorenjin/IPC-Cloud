@@ -4,7 +4,10 @@
  *
  * WiFi 在 HAL 层通用：Linux 目标统一基于 nl80211 + wpa_supplicant 控制接口实现，
  * 模块差异（内核驱动、固件 blob、上电 GPIO）下沉到 BSP 与 profile，本接口不区分模块。
- * IP 层配置（DHCP/静态 IP/DNS）由 core 网络管理器通过标准系统接口完成，不在 HAL 内。
+ * IP 层配置（DHCP/静态 IP/DNS）的**写入**由 core 网络管理器经标准系统接口完成，
+ * 不在 HAL 内；但配置生效后的**运行期读取**（快速诊断要展示的掩码/网关/DNS/MTU）
+ * 只有平台读得到 OS，故由 get_status 一并回报——它是“网卡此刻的真实值”，
+ * 与 cfg 里的配置值是两回事（配了静态但还没应用时两者不同）。
  */
 #ifndef IPC_HAL_NET_H
 #define IPC_HAL_NET_H
@@ -66,6 +69,14 @@ typedef struct {
     uint32_t         freq_mhz;
     /* 以太网专用 */
     uint32_t         speed_mbps;
+    /* ---- 以下为 v1.3 追加的运行期 IPv4 参数（快速诊断 / 网络状态展示）----
+     * 与 ip 同一约定：**未知就给空串 / 0**，调用方不得对空串做进一步解析，
+     * 也不得拿 cfg 里的配置值来顶替（配置未应用时两者不一致）。
+     * 追加在结构体末尾：既有平台整块 memset 后逐字段赋值，加在末尾不破坏偏移。 */
+    char             mask[HAL_IP_MAX];   /**< 子网掩码，点分十进制；未知为空串 */
+    char             gw[HAL_IP_MAX];     /**< 默认网关；未知为空串 */
+    char             dns[HAL_IP_MAX];    /**< 主 DNS；未知为空串 */
+    uint32_t         mtu;                /**< MTU（字节）；未知为 0 */
 } hal_netif_status_t;
 
 typedef struct {

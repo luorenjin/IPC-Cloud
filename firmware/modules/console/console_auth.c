@@ -1748,7 +1748,23 @@ static int console_auth_handler(http_req_t *req, void *user)
 
     (void)user;
     rc = auth_dispatch(req, NULL, body, sizeof(body), cookie, sizeof(cookie));
-    if (rc != HAL_OK) return console_reply_err(req->conn, rc);
+    if (rc != HAL_OK) {
+        /*
+         * 凭据校验失败（登录口令错、改密时旧口令/proof 不符）复用 HAL_EPERM_，
+         * 而它的默认文案是「无权限：请先修改初始密码」——那是强制改密拦截专用的
+         * 一句话，套在登录失败上会让用户以为自己没设过密码。此处按端点换成
+         * 准确说法；状态码与 code 不变，前端/测试按 code 判定的逻辑不受影响。
+         */
+        if (rc == HAL_EPERM_ && strncmp(req->path, CONSOLE_AUTH_PREFIX,
+                                        sizeof(CONSOLE_AUTH_PREFIX) - 1) == 0) {
+            const char *sub = req->path + sizeof(CONSOLE_AUTH_PREFIX) - 1;
+            if (strcmp(sub, "login") == 0)
+                return console_reply_err_msg(req->conn, rc, "用户名或密码错误");
+            if (strcmp(sub, "password") == 0)
+                return console_reply_err_msg(req->conn, rc, "旧密码错误或校验未通过");
+        }
+        return console_reply_err(req->conn, rc);
+    }
 
     if (cookie[0]) {
         char extra[256];

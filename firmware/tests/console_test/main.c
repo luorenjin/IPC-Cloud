@@ -1174,6 +1174,205 @@ static void test_capabilities_endpoint(void)
 }
 
 /**
+ * 图像页「区域补偿」真链路：GET/POST /api/v1/image/params 的 blc ↔
+ * hal_image_t.backlight_comp ↔ 配置键 image.blc。
+ * 键名在三处键表里必须逐字一致，写错不会报错、只会进 rejected 或被静默忽略，
+ * 所以这里用「写 → 读 cfg → 回读响应」三段钉住整条链。
+ */
+static void test_image_blc(void)
+{
+    http_req_t req;
+    char body[4096];
+    char cookie[128];
+    bool must_change = false;
+    bool on = false;
+    int64_t lv = 0;
+
+    SECTION("图像参数 blc（区域补偿）");
+    CHECK(cfg_init(NULL, "console_test_cfg_img.json") == HAL_OK, "配置中心就绪");
+    CHECK(console_api_register_rules() == HAL_OK, "登记规则");
+    console_auth_reset_lockout();
+    CHECK(console_auth_seed("ABCD1234", NULL, true) == HAL_OK, "播种凭据");
+    CHECK(console_auth_set_password("ABCD1234", "NewPass@123") == HAL_OK, "改密解除强制改密");
+    CHECK(do_login("admin", "NewPass@123", "192.168.70.13", cookie, sizeof(cookie), &must_change) == HAL_OK,
+          "登录成功");
+
+    req_make(&req, "GET", "/api/v1/image/params", NULL, cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "GET 图像参数成功");
+    CHECK(strstr(body, "\"blc\"") != NULL, "响应含 blc 字段，实际：%.240s", body);
+
+    req_make(&req, "POST", "/api/v1/image/params", "{\"blc\":true}", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "POST blc=true 成功");
+    CHECK(cfg_get_bool("image.blc", &on) == HAL_OK && on, "image.blc 落盘为 true");
+    req_make(&req, "GET", "/api/v1/image/params", NULL, cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "回读成功");
+    CHECK(strstr(body, "\"blc\":true") != NULL, "回读为 true，实际：%.240s", body);
+
+    /* 关回去，不给后续测试留脏状态 */
+    req_make(&req, "POST", "/api/v1/image/params", "{\"blc\":false}", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "POST blc=false 成功");
+    CHECK(cfg_get_bool("image.blc", &on) == HAL_OK && !on, "image.blc 落盘为 false");
+
+    /* 开机回放：cfg 有值而 HAL 还停在出厂默认时，image_apply_cfg 要把值推下去。
+       没有它，保存只能撑到下次重启（真机实测：cfg=88/true → 重启后 HAL=50/false）。 */
+    CHECK(cfg_set_int("image.brightness", 77) == HAL_OK, "写 cfg image.brightness=77");
+    console_api_test_image_apply_cfg();
+    req_make(&req, "GET", "/api/v1/image/params", NULL, cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "回放后读取");
+    CHECK(strstr(body, "\"brightness\":77") != NULL, "回放后亮度=77，实际：%.240s", body);
+    /* 复位，别把 mock 的 HAL 状态留给后续测试 */
+    CHECK(cfg_set_int("image.brightness", 50) == HAL_OK, "复位 cfg 亮度");
+    console_api_test_image_apply_cfg();
+
+    /* ---- 曝光组 / 白平衡 / 补光组：枚举与数值项都要能真落地（PRD LC-IMG-04/05/07） ---- */
+    req_make(&req, "POST", "/api/v1/image/params",
+             "{\"exposure\":\"manual\",\"exposure_level\":-2,\"antiflicker\":\"60hz\","
+             "\"awb\":\"outdoor\",\"ir_mode\":\"on\",\"ir_sensitivity\":6,\"ir_delay\":20}", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "成组下发成功");
+    CHECK(cfg_get_int("image.exposure.level", &lv) == HAL_OK && lv == -2, "曝光等级落盘 -2");
+    CHECK(cfg_get_int("image.ir.delay", &lv) == HAL_OK && lv == 20, "切换延迟落盘 20");
+    {
+        char sv[16];
+        CHECK(cfg_get_str("image.exposure.mode", sv, sizeof(sv)) == HAL_OK && strcmp(sv, "manual") == 0,
+              "曝光模式落盘 manual");
+        CHECK(cfg_get_str("image.antiflicker", sv, sizeof(sv)) == HAL_OK && strcmp(sv, "60hz") == 0,
+              "防闪烁落盘 60hz");
+        CHECK(cfg_get_str("image.awb", sv, sizeof(sv)) == HAL_OK && strcmp(sv, "outdoor") == 0,
+              "白平衡落盘 outdoor");
+        CHECK(cfg_get_str("image.ir.mode", sv, sizeof(sv)) == HAL_OK && strcmp(sv, "on") == 0,
+              "补光灯落盘 on");
+    }
+    /* HAL 侧也要真收到（只写 cfg 不改硬件 = 假保存） */
+    {
+        hal_image_t rd;
+        memset(&rd, 0, sizeof(rd));
+        CHECK(hal()->video->get_image(&rd) == HAL_OK, "读 HAL 图像参数");
+        CHECK(rd.exposure_level == -2 && rd.antiflicker == HAL_FLICKER_60HZ &&
+              rd.awb_mode == HAL_AWB_OUTDOOR && rd.ir_sensitivity == 6 && rd.ir_delay_s == 20,
+              "HAL 收到全部新项（lvl=%d flicker=%d awb=%d sens=%d delay=%d）",
+              rd.exposure_level, rd.antiflicker, rd.awb_mode, rd.ir_sensitivity, rd.ir_delay_s);
+    }
+    /* 回读响应也要带上这些字段（前端靠它回填，缺了就会出现"设备是手动、界面显示自动"） */
+    req_make(&req, "GET", "/api/v1/image/params", NULL, cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "回读新项");
+    CHECK(strstr(body, "\"exposure\":\"manual\"") != NULL, "回读曝光模式，实际：%.360s", body);
+    CHECK(strstr(body, "\"antiflicker\":\"60hz\"") != NULL, "回读防闪烁");
+    CHECK(strstr(body, "\"awb\":\"outdoor\"") != NULL, "回读白平衡");
+    CHECK(strstr(body, "\"ir_mode\":\"on\"") != NULL, "回读补光灯");
+    CHECK(strstr(body, "\"ir_sensitivity\":6") != NULL, "回读灵敏度");
+    CHECK(strstr(body, "\"ir_delay\":20") != NULL, "回读切换延迟");
+
+    /* ---- 日夜配置三态（common/timed/auto，选项逐字对齐实机 dayNightMode）----
+       两个容易写错的点：
+         ① timed（日夜定时切换）在 HAL 里没有对应档，必须只落 cfg、**不动 HAL**，
+            否则"选了定时切换"会静默变成别的档；
+         ② GET 必须以 cfg 为准回报 timed，否则界面会把用户的选择显示成
+            「日夜自动切换」，看着就是"没保存"。 */
+    {
+        hal_daynight_t dn = HAL_DAYNIGHT_AUTO;
+        bool night = false;
+        char sv[16];
+
+        /* 废弃值与垃圾值都要被拒（旧 day/night 两档已随实机对齐移除） */
+        req_make(&req, "POST", "/api/v1/image/params", "{\"daynight\":\"day\"}", cookie);
+        CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "旧值 day 仍 200");
+        CHECK(strstr(body, "日夜配置") != NULL, "旧值 day 被拒并给出原因，实际：%.160s", body);
+
+        /* common → HAL 收到 DAY（不分昼夜、不切夜视） */
+        req_make(&req, "POST", "/api/v1/image/params", "{\"daynight\":\"common\"}", cookie);
+        CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "下发 common");
+        CHECK(hal()->video->get_daynight(&dn, &night) == HAL_OK && dn == HAL_DAYNIGHT_DAY,
+              "common 落到 HAL_DAYNIGHT_DAY（实际 %d）", (int)dn);
+
+        /* timed → cfg 记账，HAL 停在上一档 */
+        req_make(&req, "POST", "/api/v1/image/params", "{\"daynight\":\"timed\"}", cookie);
+        CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "下发 timed");
+        CHECK(cfg_get_str("image.daynight", sv, sizeof(sv)) == HAL_OK && strcmp(sv, "timed") == 0,
+              "timed 落盘 cfg");
+        CHECK(hal()->video->get_daynight(&dn, &night) == HAL_OK && dn == HAL_DAYNIGHT_DAY,
+              "timed 不改 HAL（仍是上一档 %d）", (int)dn);
+        req_make(&req, "GET", "/api/v1/image/params", NULL, cookie);
+        CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "回读 timed");
+        CHECK(strstr(body, "\"daynight\":\"timed\"") != NULL,
+              "回读以 cfg 为准报 timed，实际：%.300s", body);
+
+        /* auto → HAL 回自动判定 */
+        req_make(&req, "POST", "/api/v1/image/params", "{\"daynight\":\"auto\"}", cookie);
+        CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "下发 auto");
+        CHECK(hal()->video->get_daynight(&dn, &night) == HAL_OK && dn == HAL_DAYNIGHT_AUTO,
+              "auto 落到 HAL_DAYNIGHT_AUTO（实际 %d）", (int)dn);
+
+        /* 开机回放：cfg=common 时必须推 DAY（不回放就"保存成功、重启回默认"） */
+        CHECK(cfg_set_str("image.daynight", "common") == HAL_OK, "写 cfg daynight=common");
+        CHECK(hal()->video->set_daynight(HAL_DAYNIGHT_AUTO) == HAL_OK, "先把 HAL 复位成 auto");
+        console_api_test_image_apply_cfg();
+        CHECK(hal()->video->get_daynight(&dn, &night) == HAL_OK && dn == HAL_DAYNIGHT_DAY,
+              "回放 common 后 HAL=DAY（实际 %d）", (int)dn);
+        /* timed 在回放里同样不动 HAL（避免被当成某个已知档下发） */
+        CHECK(cfg_set_str("image.daynight", "timed") == HAL_OK, "写 cfg daynight=timed");
+        CHECK(hal()->video->set_daynight(HAL_DAYNIGHT_AUTO) == HAL_OK, "再把 HAL 复位成 auto");
+        console_api_test_image_apply_cfg();
+        CHECK(hal()->video->get_daynight(&dn, &night) == HAL_OK && dn == HAL_DAYNIGHT_AUTO,
+              "回放 timed 后 HAL 仍是 auto（实际 %d）", (int)dn);
+        /* 复位，别把状态留给后续用例 */
+        CHECK(cfg_set_str("image.daynight", "auto") == HAL_OK, "复位 cfg daynight=auto");
+    }
+
+    /* 部分提交（只动亮度）不能把其它项刷成默认档：这是最容易写错的一处——
+       若回写 cfg 时不判 -1，一次滑杆拖动就会把刚设好的曝光/补光灯全清掉。 */
+    req_make(&req, "POST", "/api/v1/image/params", "{\"brightness\":66}", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "只提交亮度");
+    {
+        char sv[16];
+        CHECK(cfg_get_str("image.exposure.mode", sv, sizeof(sv)) == HAL_OK && strcmp(sv, "manual") == 0,
+              "部分提交后曝光模式仍是 manual");
+        CHECK(cfg_get_int("image.ir.delay", &lv) == HAL_OK && lv == 20, "部分提交后切换延迟仍是 20");
+    }
+
+    /* 越界与非法枚举必须被拒（不能静默吞掉）。
+       注意本端点的拒绝约定：**HTTP 200 + body 里带非零 code 与具体 msg**
+       （ep_image_set 一直用 fmt_safe 写 body 并返回 HAL_OK，与 net/apply
+       那种“返回错误码”的写法不同）——所以这里断言 body 的内容，
+       断言返回码会误报。前端 IPC.api 只看 body 的 code，能正常报错。 */
+    req_make(&req, "POST", "/api/v1/image/params", "{\"exposure_level\":4}", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "越界曝光等级仍 200");
+    CHECK(strstr(body, "曝光等级") != NULL, "越界曝光等级给出原因，实际：%.160s", body);
+    req_make(&req, "POST", "/api/v1/image/params", "{\"ir_sensitivity\":8}", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "越界灵敏度仍 200");
+    CHECK(strstr(body, "灵敏度") != NULL, "越界灵敏度给出原因，实际：%.160s", body);
+    req_make(&req, "POST", "/api/v1/image/params", "{\"ir_delay\":4}", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "越界切换延迟仍 200");
+    CHECK(strstr(body, "切换延迟") != NULL, "越界切换延迟给出原因，实际：%.160s", body);
+    req_make(&req, "POST", "/api/v1/image/params", "{\"awb\":\"night\"}", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "非法白平衡枚举仍 200");
+    CHECK(strstr(body, "白平衡") != NULL, "非法白平衡枚举给出原因，实际：%.160s", body);
+    /* 被拒的项不能把 cfg 改掉：越界值必须“人没进去、门也没开” */
+    CHECK(cfg_get_int("image.exposure.level", &lv) == HAL_OK && lv == -2,
+          "越界提交后曝光等级仍是 -2（没被 4 覆盖）");
+
+    /* 开机回放也要覆盖新键：设 cfg → 复位 HAL → 回放 → 读回 */
+    CHECK(cfg_set_str("image.ir.mode", "off") == HAL_OK, "写 cfg 补光灯 off");
+    CHECK(cfg_set_int("image.ir.sensitivity", 2) == HAL_OK, "写 cfg 灵敏度 2");
+    {
+        hal_image_t zero;
+        memset(&zero, -1, sizeof(zero));
+        zero.ir_mode = HAL_IR_AUTO; zero.ir_sensitivity = 4;
+        CHECK(hal()->video->set_image(&zero) == HAL_OK, "把 HAL 推回默认档");
+    }
+    console_api_test_image_apply_cfg();
+    {
+        hal_image_t rd;
+        memset(&rd, 0, sizeof(rd));
+        CHECK(hal()->video->get_image(&rd) == HAL_OK, "回放后读 HAL");
+        CHECK(rd.ir_mode == HAL_IR_OFF && rd.ir_sensitivity == 2,
+              "开机回放覆盖补光组（ir_mode=%d sens=%d）", rd.ir_mode, rd.ir_sensitivity);
+    }
+
+    cfg_deinit();
+    remove("console_test_cfg_img.json");
+}
+
+/**
  * 覆盖 GET/PUT /api/v1/config 的端点层：鉴权门禁、全量/前缀读取、部分成功
  * 语义、畸形输入。经 console_api_test_dispatch 分发，不依赖真实 socket。
  */
@@ -1306,7 +1505,11 @@ static void test_api_system_endpoints(void)
     /* R0 能力驱动：features/modules 是前端导航裁剪的权威来源 */
     CHECK(strstr(body, "\"features\":{") != NULL, "内嵌功能映射对象");
     CHECK(strstr(body, "\"modules\":[") != NULL, "内嵌模块清单数组");
-    CHECK(strstr(body, "\"preview.live\":false") != NULL, "本测试未启动视频编码 → 预览不可用（如实上报）");
+    /* 预览能力的判据是「平台是否实现了视频通路」，**不是**「当前是否已有编码流」。
+     * 若用后者，设备空闲时能力恒为 false → 前端把预览入口永久隐藏，用户永远点不到，
+     * 视频也就永远不会被打开（真机上踩过这个自锁）。mock 平台实现了完整 video ops
+     * （能出假帧），所以这里是 true；真正的「打开失败」由预览端点返回错误码上报。 */
+    CHECK(strstr(body, "\"preview.live\":true") != NULL, "mock 实现了视频通路 → 预览可用（能力，非当前状态）");
     CHECK(strstr(body, "\"event.motion\":true") != NULL, "mock 开启移动侦测");
     CHECK(strstr(body, "\"event.smart\":false") != NULL, "mock 无智能算法");
     CHECK(strstr(body, "\"network.wifi\":false") != NULL, "mock 无 WiFi → 功能关闭");
@@ -1319,6 +1522,10 @@ static void test_api_system_endpoints(void)
     CHECK(strstr(body, "\"system.time\":true") != NULL, "时间设置可用");
     CHECK(strstr(body, "\"system.log\":true") != NULL, "系统日志可用");
     CHECK(strstr(body, "\"system.device\":true") != NULL, "设备名称可用");
+    /* 本轮补齐的系统设置后台：配置导入导出 / 定时重启 / 网络诊断 */
+    CHECK(strstr(body, "\"system.cfgfile\":true") != NULL, "配置导入导出可用");
+    CHECK(strstr(body, "\"system.reboot_plan\":true") != NULL, "定时重启可用");
+    CHECK(strstr(body, "\"system.diag\":true") != NULL, "网络诊断可用");
     CHECK(strstr(body, "\"network.config\":true") != NULL, "网络设置可用");
     CHECK(strstr(body, "\"storage.format\":false") != NULL, "格式化未实现");
 
@@ -1391,6 +1598,9 @@ static void test_api_system_extras(void)
     snprintf(req.query, sizeof(req.query), "lines=50");
     CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "system/log 成功");
     CHECK(strstr(body, "\"lines\":[") != NULL, "含日志行数组，实际：%.200s", body);
+    /* 时间列（序号/时间/事件 三列对齐实机）靠这两个锚点换算 */
+    CHECK(strstr(body, "\"mono_ms\":") != NULL, "含单调钟锚点，实际：%.200s", body);
+    CHECK(strstr(body, "\"utc\":") != NULL, "含墙钟锚点，实际：%.200s", body);
     CHECK(strstr(body, "日志端点探针行") != NULL, "最近写入的日志可见");
 
     req_make(&req, "GET", "/api/v1/system/log", NULL, NULL);
@@ -1448,6 +1658,81 @@ static void test_api_system_extras(void)
     CHECK(strstr(body, "\"mac\":\"") != NULL, "info 含 MAC");
     CHECK(strstr(body, "\"ip\":\"") != NULL, "info 含 IP");
 
+    /* 序列号 / 二维码（单码体系，规则见 Docs/PRD/IpcCloud设备序列号生成规则_v1.0.md）：
+       DeviceID 与验证码齐全才给 qr_content；缺任一 → 字段省略，前端显示「未烧录」。
+       22 位 SN 已废除：info 不再有 sn 字段。写入前先备份安全存储里可能已有的值，
+       测完原样还原，不破坏其它用例状态。 */
+    {
+        char old_id[64] = "", old_vc[16] = "";
+        size_t n_id = 0, n_vc = 0;
+        bool had_id = hal()->crypto->secure_read(HAL_SEC_KEY_DEVICE_ID, (uint8_t *)old_id,
+                                                  sizeof(old_id) - 1, &n_id) == HAL_OK;
+        bool had_vc = hal()->crypto->secure_read(HAL_SEC_KEY_VERIFY_CODE, (uint8_t *)old_vc,
+                                                  sizeof(old_vc) - 1, &n_vc) == HAL_OK;
+        if (had_id) old_id[n_id] = '\0';
+        if (had_vc) old_vc[n_vc] = '\0';
+
+        CHECK(hal()->crypto->secure_write(HAL_SEC_KEY_DEVICE_ID,
+              (const uint8_t *)"JPCSPRA2U3822223B", 17) == HAL_OK, "烧录 DeviceID");
+        CHECK(hal()->crypto->secure_write(HAL_SEC_KEY_VERIFY_CODE,
+              (const uint8_t *)"ABC234", 6) == HAL_OK, "烧录验证码");
+        req_make(&req, "GET", "/api/v1/system/info", NULL, cookie);
+        CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "info(已烧录)");
+        CHECK(strstr(body, "\"serial\":\"JPCSPRA2U3822223B\"") != NULL, "info 含 DeviceID（序列码），实际：%.240s", body);
+        CHECK(strstr(body, "\"qr_content\":\"IPC1:JPCSPRA2U3822223B:ABC234:") != NULL,
+              "info 含二维码内容（IPC1:<DeviceID>:<VerifyCode>:<Model>）");
+        CHECK(strstr(body, "\"sn\":") == NULL, "单码体系：info 不再有 sn 字段，实际：%.240s", body);
+
+        hal()->crypto->secure_delete(HAL_SEC_KEY_DEVICE_ID);
+        hal()->crypto->secure_delete(HAL_SEC_KEY_VERIFY_CODE);
+        req_make(&req, "GET", "/api/v1/system/info", NULL, cookie);
+        CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "info(未烧录)");
+        CHECK(strstr(body, "\"serial\":\"\"") != NULL, "未烧录时 serial 为空串");
+        CHECK(strstr(body, "\"qr_content\":") == NULL, "缺验证码时省略 qr_content 字段");
+
+        if (had_id) hal()->crypto->secure_write(HAL_SEC_KEY_DEVICE_ID, (const uint8_t *)old_id, n_id);
+        if (had_vc) hal()->crypto->secure_write(HAL_SEC_KEY_VERIFY_CODE, (const uint8_t *)old_vc, n_vc);
+        if (!had_id) hal()->crypto->secure_delete(HAL_SEC_KEY_DEVICE_ID);
+        if (!had_vc) hal()->crypto->secure_delete(HAL_SEC_KEY_VERIFY_CODE);
+    }
+
+    /* 端口（PRD LC-NET-02）：范围校验 → 落盘 → 仅 HTTP 变化才登记重绑。
+       测试里没有真实监听线程，http_server_port()=0 → 端点退而按已保存配置比较，
+       因此“同值再保存”必须判为 unchanged；重绑本身不在测试里执行（只断言 deferred）。 */
+    {
+        int64_t hv = 0, rv = 0;
+        bool def = false;
+
+        req_make(&req, "POST", "/api/v1/system/port/apply", "{\"http\":0,\"rtsp\":554}", cookie);
+        CHECK(console_api_test_dispatch(&req, body, sizeof(body), &def) == HAL_EINVAL, "HTTP 端口 0 被拒");
+        CHECK(strstr(body, "1-65535") != NULL, "拒绝原因回给前端，实际：%.160s", body);
+        req_make(&req, "POST", "/api/v1/system/port/apply", "{\"http\":8081,\"rtsp\":65536}", cookie);
+        CHECK(console_api_test_dispatch(&req, body, sizeof(body), &def) == HAL_EINVAL, "RTSP 端口越界被拒");
+
+        req_make(&req, "POST", "/api/v1/system/port/apply", "{\"http\":8081,\"rtsp\":1554}", cookie);
+        def = true;
+        CHECK(console_api_test_dispatch(&req, body, sizeof(body), &def) == HAL_OK && def,
+              "HTTP 端口变化登记重绑任务");
+        CHECK(strstr(body, "\"new_port\":8081") != NULL, "响应带 new_port，实际：%.200s", body);
+        cfg_get_int("port.http", &hv);
+        cfg_get_int("port.rtsp", &rv);
+        CHECK(hv == 8081 && rv == 1554, "端口落盘，实际 http=%lld rtsp=%lld",
+              (long long)hv, (long long)rv);
+
+        req_make(&req, "POST", "/api/v1/system/port/apply", "{\"http\":8081,\"rtsp\":1554}", cookie);
+        def = true;
+        CHECK(console_api_test_dispatch(&req, body, sizeof(body), &def) == HAL_OK && !def,
+              "同值再保存不登记重绑");
+        CHECK(strstr(body, "unchanged") != NULL, "提示未变化，实际：%.200s", body);
+
+        req_make(&req, "POST", "/api/v1/system/port/apply", "{\"http\":8081,\"rtsp\":18554}", cookie);
+        def = true;
+        CHECK(console_api_test_dispatch(&req, body, sizeof(body), &def) == HAL_OK && !def,
+              "仅 RTSP 变化只落盘、不重绑");
+        cfg_get_int("port.rtsp", &rv);
+        CHECK(rv == 18554, "RTSP 落盘，实际：%lld", (long long)rv);
+    }
+
     cfg_deinit();
     remove("console_test_cfg_sys.json");
 }
@@ -1490,7 +1775,8 @@ static void test_api_net_apply(void)
 
     CHECK(console_apply_net() == HAL_OK, "延后动作本身可执行");
     mock_sys_last_net(last, sizeof(last));
-    CHECK(strcmp(last, "192.168.1.50/255.255.255.0/192.168.1.1/") == 0, "HAL 收到静态参数，实际：%s", last);
+    CHECK(strcmp(last, "192.168.1.50/255.255.255.0/192.168.1.1//0") == 0,
+          "HAL 收到静态参数（MTU 未配置=0），实际：%s", last);
 
     req_make(&req, "PUT", "/api/v1/config", "{\"net.dhcp\":true}", cookie);
     CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "切回 DHCP");
@@ -1499,7 +1785,7 @@ static void test_api_net_apply(void)
     CHECK(strstr(body, "\"new_ip\":\"\"") != NULL, "DHCP 时新地址为空，实际：%s", body);
     CHECK(console_apply_net() == HAL_OK, "DHCP 应用");
     mock_sys_last_net(last, sizeof(last));
-    CHECK(strcmp(last, "///") == 0, "DHCP 时传空串，实际：%s", last);
+    CHECK(strcmp(last, "////0") == 0, "DHCP 时传空串，实际：%s", last);
 
     /* 评审 I-3：非法配置随请求体提交时，必须先校验、被拒则不落盘 */
     {
@@ -1537,6 +1823,48 @@ static void test_api_net_apply(void)
               "同一静态配置再次保存不重启网络");
     }
 
+    /* MTU（对齐实机「网络设置→连接→高级设置」）：范围校验 → 落盘 → 随应用传给 HAL */
+    {
+        int64_t mtu = 0;
+        req_make(&req, "POST", "/api/v1/system/net/apply", "{\"dhcp\":true,\"mtu\":100}", cookie);
+        CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_EINVAL, "越界 MTU 被拒");
+        CHECK(strstr(body, "MTU") != NULL, "拒绝原因回给前端，实际：%.120s", body);
+        req_make(&req, "PUT", "/api/v1/config", "{\"net.mtu\":4000}", cookie);
+        CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "写越界 MTU 的请求本身成功");
+        CHECK(strstr(body, "\"rejected_total\":1") != NULL, "net.mtu 越界被规则表拒绝，实际：%.160s", body);
+
+        req_make(&req, "POST", "/api/v1/system/net/apply", "{\"dhcp\":true,\"mtu\":1480}", cookie);
+        deferred = true;
+        CHECK(console_api_test_dispatch(&req, body, sizeof(body), &deferred) == HAL_OK && deferred,
+              "MTU 变化会登记网络重启");
+        cfg_get_int("net.mtu", &mtu);
+        CHECK(mtu == 1480, "net.mtu 落盘，实际：%lld", (long long)mtu);
+        CHECK(console_apply_net() == HAL_OK, "MTU 随网络设置应用");
+        mock_sys_last_net(last, sizeof(last));
+        CHECK(strstr(last, "/1480") != NULL, "HAL 收到 MTU，实际：%s", last);
+        req_make(&req, "POST", "/api/v1/system/net/apply", "{\"dhcp\":true,\"mtu\":1480}", cookie);
+        deferred = true;
+        CHECK(console_api_test_dispatch(&req, body, sizeof(body), &deferred) == HAL_OK && !deferred,
+              "MTU 未变不重启网络");
+    }
+
+    /* DNS 首选/备用两框（前端合并写入 net.dns，对齐实机静态页） */
+    {
+        char dnsbuf[64] = "";
+        req_make(&req, "POST", "/api/v1/system/net/apply",
+                 "{\"dhcp\":false,\"ip\":\"192.168.1.60\",\"mask\":\"255.255.255.0\",\"gw\":\"192.168.1.1\","
+                 "\"dns\":\"223.5.5.5,114.114.114.114\"}", cookie);
+        CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "首选+备用 DNS 被接受");
+        cfg_get_str("net.dns", dnsbuf, sizeof(dnsbuf));
+        CHECK(strcmp(dnsbuf, "223.5.5.5,114.114.114.114") == 0, "两段 DNS 落盘，实际：%s", dnsbuf);
+        req_make(&req, "POST", "/api/v1/system/net/apply",
+                 "{\"dhcp\":false,\"ip\":\"192.168.1.60\",\"mask\":\"255.255.255.0\",\"gw\":\"192.168.1.1\",\"dns\":\"223.5.5.5,\"}", cookie);
+        CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_EINVAL, "尾逗号 DNS 被拒");
+        req_make(&req, "POST", "/api/v1/system/net/apply",
+                 "{\"dhcp\":false,\"ip\":\"192.168.1.60\",\"mask\":\"255.255.255.0\",\"gw\":\"192.168.1.1\",\"dns\":\"223.5.5.5,1.2.3\"}", cookie);
+        CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_EINVAL, "备用 DNS 非 IPv4 被拒");
+    }
+
     cfg_deinit();
     remove("console_test_cfg_net.json");
 }
@@ -1556,6 +1884,22 @@ static void test_api_time(void)
     console_auth_reset_lockout();
     CHECK(console_auth_seed("Admin@12345", "admin", false) == HAL_OK, "已激活");
     CHECK(do_login("admin", "Admin@12345", "192.168.50.15", cookie, sizeof(cookie), &must_change) == HAL_OK, "登录");
+
+    /*
+     * BUG 回归（2026-09-28）：设备无 RTC，墙钟开机从 0 起算；此前
+     * `time.ntp.enable` 无默认值 → console_apply_time 按「关」处理 → ntpd
+     * 从不启动 → 联网了时间仍是 1970-01-01。默认必须是**开启**，
+     * 且 GET 回显、实际起 ntpd 用的是同一份缺省（console_ntp_read）。
+     */
+    req_make(&req, "GET", "/api/v1/system/time", NULL, cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "读时间（默认态）");
+    CHECK(strstr(body, "\"ntp_enable\":true") != NULL, "未配置时默认开启 NTP，实际：%.200s", body);
+    CHECK(strstr(body, "\"ntp_server\":\"" CONSOLE_NTP_DEFAULT_HOST "\"") != NULL,
+          "未配置时回显缺省服务器，实际：%.200s", body);
+    CHECK(console_apply_time() == HAL_OK, "按默认配置应用 NTP");
+    mock_sys_last_ntp(last, sizeof(last));
+    CHECK(strcmp(last, CONSOLE_NTP_DEFAULT_HOST) == 0,
+          "HAL 真的收到了缺省服务器（否则 ntpd 根本没起），实际：[%s]", last);
 
     req_make(&req, "PUT", "/api/v1/system/time", "{\"ntp_enable\":false,\"utc\":1790000000}", cookie);
     CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "手动校时成功");
@@ -2420,6 +2764,11 @@ static void test_net_status_endpoint(void)
           "eth 模式下 mac 精确等于 mock 以太网地址，实际：%s", body);
     CHECK(strstr(body, "\"ip\":\"192.168.1.100\"") != NULL,
           "eth 模式下 ip 精确等于 mock hal_netif_status_t.ip 的值（HAL v1.2 新增字段），实际：%s", body);
+    /* v1.3：快速诊断的掩码/网关/DNS/MTU，取自 HAL 运行期值并原样透传 */
+    CHECK(strstr(body, "\"mask\":\"255.255.255.0\"") != NULL, "掩码透传，实际：%s", body);
+    CHECK(strstr(body, "\"gw\":\"192.168.1.1\"") != NULL, "网关透传，实际：%s", body);
+    CHECK(strstr(body, "\"dns\":\"192.168.1.1\"") != NULL, "DNS 透传，实际：%s", body);
+    CHECK(strstr(body, "\"mtu\":1500") != NULL, "MTU 透传，实际：%s", body);
     CHECK(strstr(body, "\"ssid\"") == NULL, "eth 模式下不应出现 ssid 字段，实际：%s", body);
     CHECK(strstr(body, "\"rssi\"") == NULL, "eth 模式下不应出现 rssi 字段，实际：%s", body);
     CHECK(strstr(body, "\"last_error\"") == NULL, "未曾配网失败过，不应出现 last_error 字段，实际：%s", body);
@@ -2685,6 +3034,137 @@ static void test_static_assets(void)
     CHECK(console_asset_find(NULL) == NULL, "NULL 应返回 NULL");
 }
 
+/**
+ * 配置管理（简单恢复）+ 定时重启参数 + 网络诊断端点：
+ * 对齐实机「设置 → 系统设置 → 系统配置」的后台能力。
+ * 诊断任务由 console_maint 的工作线程执行，单测不 start 那个线程，
+ * 因此状态停在 running——正好验证「handler 只投递、结果可轮询」的分工。
+ */
+static void test_api_maint_endpoints(void)
+{
+    http_req_t req;
+    char body[16384], cookie[128];
+    bool must_change = false;
+
+    SECTION("配置管理 / 定时重启 / 网络诊断");
+    CHECK(cfg_init(NULL, "console_test_cfg_maint.json") == HAL_OK, "配置中心就绪");
+    console_auth_reset_lockout();
+    CHECK(console_auth_seed("Admin@12345", "admin", false) == HAL_OK, "已激活");
+    CHECK(do_login("admin", "Admin@12345", "192.168.60.7", cookie, sizeof(cookie), &must_change) == HAL_OK, "登录");
+
+    /* 定时重启：字符集与长度由 cfg 规则卡死（"03:00" 合法） */
+    req_make(&req, "PUT", "/api/v1/config",
+             "{\"system.reboot.plan.enable\":true,\"system.reboot.plan.time\":\"03:00\","
+             "\"system.reboot.plan.days\":\"1,2,3,4,5\"}", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "写入定时重启三键");
+    CHECK(strstr(body, "\"applied\":3") != NULL, "三个键都被接受，实际：%.200s", body);
+
+    req_make(&req, "PUT", "/api/v1/config", "{\"system.reboot.plan.time\":\"3:00\"}", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "长度非法的请求仍返回 200");
+    CHECK(strstr(body, "\"rejected_total\":1") != NULL, "长度 4 被拒，实际：%.200s", body);
+
+    req_make(&req, "PUT", "/api/v1/config", "{\"system.reboot.plan.time\":\"03x00\"}", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "字符集非法的请求仍返回 200");
+    CHECK(strstr(body, "\"rejected_total\":1") != NULL, "含字母的时间被拒，实际：%.200s", body);
+
+    req_make(&req, "PUT", "/api/v1/config", "{\"system.reboot.plan.days\":\"1;2\"}", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "星期表非法请求");
+    CHECK(strstr(body, "\"rejected_total\":1") != NULL, "含分号的星期表被拒（拼进 shell 的值必须过字符集），实际：%.200s", body);
+
+    /* 简单恢复：普通参数回默认，网络与管理员账号保留 */
+    req_make(&req, "PUT", "/api/v1/config", "{\"image.brightness\":77,\"net.ip\":\"192.168.1.50\"}", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "写入待恢复的参数");
+    CHECK(strstr(body, "\"applied\":2") != NULL, "两个键都被接受，实际：%.200s", body);
+
+    req_make(&req, "POST", "/api/v1/system/config/reset", NULL, cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "简单恢复成功");
+    CHECK(strstr(body, "已恢复默认参数") != NULL, "回执说明保留了网络与账号，实际：%.200s", body);
+
+    /* query 必须单独放进 req.query（见 test_api_config_endpoints 里的说明）：
+       path 里带字面 "?prefix=..." 会让 api_dispatch 的精确匹配失效 */
+    req_make(&req, "GET", "/api/v1/config", NULL, cookie);
+    snprintf(req.query, sizeof(req.query), "prefix=image");
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "读回 image 子树");
+    CHECK(strstr(body, "image.brightness") == NULL, "普通参数已回默认，实际：%.200s", body);
+
+    req_make(&req, "GET", "/api/v1/config", NULL, cookie);
+    snprintf(req.query, sizeof(req.query), "prefix=net");
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "读回 net 子树");
+    CHECK(strstr(body, "192.168.1.50") != NULL, "网络配置被保留（否则恢复完就失联），实际：%.200s", body);
+
+    req_make(&req, "GET", "/api/v1/config", NULL, cookie);
+    snprintf(req.query, sizeof(req.query), "prefix=system");
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "读回 system 子树");
+    CHECK(strstr(body, "system.reboot") == NULL, "定时重启计划已回默认，实际：%.200s", body);
+
+    /* 诊断：目标地址白名单 + 选项注入拦截 + 投递 + 状态查询 */
+    req_make(&req, "POST", "/api/v1/system/diag", "{\"type\":\"ping\",\"addr\":\"127.0.0.1;reboot\"}", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_EINVAL, "含 shell 元字符的目标被拒");
+    CHECK(strstr(body, "目标地址") != NULL, "给出具体原因，实际：%.200s", body);
+
+    req_make(&req, "POST", "/api/v1/system/diag", "{\"type\":\"ping\",\"addr\":\"-f\"}", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_EINVAL, "以 '-' 开头的目标被拒（避免当成选项）");
+
+    req_make(&req, "POST", "/api/v1/system/diag", "{\"type\":\"sniffer\",\"addr\":\"127.0.0.1\"}", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_EINVAL, "未知诊断方式被拒");
+
+    req_make(&req, "POST", "/api/v1/system/diag",
+             "{\"type\":\"ping\",\"addr\":\"127.0.0.1\",\"count\":1,\"size\":32,\"timeout\":1}", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "合法诊断请求被投递");
+    CHECK(strstr(body, "诊断已开始") != NULL, "回执说明已开始，实际：%.200s", body);
+
+    req_make(&req, "GET", "/api/v1/system/diag", NULL, cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "查询诊断状态");
+    CHECK(strstr(body, "\"state\":\"running\"") != NULL, "单测未起工作线程 → 停在 running，实际：%.200s", body);
+    CHECK(strstr(body, "\"output\":") != NULL, "含输出字段");
+
+    req_make(&req, "POST", "/api/v1/system/diag", "{\"type\":\"ping\",\"addr\":\"10.0.0.1\"}", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "上一次未完成时仍返回成功（前端继续轮询）");
+    CHECK(strstr(body, "上一次诊断仍在进行") != NULL, "如实告知排队中，实际：%.200s", body);
+
+    req_make(&req, "GET", "/api/v1/system/diag", NULL, NULL);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_EUNAUTH_, "诊断状态需登录");
+
+    cfg_deinit();
+    remove("console_test_cfg_maint.json");
+}
+
+/**
+ * 定时重启的时区换算与星期表（console_maint.c 的纯函数桩）。
+ * 换算错一次就是「页面显示东八区、定时重启按 UTC 走」差 8 小时的整点错位，
+ * 所以这两个纯函数必须钉死。
+ */
+static void test_maint_tz_days(void)
+{
+    SECTION("定时重启：时区换算与星期表");
+    CHECK(console_maint_test_tz_offset("CST-8") == 8 * 3600, "CST-8 → 东八区 +28800");
+    CHECK(console_maint_test_tz_offset("UTC0") == 0, "UTC0 → 0");
+    CHECK(console_maint_test_tz_offset("EST5") == -5 * 3600, "EST5 → 西五区 -18000");
+    CHECK(console_maint_test_tz_offset("JST-9") == 9 * 3600, "JST-9 → 东九区 +32400");
+    CHECK(console_maint_test_tz_offset(CONSOLE_TZ_DEFAULT) == 8 * 3600, "缺省时区与 ep_time_get 同源（东八区）");
+    CHECK(console_maint_test_tz_offset("garbage") == 0, "解析不了按 UTC，不猜时区");
+    CHECK(console_maint_test_tz_offset("") == 0, "空串按 UTC");
+    CHECK(console_maint_test_tz_offset(NULL) == 0, "NULL 安全");
+
+    CHECK(console_maint_test_day_in("0,1,2,3,4,5,6", 3), "每天含周三");
+    CHECK(console_maint_test_day_in("5", 5), "仅周五时周五命中");
+    CHECK(!console_maint_test_day_in("5", 6), "仅周五时周六不命中");
+    CHECK(console_maint_test_day_in("", 2), "空表视为每天");
+    CHECK(!console_maint_test_day_in("1,2", 0), "非空表不含周日（0=周日，与前端 getDay 一致）");
+    CHECK(console_maint_test_day_in("1,2,3,4,5,6,0", 0), "全周含周日");
+
+    /* NTP 重试判据：只在「开启 ∧ 墙钟还停在 2000 年前」时才重拉 ntpd */
+    CHECK(console_maint_test_ntp_needed(true, 0), "开启且墙钟为 0（刚开机）→ 该重试");
+    CHECK(console_maint_test_ntp_needed(true, 86400), "开启且仍是 1970 → 该重试");
+    CHECK(!console_maint_test_ntp_needed(true, 1790000000), "墙钟已被校到正常年份 → 不再重试");
+    CHECK(!console_maint_test_ntp_needed(false, 0), "已关闭（手动校时）→ 不重试，不与手动设置打架");
+    CHECK(!console_maint_test_ntp_needed(true, -1), "非法时间不重试");
+    CHECK(console_maint_test_ntp_needed(true, CONSOLE_CLOCK_UNSET_S - 1),
+          "临界：2000-01-01 前一秒仍视为未校时");
+    CHECK(!console_maint_test_ntp_needed(true, CONSOLE_CLOCK_UNSET_S),
+          "临界：到 2000-01-01 即视为已校时");
+}
+
 int main(void)
 {
     if (profile_load("profiles/mock-x86.json") != HAL_OK) {
@@ -2715,10 +3195,13 @@ int main(void)
     test_config_rules();
     test_caps_json();
     test_capabilities_endpoint();
+    test_image_blc();
     test_api_config_endpoints();
     test_api_system_endpoints();
     test_api_system_extras();
     test_api_net_apply();
+    test_api_maint_endpoints();
+    test_maint_tz_days();
     test_api_time();
     test_reset_wipes_credentials();
     test_reboot_handler_order();

@@ -58,6 +58,7 @@ typedef socklen_t ipc_socklen_t;
 
 static struct {
     sock_t       listen_fd;
+    uint16_t     port;              /**< 当前监听端口；0 = 未运行 */
     http_conn_t  conns[CONN_MAX];
     os_thread_t *thread;
 #ifndef _WIN32
@@ -721,6 +722,42 @@ static void server_thread_fn(void *arg)
 /* 启动 / 停止                                                                */
 /* ------------------------------------------------------------------------ */
 
+uint16_t http_server_port(void)
+{
+    return s_srv.port;
+}
+
+hal_err_t http_port_available(uint16_t port)
+{
+    sock_t fd;
+    struct sockaddr_in addr;
+    int reuse = 1;
+    hal_err_t rc = HAL_EINVAL;
+
+#ifdef _WIN32
+    {
+        WSADATA wsa;
+        if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return HAL_EIO;
+    }
+#endif
+    fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (fd != SOCK_INVALID) {
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (const char *)&reuse, sizeof(reuse));
+        memset(&addr, 0, sizeof(addr));
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_ANY);
+        addr.sin_port = htons(port);
+        rc = (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0) ? HAL_OK : HAL_EINVAL;
+        CLOSESOCK(fd);
+    } else {
+        rc = HAL_EIO;
+    }
+#ifdef _WIN32
+    WSACleanup();
+#endif
+    return rc;
+}
+
 hal_err_t http_server_start(uint16_t port)
 {
     sock_t fd;
@@ -831,6 +868,7 @@ hal_err_t http_server_start(uint16_t port)
         return HAL_EIO;
     }
 
+    s_srv.port = port;
     LOGI(MOD, "http_server 已启动，端口 %u", (unsigned)port);
     return HAL_OK;
 }
@@ -847,6 +885,7 @@ hal_err_t http_server_stop(void)
 
     os_thread_join(s_srv.thread);
     s_srv.thread = NULL;
+    s_srv.port = 0;
 
     for (i = 0; i < CONN_MAX; i++) {
         if (s_srv.conns[i].used) conn_close(&s_srv.conns[i]);

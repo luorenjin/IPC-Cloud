@@ -76,11 +76,25 @@ chmod 755 "$ROOT/bin/busybox"
 ln -sf ../bin/busybox "$ROOT/sbin/udhcpc"
 chmod 700 "$ROOT/etc/ipc/sec"
 
+echo "==> 注入 MPP 内核模块（/komod）"
+# 视频采集/ISP/编码/抓图的内核模块。厂商闭源二进制，不入库，由 fw-komod
+# （export-komod.sh）从 SDK 卷现取到 out/gk7205v200/komod/；缺了它视频功能
+# 整条不能工作，所以这里硬失败而不是警告后继续。
+KOMOD_SRC="$WORK/docker/out/gk7205v200/komod"
+[ -d "$KOMOD_SRC" ] || {
+    echo "错误：缺少 $KOMOD_SRC（先跑 make fw-komod）" >&2
+    exit 1
+}
+mkdir -p "$ROOT/komod"
+cp "$KOMOD_SRC"/*.ko "$ROOT/komod/"
+chmod 644 "$ROOT/komod"/*.ko
+echo "    已注入 $(ls "$KOMOD_SRC"/*.ko | wc -l) 个模块（$(du -sk "$ROOT/komod" | cut -f1) KB）"
+
 echo "==> 注入 overlay"
 if [ -d "$OVERLAY" ]; then
     cp -a "$OVERLAY"/. "$ROOT"/
     chmod 755 "$ROOT/etc/init.d/S90ipcapp" "$ROOT/etc/init.d/S81dhcp" \
-              "$ROOT/usr/share/udhcpc/default.script"
+              "$ROOT/etc/init.d/S85mpp" "$ROOT/usr/share/udhcpc/default.script"
 fi
 
 # 基线 busybox 未编入 udhcpc；缺它板子拿不到 IP，控制台就无法访问

@@ -10,24 +10,49 @@
 </head>
 <body>
 <div id="app">
-  <!-- 登录 -->
+  <!-- 登录：结构对齐实机（44px 顶栏 + 518px 白卡 + 260px 表单列），品牌自有 -->
   <div id="auth" class="auth">
+    <div class="lg-head"><span class="logo"></span><strong>IPC</strong></div>
     <div class="auth-card">
-      <div class="auth-brand"><span class="logo"></span><strong>IPC</strong><em>摄像机管理</em></div>
       <h1 id="auth-h">欢迎使用</h1>
-      <p class="muted" id="auth-p">请登录以管理本机</p>
+      <p class="auth-err" id="auth-err" hidden></p>
+      <p class="muted auth-p" id="auth-p" hidden>请登录以管理本机</p>
       <form id="f-activate" hidden>
-        <label>用户名<input value="admin" disabled></label>
-        <label>设置密码<input type="password" name="p1" placeholder="8-63 字节（汉字占 3 字节）" required></label>
-        <label>确认密码<input type="password" name="p2" required></label>
+        <div class="row">
+          <label class="tip">用户名</label>
+          <span class="fld user"><input value="admin" disabled placeholder="请输入用户名"></span>
+        </div>
+        <div class="row">
+          <label class="tip" for="ac-p1">设置密码</label>
+          <span class="fld pwd">
+            <input id="ac-p1" type="password" name="p1" placeholder="请输入8-63字节（汉字占3字节）" required>
+            <button class="eye" type="button" aria-label="显示密码" title="显示密码"><svg class="i-eye" viewBox="0 0 24 24"><path d="M1.8 12S5.7 5.6 12 5.6 22.2 12 22.2 12 18.3 18.4 12 18.4 1.8 12 1.8 12Z"/><circle cx="12" cy="12" r="3.1"/></svg><svg class="i-off" viewBox="0 0 24 24"><path d="M3 3l18 18M10.7 6.2c.4-.1.9-.2 1.3-.2 6.3 0 10.2 6 10.2 6a18.4 18.4 0 0 1-3.4 4.1M6.5 7.5C3.8 9.3 1.8 12 1.8 12s3.9 6.4 10.2 6.4c1.5 0 2.9-.3 4.1-.9"/><path d="M9.9 9.9a3.1 3.1 0 0 0 4.3 4.3"/></svg></button>
+          </span>
+        </div>
+        <div class="row">
+          <label class="tip" for="ac-p2">确认密码</label>
+          <span class="fld pwd">
+            <input id="ac-p2" type="password" name="p2" placeholder="请再次输入密码" required>
+            <button class="eye" type="button" aria-label="显示密码" title="显示密码"><svg class="i-eye" viewBox="0 0 24 24"><path d="M1.8 12S5.7 5.6 12 5.6 22.2 12 22.2 12 18.3 18.4 12 18.4 1.8 12 1.8 12Z"/><circle cx="12" cy="12" r="3.1"/></svg><svg class="i-off" viewBox="0 0 24 24"><path d="M3 3l18 18M10.7 6.2c.4-.1.9-.2 1.3-.2 6.3 0 10.2 6 10.2 6a18.4 18.4 0 0 1-3.4 4.1M6.5 7.5C3.8 9.3 1.8 12 1.8 12s3.9 6.4 10.2 6.4c1.5 0 2.9-.3 4.1-.9"/><path d="M9.9 9.9a3.1 3.1 0 0 0 4.3 4.3"/></svg></button>
+          </span>
+        </div>
         <button class="btn primary" type="submit">激活</button>
       </form>
       <form id="f-login" hidden>
-        <label>用户名<input name="u" value="admin"></label>
-        <label>密码<input type="password" name="p" placeholder="请输入密码"></label>
+        <div class="row">
+          <label class="tip" for="lg-u">用户名</label>
+          <span class="fld user"><input id="lg-u" name="u" value="admin" placeholder="请输入用户名"></span>
+        </div>
+        <div class="row">
+          <label class="tip" for="lg-p">密码</label>
+          <span class="fld pwd">
+            <input id="lg-p" type="password" name="p" placeholder="请输入密码">
+            <button class="eye" type="button" aria-label="显示密码" title="显示密码"><svg class="i-eye" viewBox="0 0 24 24"><path d="M1.8 12S5.7 5.6 12 5.6 22.2 12 22.2 12 18.3 18.4 12 18.4 1.8 12 1.8 12Z"/><circle cx="12" cy="12" r="3.1"/></svg><svg class="i-off" viewBox="0 0 24 24"><path d="M3 3l18 18M10.7 6.2c.4-.1.9-.2 1.3-.2 6.3 0 10.2 6 10.2 6a18.4 18.4 0 0 1-3.4 4.1M6.5 7.5C3.8 9.3 1.8 12 1.8 12s3.9 6.4 10.2 6.4c1.5 0 2.9-.3 4.1-.9"/><path d="M9.9 9.9a3.1 3.1 0 0 0 4.3 4.3"/></svg></button>
+          </span>
+        </div>
+        <a class="link" href="#" id="forgot">忘记密码</a>
         <button class="btn primary" type="submit">登录</button>
       </form>
-      <a class="link" href="#" id="forgot">忘记密码</a>
     </div>
   </div>
 
@@ -52,8 +77,10 @@
   <div id="toast" hidden></div>
 </div>
 <script src="js/crypto.js"></script>
+<script src="js/qrcode.js"></script>
 <script src="js/core.js"></script>
 <script src="js/ui.js"></script>
+<script src="js/preview-player.js"></script>
 <script src="js/router.js"></script>
 <script src="js/views/camera.js"></script>
 <script src="js/views/av.js"></script>

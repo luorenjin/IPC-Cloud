@@ -15,7 +15,7 @@ DOCKER_RUN := MSYS_NO_PATHCONV=1 docker run --rm \
 	-e BUILD_UID=$(BUILD_UID) -e BUILD_GID=$(BUILD_GID) \
 	-v $(SRC_VOLUME):/sdk
 
-.PHONY: image sdk-init sdk-build sdk-menuconfig sdk-shell sdk-export sdk-clean sdk-clean-all fw-build fw-busybox fw-clean fw-rootfs-base fw-rootfs fw-all
+.PHONY: image sdk-init sdk-build sdk-menuconfig sdk-shell sdk-export sdk-clean sdk-clean-all fw-build fw-busybox fw-komod fw-clean fw-rootfs-base fw-rootfs fw-all
 
 image:
 	MSYS_NO_PATHCONV=1 docker build -t $(IMAGE_NAME) .
@@ -86,6 +86,15 @@ fw-busybox: image
 		-v "$$(pwd)/..":/work/firmware \
 		$(IMAGE_NAME) sh /work/firmware/docker/scripts/build-busybox.sh /work/firmware/docker/out/gk7205v200/app/busybox
 
+## fw-komod: 从 SDK 卷导出 MPP 内核模块到 out/gk7205v200/komod/（供 fw-rootfs 注入 rootfs）
+# 与 fw-build 同理：DOCKER_RUN 不挂仓库目录，这里单独写完整 docker run 命令。
+fw-komod: image
+	MSYS_NO_PATHCONV=1 docker run --rm \
+		-e BUILD_UID=$(BUILD_UID) -e BUILD_GID=$(BUILD_GID) \
+		-v $(SRC_VOLUME):/sdk \
+		-v "$$(pwd)/..":/work/firmware \
+		$(IMAGE_NAME) sh /work/firmware/docker/scripts/export-komod.sh /work/firmware
+
 ## fw-clean: 清理交叉编译产物
 fw-clean:
 	rm -rf out/gk7205v200/app
@@ -121,7 +130,7 @@ fw-rootfs-base:
 # 挂载源同样用 $$(pwd)/.. 现算（不写死仓库绝对路径，本仓库路径含 U+200C 零宽
 # 字符，Make 的 $(CURDIR)/$(shell pwd) 会将其转写损坏，只有子 shell 自己
 # $$(pwd) 才能拿到未损坏的路径，参见上面 fw-build 的注释）。
-fw-rootfs: image fw-rootfs-base
+fw-rootfs: image fw-rootfs-base fw-komod
 	MSYS_NO_PATHCONV=1 docker run --rm \
 		-e BUILD_UID=$(BUILD_UID) -e BUILD_GID=$(BUILD_GID) \
 		-v $(SRC_VOLUME):/sdk \

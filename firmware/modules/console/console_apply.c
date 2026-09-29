@@ -53,14 +53,17 @@ static bool mask_valid(uint32_t m)
 hal_err_t console_net_read(console_net_cfg_t *c)
 {
     bool dhcp = true;
+    int64_t mtu = -1;
 
     memset(c, 0, sizeof(*c));
+    c->mtu = -1;                       /* 未配置 → 保持系统默认 */
     if (cfg_get_bool("net.dhcp", &dhcp) != HAL_OK) dhcp = true;
     c->dhcp = dhcp;
     cfg_get_str("net.ip", c->ip, sizeof(c->ip));
     cfg_get_str("net.mask", c->mask, sizeof(c->mask));
     cfg_get_str("net.gw", c->gw, sizeof(c->gw));
     cfg_get_str("net.dns", c->dns, sizeof(c->dns));
+    if (cfg_get_int("net.mtu", &mtu) == HAL_OK) c->mtu = (int)mtu;
     return HAL_OK;
 }
 
@@ -68,6 +71,7 @@ const char *console_net_check(const console_net_cfg_t *c)
 {
     uint32_t ip, mask, gw, dns;
 
+    if (c->mtu != -1 && (c->mtu < 576 || c->mtu > 1500)) return "MTU 范围应为 576-1500";
     if (c->dhcp) return NULL;
     if (!console_ipv4_parse(c->ip, &ip)) return "IP 地址格式不正确";
     if (!console_ipv4_parse(c->mask, &mask) || !mask_valid(mask)) return "子网掩码不正确";
@@ -77,7 +81,25 @@ const char *console_net_check(const console_net_cfg_t *c)
         if ((gw & mask) != (ip & mask)) return "网关与 IP 不在同一网段";
         if (gw == ip) return "网关不能与 IP 相同";
     }
-    if (c->dns[0] && !console_ipv4_parse(c->dns, &dns)) return "DNS 格式不正确";
+    if (c->dns[0]) {
+        /* 首选,备用：逗号分隔，逐段校验（对齐实机静态页的两个 DNS 框）*/
+        const char *p = c->dns;
+        int n = 0;
+        while (*p) {
+            char part[16];
+            size_t i = 0;
+            while (*p && *p != ',') {
+                if (i >= sizeof(part) - 1) return "DNS 格式不正确";
+                part[i++] = *p++;
+            }
+            part[i] = 0;
+            if (!console_ipv4_parse(part, &dns)) return "DNS 格式不正确";
+            if (++n > 3) return "DNS 最多 3 个地址";
+            if (!*p) break;
+            p++;                       /* 跳过逗号；尾部逗号视为格式错误 */
+            if (!*p) return "DNS 格式不正确";
+        }
+    }
     return NULL;
 }
 
@@ -89,11 +111,27 @@ hal_err_t console_apply_net(void)
     if (!hal_has(HAL_MOD_SYS) || !hal()->sys->apply_net) return HAL_ENOTSUP;
     console_net_read(&c);
     if (console_net_check(&c)) return HAL_EINVAL;
-    if (c.dhcp) rc = hal()->sys->apply_net("", "", "", "");
-    else rc = hal()->sys->apply_net(c.ip, c.mask, c.gw, c.dns);
+    /* mtu <= 0 = 未配置：传 0 给 HAL，由平台保持系统默认 */
+    if (c.dhcp) rc = hal()->sys->apply_net("", "", "", "", c.mtu > 0 ? c.mtu : 0);
+    else rc = hal()->sys->apply_net(c.ip, c.mask, c.gw, c.dns, c.mtu > 0 ? c.mtu : 0);
     if (rc == HAL_OK) LOGI(MOD, "网络设置已应用：%s", c.dhcp ? "DHCP" : c.ip);
     else LOGE(MOD, "网络设置应用失败：%s", hal_strerror(rc));
     return rc;
+}
+
+hal_err_t console_ntp_read(bool *en, char *server, size_t cap)
+{
+    bool e = true;
+    char buf[CONSOLE_NTP_HOST_MAX + 1] = "";
+
+    /* cfg 未写入 → 默认开启（PRD LC-SYS-01）；服务器未写入/为空 → 缺省主机。
+       这两处缺省是**行为**而不只是显示：console_apply_time 据此真的去起 ntpd。 */
+    if (cfg_get_bool("time.ntp.enable", &e) != HAL_OK) e = true;
+    if (cfg_get_str("time.ntp.server", buf, sizeof(buf)) != HAL_OK || !buf[0])
+        snprintf(buf, sizeof(buf), CONSOLE_NTP_DEFAULT_HOST);
+    if (en) *en = e;
+    if (server && cap) snprintf(server, cap, "%s", buf);
+    return HAL_OK;
 }
 
 hal_err_t console_apply_time(void)
@@ -103,8 +141,7 @@ hal_err_t console_apply_time(void)
     hal_err_t rc;
 
     if (!hal_has(HAL_MOD_SYS) || !hal()->sys->apply_ntp) return HAL_ENOTSUP;
-    if (cfg_get_bool("time.ntp.enable", &en) != HAL_OK) en = false;
-    if (en) cfg_get_str("time.ntp.server", server, sizeof(server));
+    console_ntp_read(&en, server, sizeof(server));
     rc = hal()->sys->apply_ntp(en ? server : "");
     if (rc != HAL_OK) LOGW(MOD, "NTP 设置应用失败：%s", hal_strerror(rc));
     return rc;

@@ -81,6 +81,12 @@ const char *http_conn_peer_ip(const http_conn_t *c);
 
 hal_err_t http_server_start(uint16_t port);
 hal_err_t http_server_stop(void);
+/** 当前监听端口；服务未运行返回 0（供「保存端口」比对是否真的变化） */
+uint16_t http_server_port(void);
+/** 探测端口此刻能否绑定（INADDR_ANY + SO_REUSEADDR，与 start 的 bind 段同语义），
+ *  不改变当前服务状态。HAL_OK=可用，其它=被占用/不可用。供保存端口在**配置
+ *  落盘之前**做预检——响应发出后的重绑只剩回滚一条路。 */
+hal_err_t http_port_available(uint16_t port);
 
 /** 发送响应。content_type 为 NULL 时用 application/octet-stream */
 hal_err_t http_respond(http_conn_t *c, int status, const char *content_type,
@@ -187,6 +193,21 @@ hal_err_t http_ws_send_text(http_conn_t *c, const char *text);
 
 /** 注册上行文本消息回调 */
 hal_err_t http_ws_on_text(http_conn_t *c, http_ws_text_fn fn, void *user);
+
+/**
+ * 连接被销毁前的通知，在事件循环线程、conn 内存释放**之前**调用。
+ *
+ * 存在的理由：像实时预览那样「由工作线程持着 conn 指针持续推帧」的用法，
+ * 一旦对端断开、conn 被回收，工作线程手里的指针就成了悬空指针——再加锁也
+ * 挡不住“指针本身已被释放”。有了这个回调，推送线程可以在回调里（在它自己
+ * 的锁保护下）把该引用清成 NULL 并被唤醒，从此不再碰它。
+ *
+ * 回调内**只允许**做状态清理（清引用、置标志、唤醒等待线程），
+ * 不得调用任何 http_ws_* 或 conn_* 接口（此阶段连接正在拆卸），也不得阻塞；
+ * 第二个参数 c 仅供与调用方自己保存的指针做相等比较，不要解引用。
+ */
+typedef void (*http_ws_close_fn)(http_conn_t *c, void *user);
+hal_err_t http_ws_on_close(http_conn_t *c, http_ws_close_fn fn, void *user);
 
 /** 主动关闭 WS 连接。调用后连接会在下一次事件循环 tick 内关闭（不保证
  *  立即发生）；若此时握手的 101 响应尚未发送完毕，连接将直接断开而不

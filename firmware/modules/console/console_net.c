@@ -1117,9 +1117,12 @@ static hal_err_t ep_net_status(char *out, size_t cap)
     char mac_hex[24] = "";
     char ssid_buf[HAL_SSID_MAX] = "";
     char ip_buf[HAL_IP_MAX] = "";
+    char mask_buf[HAL_IP_MAX] = "", gw_buf[HAL_IP_MAX] = "", dns_buf[HAL_IP_MAX] = "";
     char last_err[128] = "";
+    uint32_t mtu_val = 0;
     int rssi = 0;
     bool have_mac = false, have_ssid = false, have_rssi = false;
+    bool have_link = false, link_up = false;
     json_t *root;
     char *txt;
     hal_err_t rc;
@@ -1150,7 +1153,19 @@ static hal_err_t ep_net_status(char *out, size_t cap)
             snprintf(mac_hex, sizeof(mac_hex), "%02X:%02X:%02X:%02X:%02X:%02X",
                      st.mac[0], st.mac[1], st.mac[2], st.mac[3], st.mac[4], st.mac[5]);
             have_mac = true;
-            if (mode != NET_MODE_AP) snprintf(ip_buf, sizeof(ip_buf), "%s", st.ip);
+            /* 链路状态（控制台「连接状态：已连接/已断开」的数据源）：
+             * HAL 的 link 是网卡物理/协商状态，与有没有拿到 IP 无关 */
+            have_link = true;
+            link_up = (st.link == HAL_LINK_UP);
+            if (mode != NET_MODE_AP) {
+                /* 运行期 IPv4 参数（hal_net.h v1.3）：网卡此刻的真实值，
+                   未获取到就是空串/0——按同一约定省略字段，不用 cfg 配置值顶替 */
+                snprintf(ip_buf, sizeof(ip_buf), "%s", st.ip);
+                snprintf(mask_buf, sizeof(mask_buf), "%s", st.mask);
+                snprintf(gw_buf, sizeof(gw_buf), "%s", st.gw);
+                snprintf(dns_buf, sizeof(dns_buf), "%s", st.dns);
+                mtu_val = st.mtu;
+            }
             if (mode == NET_MODE_STA && st.rssi_dbm != 0) { rssi = st.rssi_dbm; have_rssi = true; }
         }
     }
@@ -1161,10 +1176,16 @@ static hal_err_t ep_net_status(char *out, size_t cap)
     json_object_set(root, "mode", json_new_string(
         mode == NET_MODE_AP ? "ap" : (mode == NET_MODE_STA ? "sta" : "eth")));
     if (have_mac)    json_object_set(root, "mac", json_new_string(mac_hex));
+    if (have_link)   json_object_set(root, "link", json_new_string(link_up ? "up" : "down"));
     /* ip 恒存在（HAL v1.2 起有明确"未知即空串"的约定），不再按 have_ip 省略 */
     json_object_set(root, "ip", json_new_string(ip_buf));
     if (have_ssid)   json_object_set(root, "ssid", json_new_string(ssid_buf));
     if (have_rssi)   json_object_set(root, "rssi", json_new_int(rssi));
+    /* 快速诊断要展示的运行期 IPv4 参数：取不到就省略字段（前端显示“未获取”） */
+    if (mask_buf[0]) json_object_set(root, "mask", json_new_string(mask_buf));
+    if (gw_buf[0])   json_object_set(root, "gw", json_new_string(gw_buf));
+    if (dns_buf[0])  json_object_set(root, "dns", json_new_string(dns_buf));
+    if (mtu_val)     json_object_set(root, "mtu", json_new_int((int64_t)mtu_val));
     if (last_err[0]) json_object_set(root, "last_error", json_new_string(last_err));
 
     txt = json_dump(root, false);

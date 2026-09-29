@@ -17,7 +17,13 @@
 #include <stdio.h>
 
 extern const hal_video_ops_t   gk_video_ops;
+#ifdef IPC_HAVE_MPP
+/* OSD 走 MPP 的 RGN，拿不到 SDK 的构建里没有这个符号（hal_osd 是可选模块） */
+extern const hal_osd_ops_t     gk_osd_ops;
+#endif
 extern const hal_gpio_ops_t    gk_gpio_ops;
+/** 由 gk_init 把 profile 文本交给它，内部解析 gpio_map 并导出引脚（见 gk_gpio.c） */
+extern void                    gk_gpio_init(const char *profile_json);
 extern const hal_net_ops_t     gk_net_ops;
 extern const hal_storage_ops_t gk_storage_ops;
 extern const hal_sys_ops_t     gk_sys_ops;
@@ -50,6 +56,10 @@ static hal_err_t gk_init(const char *profile_json)
        "目录在但 key 未写过"（HAL_ENODEV，真未配置）区分开。 */
     gk_crypto_ensure_dir();
 
+    /* GPIO 的物理引脚映射只能来自 profile（其他层拿不到），所以在这里把
+       profile 文本递下去；解析失败/引脚不存在都按未映射处理，不影响启动。 */
+    gk_gpio_init(profile_json);
+
     g_inited = true;
     return HAL_OK;
 }
@@ -68,7 +78,11 @@ static const hal_ops_t g_gk_ops = {
     gk_deinit,
     &gk_video_ops,
     NULL,               /* audio：本期不实现 */
-    NULL,               /* osd：本期不实现 */
+#ifdef IPC_HAVE_MPP
+    &gk_osd_ops,        /* osd：RGN 叠加（文本/时间，软件字库渲染） */
+#else
+    NULL,               /* osd：未启用 MPP，无叠加能力 */
+#endif
     NULL,               /* ivs：本期不实现 */
     &gk_gpio_ops,
     &gk_net_ops,

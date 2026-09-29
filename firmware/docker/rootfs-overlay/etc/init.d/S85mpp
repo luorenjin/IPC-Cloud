@@ -1,0 +1,101 @@
+#!/bin/sh
+# 加载 GOKE MPP（媒体平台）内核模块：视频采集 → ISP → 编码 → JPEG 抓图。
+#
+# 为什么放在 S85mpp（S81dhcp 之后、S90ipcapp 之前）：
+#   * 必须在 ipc_app 启动前完成 —— ipc_app 起来就会 open("/dev/isp_dev") 等节点；
+#   * 不依赖网络，放在 dhcp 之后只是为了让串口日志顺序与厂商脚本一致好比对。
+#
+# 任何一步失败都不阻塞启动：控制台（Web 管理）必须仍可用，视频能力由
+# capabilities 自行降级（hal_video.probe_sensor 失败 → 预览页提示硬件不支持），
+# 绝不能因为相机没点起来就丢掉整台设备的可管理性。
+
+KOMOD=/komod
+LOG=/var/log/mpp.log
+SENSOR=gc2053
+CHIP=gk7205v200
+# sensor 时钟源与 pinmux 由 sysconfig.ko 配置：sensors= 决定 sensor 时钟
+# （gc2053 → 27MHz，写 CRG+0x00F0），chip= 决定 MIPI/I2C0 的引脚复用。
+# g_cmos_yuv_flag=0 = RAW 输入（必须为 0，非 0 会切到 BT656/DC 通路）。
+# g_online_flag=3 = VI_ONLINE_VPSS_ONLINE，必须与 ipc_app 里
+# GK_API_SYS_SetVIVPSSMode() 的取值一致，否则 MISC 寄存器预设与应用设置冲突。
+SYS_OPTS="chip=$CHIP sensors=$SENSOR g_cmos_yuv_flag=0 board=demo g_online_flag=3"
+
+# MMZ（媒体内存池）：内核 cmdline 是 mem=24M，即内核只用低 24MB，
+# 剩余 40MB 从 0x41800000 起全部交给 osal 的匿名内存池。
+# 为什么把内核从默认 32M 缩到 24M：32MB MMZ 装不下「1080p 主码流 + 子码流
+# + 1080p 抓图」需要的 VB 池 + ISP 内部缓冲，VENC 的 CreateChn 会报
+# EN_ERR_NOMEM。改这里必须同步改 bootargs（docker/flash/spi_bootargs.txt
+# 的 mem=，用 board.py reflash-bootargs 烧写），两边不一致会直接加载失败。
+MMZ_START=0x41800000
+MMZ_SIZE=40M
+
+# 模块清单与加载顺序：与 SDK ko_nolog/loadgk7205v200 的 insert_ko 一致，
+# 只去掉本机型用不到的（vo/gfbg 无显示输出、ive 无 IVS、audio 系列无音频硬件、
+# cipher_drv 用不到、isp_piris 走 GPIO 驱动 IR-CUT 而非 PIRIS、ssp_* 无屏）。
+#
+# 依赖顺序（不可调）：
+#   sysconfig（pinmux+sensor 时钟）→ osal（内存池）→ base/sys/tde/rgn/vgs
+#   → vi → isp（ISP 必须先于 vpss）→ vpss → chnl → vedu → rc/venc
+#   → h264e/h265e/jpege（硬件编码器后端必须在 venc 之后；vedu 是
+#     h264e/h265e 的硬依赖，缺了它们会报 "vedu can not load" 而只剩 JPEG）
+#   → isp_pwm/isp_sensor_i2c → mipi_rx（最后）
+KOMOD_LIST="
+sysconfig.ko
+osal.ko
+gk7205v200_base.ko
+gk7205v200_sys.ko
+gk7205v200_tde.ko
+gk7205v200_rgn.ko
+gk7205v200_vgs.ko
+gk7205v200_vi.ko
+gk7205v200_isp.ko
+gk7205v200_vpss.ko
+gk7205v200_chnl.ko
+gk7205v200_vedu.ko
+gk7205v200_rc.ko
+gk7205v200_venc.ko
+gk7205v200_h264e.ko
+gk7205v200_h265e.ko
+gk7205v200_jpege.ko
+isp_pwm.ko
+isp_sensor_i2c.ko
+mipi_rx.ko
+"
+
+# 模块参数：只有前两个需要参数，其余用默认值
+komod_args() {
+    case "$1" in
+        sysconfig.ko) echo "$SYS_OPTS" ;;
+        osal.ko)      echo "anony=1 mmz_allocator=gk mmz=anonymous,0,$MMZ_START,$MMZ_SIZE" ;;
+        *)            echo "" ;;
+    esac
+}
+
+[ -d "$KOMOD" ] || { echo "[S85mpp] no $KOMOD, skip (video unavailable)"; exit 0; }
+
+mkdir -p /var/log
+{
+    echo "[S85mpp] loading GOKE MPP modules (sensor=$SENSOR)"
+    fail=0
+    for m in $KOMOD_LIST; do
+        [ -f "$KOMOD/$m" ] || { echo "[S85mpp] missing $m"; fail=$((fail + 1)); continue; }
+        # 幂等：rcS 重启或手工重跑时不重复 insmod（会报 File exists）
+        if grep -q "^$(echo "$m" | sed 's/\.ko$//' | tr '-' '_') " /proc/modules 2>/dev/null; then
+            continue
+        fi
+        # shellcheck disable=SC2046
+        if insmod "$KOMOD/$m" $(komod_args "$m"); then
+            echo "[S85mpp]   ok   $m"
+        else
+            echo "[S85mpp]   FAIL $m"
+            fail=$((fail + 1))
+        fi
+    done
+    if [ "$fail" -eq 0 ]; then
+        echo "[S85mpp] all modules loaded; mpp ready"
+    else
+        echo "[S85mpp] $fail module(s) failed; video features will degrade"
+    fi
+} >> "$LOG" 2>&1
+
+exit 0

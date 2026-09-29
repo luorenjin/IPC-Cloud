@@ -4,13 +4,16 @@
 子命令：
   deploy-app      只替换 /usr/bin/ipc_app 并重启服务（保留 MAC/配置/激活状态）
   reflash-rootfs  reboot → 抢停 U-Boot → tftp + sf erase/write 整个 rootfs 分区 → reset
+  reflash-kernel  同上，但烧的是 kernel 分区（0x100000+5M，含 DTS）
   smoke           串口/HTTP 冒烟检查，拉回 /var/log/ipc_app.log
   shell           在板子 shell 执行一条命令并打印输出
+  push            经 TFTP 把本地文件推到板子（调试用：内核模块/自检程序）
 
 依赖：pyserial（pip install pyserial）。串口被 BurnTool / 终端占用时无法使用。
 """
 import argparse
 import datetime
+import glob
 import http.client
 import ipaddress
 import json
@@ -32,6 +35,16 @@ LOG_DIR = os.path.join(FW_DIR, "tools", "logs")
 
 ROOTFS_OFF = 0x600000
 ROOTFS_LEN = 0xA00000
+# bootargs 分区（mtd1）：内核内存切分（mem=）就在这里。mparts 是
+# sfc:512K(boot),512K(bootargs),5M(kernel),10M(rootfs) —— bootargs 在 0x80000。
+# MIN(24M)：内核只用低 24MB，剩余 40MB 全给 osal 的媒体内存池（1080p 多通道
+# + ISP 内部缓冲靠它）。改这里必须同步改 S85mpp 的 MMZ_START/MMZ_SIZE。
+BOOTARGS_OFF = 0x80000
+BOOTARGS_LEN = 0x80000
+BOOTARGS_IMG = os.path.join(IMG_DIR, "spi_image", "bootargs.bin")
+KERNEL_IMG = os.path.join(IMG_DIR, "spi_image", "uImage_gk7205v200")
+KERNEL_OFF = 0x100000
+KERNEL_LEN = 0x500000
 LOAD_ADDR = 0x42000000
 PROMPT_RE = re.compile(rb"[#$] $")
 UBOOT_PROMPT = b"# "
@@ -299,18 +312,25 @@ def cmd_deploy_app(a):
             b.close()
 
 
-def cmd_reflash_rootfs(a):
-    if not os.path.isfile(a.image):
-        sys.exit(f"找不到 {a.image}，先跑 make -f Makefile fw-rootfs")
-    size = os.path.getsize(a.image)
-    if size > ROOTFS_LEN:
-        sys.exit(f"镜像 {size} 字节超过 rootfs 分区 {ROOTFS_LEN}")
-    with open_transcript("reflash-rootfs") as tr:
+def _reflash_partition(a, off, length, what, image):
+    """抢停 U-Boot → TFTP 拉镜像 → sf erase/write 指定分区 → reset 并冒烟检查。
+
+    rootfs 与 kernel 共用这条路径，只有分区偏移/长度/镜像不同。
+    """
+    if off == 0:
+        sys.exit("拒绝擦写 0x0：那是 U-Boot 分区，写坏会变砖")
+    if not os.path.isfile(image):
+        sys.exit(f"找不到 {image}")
+    size = os.path.getsize(image)
+    if size > length:
+        sys.exit(f"镜像 {size} 字节超过 {what} 分区 {length:#x}")
+    with open_transcript(f"reflash-{what}") as tr:
         b = Board(a.port, transcript=tr)
         try:
             b.shell_prompt()
             bip = a.board_ip or board_ip_from_shell(b)
-            mac = read_saved_mac(b) if a.mac is None else a.mac
+            # 只有 reflash-rootfs 带 --mac；kernel 分区不动 rootfs，MAC 不会变
+            mac = read_saved_mac(b) if getattr(a, "mac", None) is None else a.mac
             if mac and not MAC_RE.match(mac):
                 sys.exit(f"--mac 格式不对：{mac}")
             bip_before = bip
@@ -350,20 +370,20 @@ def cmd_reflash_rootfs(a):
             if b"ethaddr=" not in m.string or b"00:00:00:00:00:00" in m.string:
                 b.uboot("setenv ethaddr 02:00:00:00:00:01")
 
-            with TftpServer(hip, {os.path.basename(a.image): a.image}):
-                b.uboot(f"mw.b {LOAD_ADDR:#x} 0xff {ROOTFS_LEN:#x}", 10)
+            with TftpServer(hip, {os.path.basename(image): image}):
+                b.uboot(f"mw.b {LOAD_ADDR:#x} 0xff {length:#x}", 10)
                 b.buf = b""
-                b.write(f"tftp {LOAD_ADDR:#x} {os.path.basename(a.image)}\n")
+                b.write(f"tftp {LOAD_ADDR:#x} {os.path.basename(image)}\n")
                 m = b.expect(re.compile(rb"Bytes transferred = (\d+)|TFTP error|Retry count exceeded|"
                                         rb"ARP Retry count exceeded"), 120, fail=None)
                 if not m.group(1) or int(m.group(1)) != size:
                     raise RuntimeError(f"U-Boot tftp 失败：{m.group(0).decode(errors='replace')}")
                 b.expect(UBOOT_PROMPT, 5, fail=None)
-            log(f"已传输 {size} 字节，开始擦写 rootfs（{ROOTFS_OFF:#x}+{ROOTFS_LEN:#x}）")
+            log(f"已传输 {size} 字节，开始擦写 {what}（{off:#x}+{length:#x}）")
             b.uboot("sf probe 0", 10)
-            b.uboot(f"sf erase {ROOTFS_OFF:#x} {ROOTFS_LEN:#x}", 180,
+            b.uboot(f"sf erase {off:#x} {length:#x}", 180,
                     ok=re.compile(rb"Erased: OK[\s\S]*# |OK[\s\S]*# "))
-            b.uboot(f"sf write {LOAD_ADDR:#x} {ROOTFS_OFF:#x} {ROOTFS_LEN:#x}", 300,
+            b.uboot(f"sf write {LOAD_ADDR:#x} {off:#x} {length:#x}", 300,
                     ok=re.compile(rb"Written: OK[\s\S]*# |OK[\s\S]*# "))
             log("写入完成，reset")
             b.buf = b""
@@ -382,6 +402,25 @@ def cmd_reflash_rootfs(a):
             return smoke(b, bip, a)
         finally:
             b.close()
+
+
+def cmd_reflash_rootfs(a):
+    return _reflash_partition(a, ROOTFS_OFF, ROOTFS_LEN, "rootfs", a.image)
+
+
+def cmd_reflash_kernel(a):
+    return _reflash_partition(a, KERNEL_OFF, KERNEL_LEN, "kernel", a.image)
+
+
+def cmd_reflash_bootargs(a):
+    """重烧 bootargs 分区（含 mem= 内存切分）。
+
+    bootargs 改成 mem=24M 后内核只用低 24MB，剩余 40MB 全给 MPP 的 MMZ——
+    1080p 多通道出流必需（见 firmware/docker/rootfs-overlay/etc/init.d/S85mpp
+    里的 MMZ_START/MMZ_SIZE，**两者必须同步改**）。
+    不动 rootfs，所以 MAC / 激活凭据 / 配置都不受影响。
+    """
+    return _reflash_partition(a, BOOTARGS_OFF, BOOTARGS_LEN, "bootargs", a.image)
 
 
 def http_get(ip, port, path, timeout=5):
@@ -494,6 +533,58 @@ def cmd_shell(a):
         b.close()
 
 
+def cmd_push(a):
+    """把本地文件经 TFTP 推到板子。
+
+    调试期专用：内核模块、自检程序这类需要反复替换的文件，走这条路不必重烧
+    rootfs（重烧会清掉 /etc/ipc/sec 里的激活凭据，还得手工备份回写）。
+    推送后逐个 md5 比对，避免“传过去但内容不全”这种最难查的故障。
+
+    （板子端 tftp 客户端由 busybox 提供，deploy-app 用的就是同一条路径。）
+    """
+    files = {}
+    # 通配符自己展开：PowerShell 把 *.ko 原样当参数传给外部程序，不会先在 shell 里展开
+    paths = []
+    for pat in a.files:
+        hit = glob.glob(pat)
+        if not hit:
+            sys.exit(f"找不到本地文件：{pat}")
+        paths.extend(hit)
+    for p in paths:
+        if not os.path.isfile(p):
+            sys.exit(f"不是文件：{p}")
+        files[os.path.basename(p)] = p
+
+    with open_transcript("push") as tr:
+        b = Board(a.port, transcript=tr)
+        try:
+            b.shell_prompt()
+            bip = a.board_ip or board_ip_from_shell(b)
+            hip = a.host_ip or pick_host_ip(bip)
+            log(f"板子 {bip}，本机 {hip}，目标 {a.to}")
+            b.run(f"mkdir -p {a.to}", timeout=20)
+            with TftpServer(hip, files):
+                for name in files:
+                    out, rc = b.run(f"tftp -b 1468 -g -r {name} -l {a.to}/{name} {hip}", timeout=180)
+                    if rc != 0:
+                        raise RuntimeError(f"下载 {name} 失败（rc={rc}）：{out}")
+                    if a.exec_bit:
+                        b.run(f"chmod 755 {a.to}/{name}", timeout=20)
+            bad = []
+            for name, path in files.items():
+                out, _ = b.run(f"md5sum {a.to}/{name}", timeout=20)
+                if md5_file(path) not in out:
+                    bad.append(name)
+            if bad:
+                raise RuntimeError(f"md5 不一致：{bad}")
+            out, _ = b.run(f"ls -l {a.to}", timeout=20)
+            log(f"已推送 {len(files)} 个文件并校验通过")
+            print(out)
+            return 0
+        finally:
+            b.close()
+
+
 def main():
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
@@ -516,6 +607,16 @@ def main():
                    help="不保留 MAC，模拟全新设备首次开机")
     s.set_defaults(fn=cmd_reflash_rootfs)
 
+    s = sub.add_parser("reflash-kernel",
+                       help="经 U-Boot 重烧 kernel 分区（0x100000+5M，含 DTS）（不断电）")
+    s.add_argument("--image", default=KERNEL_IMG)
+    s.set_defaults(fn=cmd_reflash_kernel)
+
+    s = sub.add_parser("reflash-bootargs",
+                       help="经 U-Boot 重烧 bootargs 分区（0x80000+512K，含 mem= 内存切分）")
+    s.add_argument("--image", default=BOOTARGS_IMG)
+    s.set_defaults(fn=cmd_reflash_bootargs)
+
     s = sub.add_parser("smoke", help="冒烟测试")
     s.set_defaults(fn=cmd_smoke)
 
@@ -523,6 +624,13 @@ def main():
     s.add_argument("command")
     s.add_argument("--timeout", type=float, default=30)
     s.set_defaults(fn=cmd_shell)
+
+    s = sub.add_parser("push", help="经 TFTP 把本地文件推到板子（调试用）")
+    s.add_argument("files", nargs="+", help="本地文件路径（推到 --to 目录，保持文件名）")
+    s.add_argument("--to", default="/tmp", help="板子上的目标目录（默认 /tmp）")
+    s.add_argument("--exec-bit", dest="exec_bit", action="store_true",
+                   help="推送后 chmod 755（推可执行文件时用）")
+    s.set_defaults(fn=cmd_push)
 
     a = p.parse_args()
     if a.board_ip:

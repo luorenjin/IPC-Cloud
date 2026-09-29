@@ -6,11 +6,15 @@
 
   const IPV4 = /^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}$/;
 
-  /** 改静态地址后浏览器会失联：先提示新地址，倒计时后跳转 */
-  function jumpTo(ip) {
-    const url = location.protocol + '//' + ip + (location.port ? ':' + location.port : '') + '/';
+  /** 换地址/换端口后浏览器会失联：先提示新目标，倒计时后跳转。
+   *  ip 为空 = 地址不变只换端口（port 非空时生效）。 */
+  function jumpTo(ip, port) {
+    const host = ip || location.hostname;
+    const suffix = port ? ':' + port : (location.port ? ':' + location.port : '');
+    const url = location.protocol + '//' + host + suffix + '/';
+    const title = ip ? `设备地址已改为 ${esc(ip)}` : `设备端口已改为 ${esc(String(port))}`;
     const mask = h(`<div class="user-modal-mask" role="dialog" aria-modal="true"><div class="user-modal" style="width:380px">
-      <div class="user-modal-bd" style="text-align:center;padding:28px 20px"><b>设备地址已改为 ${esc(ip)}</b>
+      <div class="user-modal-bd" style="text-align:center;padding:28px 20px"><b>${title}</b>
       <p class="tip" style="margin-top:12px"><span id="net-cd">5</span> 秒后跳转到 <a href="${esc(url)}">${esc(url)}</a></p></div></div></div>`);
     document.body.append(mask);
     let n = 5;
@@ -22,75 +26,185 @@
     }, 1000);
   }
 
+  /**
+   * 连接（对齐实机「设置→网络设置→连接」）：
+   *   连接状态 → 基本设置（模式 / IP地址 / 掩码 / 网关 / DNS）→ 高级设置（MTU）→ 保存。
+   * 运行期地址（link/ip/mask/gw/dns/mtu）来自 GET /api/v1/net/status（HAL 从 OS 读），
+   * 可写配置来自 net.*（cfg）。DHCP 下四项只读显示真实地址（与实机一致）；
+   * 静态下变输入框，DNS 拆成首选/备用两框，提交时合并写入 net.dns。
+   */
   IPC.page('pNet', function (b) {
     const box = h('<div class="sys-loading">正在读取网络设置…</div>');
     b.append(box);
-    Promise.all([IPC.getCfg('net'), IPC.api('GET', '/api/v1/system/info')])
-      .then(([cfg, info]) => {
+    Promise.all([IPC.getCfg('net'), IPC.api('GET', '/api/v1/net/status')])
+      .then(([cfg, st]) => {
         if (!box.isConnected) return;
         box.remove();
+        st = st || {};
+        const dnsSaved = String(cfg.dns || '').split(',').filter(Boolean);
         const form = {
           dhcp: cfg.dhcp !== false,
-          ip: cfg.ip || info.ip || '', mask: cfg.mask || '255.255.255.0', gw: cfg.gw || '', dns: cfg.dns || ''
+          ip: cfg.ip || st.ip || '', mask: cfg.mask || st.mask || '255.255.255.0', gw: cfg.gw || st.gw || '',
+          dns0: dnsSaved[0] || '', dns1: dnsSaved[1] || '',
+          /* 未配置 net.mtu 时显示设备此刻真实 MTU（不编造；取不到留空 = 保持默认） */
+          mtu: (cfg.mtu != null && cfg.mtu !== '') ? String(cfg.mtu) : (st.mtu ? String(st.mtu) : '')
         };
+        /** 运行期值展示：取不到显示「未获取」 */
+        const val = (v) => (v ? esc(String(v)) : '<span class="muted">未获取</span>');
         const draw = () => {
           b.innerHTML = '';
-          const rows = [
-            h(`<div class="frow"><div class="lab">当前地址</div><b>${esc(info.ip || '未获取')}</b></div>`),
-            h(`<div class="frow"><div class="lab">MAC</div><span class="muted">${esc((info.mac || '-').toUpperCase())}</span></div>`),
+          /* 连接状态 = /net/status 的 link（HAL 物理/协商链路，与拿没拿到 IP 无关） */
+          const link = st.link === 'up' ? '<b style="color:var(--brand)">已连接</b>'
+            : st.link === 'down' ? '<b class="status-off">已断开</b>'
+              : '<span class="muted">未获取</span>';
+          const basic = [
             h(`<div class="frow"><div class="lab">模式</div><select id="net-mode">
-              <option value="dhcp" ${form.dhcp ? 'selected' : ''}>自动获取（DHCP）</option>
+              <option value="dhcp" ${form.dhcp ? 'selected' : ''}>自动获取</option>
               <option value="static" ${form.dhcp ? '' : 'selected'}>静态IP</option></select></div>`)
           ];
-          if (!form.dhcp) {
-            [['IP地址', 'ip'], ['掩码', 'mask'], ['网关', 'gw'], ['DNS', 'dns']].forEach(([lab, k]) => {
-              rows.push(h(`<div class="frow"><div class="lab">${lab}</div><input type="text" data-k="${k}" value="${esc(form[k])}"></div>`));
-            });
+          if (form.dhcp) {
+            /* DHCP：只读显示设备当前真实地址；DNS 可能有首选/备用两个，用实机的 " , " 分隔 */
+            const dnsShow = String(st.dns || '').split(/[,;\s]+/).filter(Boolean).join(' , ');
+            basic.push(h(`<div class="frow"><div class="lab">IP地址</div><span>${val(st.ip)}</span></div>`));
+            basic.push(h(`<div class="frow"><div class="lab">掩码</div><span>${val(st.mask)}</span></div>`));
+            basic.push(h(`<div class="frow"><div class="lab">网关</div><span>${val(st.gw)}</span></div>`));
+            basic.push(h(`<div class="frow"><div class="lab">DNS</div><span>${val(dnsShow)}</span></div>`));
           } else {
-            rows.push(h('<p class="tip" style="padding-left:84px">由路由器自动分配地址。切换后请在路由器或串口日志中查看新地址。</p>'));
+            [['IP地址', 'ip'], ['掩码', 'mask'], ['网关', 'gw']].forEach(([lab, k]) => {
+              basic.push(h(`<div class="frow"><div class="lab">${lab}</div><input type="text" data-k="${k}" value="${esc(form[k])}" aria-label="${lab}"></div>`));
+            });
+            /* 对齐实机：静态模式 DNS 是首选/备用两框，设备侧合并成一个 net.dns */
+            basic.push(h(`<div class="frow"><div class="lab">首选DNS</div><input type="text" data-k="dns0" value="${esc(form.dns0)}" aria-label="首选DNS"></div>`));
+            basic.push(h(`<div class="frow"><div class="lab">备用DNS</div><input type="text" data-k="dns1" value="${esc(form.dns1)}" aria-label="备用DNS"></div>`));
           }
-          b.append(sec('', rows));
+          b.append(sec('', [h(`<div class="frow"><div class="lab">连接状态</div>${link}</div>`)]));
+          b.append(sec('基本设置', basic));
+          b.append(sec('高级设置', [
+            h(`<div class="frow"><div class="lab">MTU</div>
+              <input type="text" id="net-mtu" value="${esc(form.mtu)}" maxlength="4" placeholder="576-1500" aria-label="MTU"></div>`)
+          ]));
           b.querySelectorAll('input[data-k]').forEach((inp) => { inp.oninput = () => { form[inp.dataset.k] = inp.value.trim(); }; });
-          b.querySelector('#net-mode').onchange = (e) => { form.dhcp = e.target.value === 'dhcp'; draw(); };
-          b.append(IPC.ui.saveRow(() => {
-            if (!form.dhcp) {
-              if (!IPV4.test(form.ip)) return Promise.reject(new Error('IP 地址格式不正确'));
-              if (!IPV4.test(form.mask)) return Promise.reject(new Error('子网掩码格式不正确'));
-              if (form.gw && !IPV4.test(form.gw)) return Promise.reject(new Error('网关格式不正确'));
-              if (form.dns && !IPV4.test(form.dns)) return Promise.reject(new Error('DNS 格式不正确'));
-              const n = (s) => s.split('.').reduce((a, x) => (a * 256) + (+x), 0);
-              const m = n(form.mask);
-              if (form.gw && (n(form.gw) & m) >>> 0 !== (n(form.ip) & m) >>> 0)
-                return Promise.reject(new Error('网关与 IP 不在同一网段'));
-              const same = cfg.dhcp === false && cfg.ip === form.ip && (cfg.mask || '') === form.mask &&
-                (cfg.gw || '') === form.gw && (cfg.dns || '') === form.dns;
-              if (!same && !confirm('设备地址将改为 ' + form.ip + '，浏览器会跳转到新地址，继续？')) return Promise.reject(new Error('已取消'));
-            } else if (cfg.dhcp === false && !confirm('切换为自动获取后设备地址会改变，当前页面将无法访问，继续？')) {
-              return Promise.reject(new Error('已取消'));
-            }
-            /* 一次提交：设备先校验，通过才保存并应用；被拒时 msg 为具体原因、配置不落盘 */
-            const body = form.dhcp ? { dhcp: true }
-              : { dhcp: false, ip: form.ip, mask: form.mask, gw: form.gw, dns: form.dns };
-            return IPC.api('POST', '/api/v1/system/net/apply', body)
-              .then((r) => {
-                Object.assign(cfg, form);
-                if (r.unchanged) return;
-                if (r.new_ip && r.new_ip !== location.hostname) jumpTo(r.new_ip);
-                else if (!r.new_ip) toast('已切换为自动获取，请在路由器中查看设备新地址');
-              });
-          }));
+          const mtuEl = $('#net-mtu', b);
+          if (mtuEl) mtuEl.oninput = () => { form.mtu = mtuEl.value.trim(); };
+          $('#net-mode', b).onchange = (e) => { form.dhcp = e.target.value === 'dhcp'; draw(); };
+          /* 对齐实机：本页只有「保存」（保存语义与 IPC.ui.saveRow 一致：设备确认后才提示） */
+          const row = h('<div class="save-row"><button class="btn primary" type="button">保存</button></div>');
+          const btn = row.querySelector('button');
+          btn.onclick = () => {
+            btn.disabled = true;
+            Promise.resolve().then(save)
+              .then((msg) => toast(typeof msg === 'string' && msg ? msg : '保存成功'))
+              .catch((e) => toast((e && e.message) || '保存失败'))
+              .finally(() => { btn.disabled = false; });
+          };
+          b.append(row);
+        };
+        const save = () => {
+          if (!form.dhcp) {
+            if (!IPV4.test(form.ip)) return Promise.reject(new Error('IP 地址格式不正确'));
+            if (!IPV4.test(form.mask)) return Promise.reject(new Error('子网掩码格式不正确'));
+            if (form.gw && !IPV4.test(form.gw)) return Promise.reject(new Error('网关格式不正确'));
+            if (form.dns0 && !IPV4.test(form.dns0)) return Promise.reject(new Error('首选 DNS 格式不正确'));
+            if (form.dns1 && !IPV4.test(form.dns1)) return Promise.reject(new Error('备用 DNS 格式不正确'));
+            const n = (s) => s.split('.').reduce((a, x) => (a * 256) + (+x), 0);
+            const m = n(form.mask);
+            if (form.gw && (n(form.gw) & m) >>> 0 !== (n(form.ip) & m) >>> 0)
+              return Promise.reject(new Error('网关与 IP 不在同一网段'));
+            const dnsNow = [form.dns0, form.dns1].filter(Boolean).join(',');
+            const same = cfg.dhcp === false && cfg.ip === form.ip && (cfg.mask || '') === form.mask &&
+              (cfg.gw || '') === form.gw && (cfg.dns || '') === dnsNow;
+            if (!same && !confirm('设备地址将改为 ' + form.ip + '，浏览器会跳转到新地址，继续？')) return Promise.reject(new Error('已取消'));
+          } else if (cfg.dhcp === false && !confirm('切换为自动获取后设备地址会改变，当前页面将无法访问，继续？')) {
+            return Promise.reject(new Error('已取消'));
+          }
+          if (form.mtu && (!/^\d+$/.test(form.mtu) || +form.mtu < 576 || +form.mtu > 1500))
+            return Promise.reject(new Error('MTU 范围应为 576-1500'));
+          /* 一次提交：设备先校验，通过才保存并应用；被拒时 msg 为具体原因、配置不落盘。
+           * mtu 留空 = 本次不动 MTU（设备保持已配置值或系统默认）。 */
+          const body = { dhcp: form.dhcp };
+          if (!form.dhcp) {
+            body.ip = form.ip; body.mask = form.mask; body.gw = form.gw;
+            body.dns = [form.dns0, form.dns1].filter(Boolean).join(',');
+          }
+          if (form.mtu) body.mtu = +form.mtu;
+          return IPC.api('POST', '/api/v1/system/net/apply', body)
+            .then((r) => {
+              if (r.unchanged) { IPC.render(); return; }
+              if (r.new_ip && r.new_ip !== location.hostname) { jumpTo(r.new_ip); return; }
+              if (!r.new_ip) toast('已切换为自动获取，请在路由器中查看设备新地址');
+              /* 重新拉取运行期地址与链路状态，避免页面停留在旧值 */
+              IPC.render();
+            });
         };
         draw();
       })
       .catch((e) => { if (box.isConnected) box.textContent = '读取失败：' + e.message; });
   });
 
+  /**
+   * 端口（对齐实机「网络设置→端口」）：HTTP / RTSP 两行 + 恢复默认 + 保存。
+   * 值来自 cfg 的 port.http/port.rtsp（未写入时 HTTP 取当前访问端口、RTSP 取 554）。
+   * HTTP 端口保存后设备立即重绑监听：POST /system/port/apply 先做占用预检，
+   * 返回 new_port → 前端倒计时跳转；RTSP 只落盘（固件暂无 RTSP 服务，
+   * 值供 RTSP 模块/平台后续使用）。默认 HTTP 8080（PRD LC-NET-02）。
+   */
+  const PORT_DEFAULT = { http: 8080, rtsp: 554 };
   IPC.page('pPort', function (b) {
-    b.append(sec('', [
-      numRow('HTTP', 'httpPort', 1, 65535),
-      numRow('RTSP', 'rtspPort', 1, 65535)
-    ]));
-    b.append(saveRow());
+    const box = h('<div class="sys-loading">正在读取端口设置…</div>');
+    b.append(box);
+    IPC.getCfg('port')
+      .then((cfg) => {
+        if (!box.isConnected) return;
+        box.remove();
+        const here = location.port ? +location.port
+          : (location.protocol === 'https:' ? 443 : 80);
+        S.httpPort = (cfg.http >= 1 && cfg.http <= 65535) ? cfg.http : here;
+        S.rtspPort = (cfg.rtsp >= 1 && cfg.rtsp <= 65535) ? cfg.rtsp : PORT_DEFAULT.rtsp;
+        const draw = () => {
+          b.innerHTML = '';
+          b.append(sec('', [
+            numRow('HTTP', 'httpPort', 1, 65535),
+            numRow('RTSP', 'rtspPort', 1, 65535)
+          ]));
+          /* 对齐实机：恢复默认（左）+ 保存（右） */
+          const row = h(`<div class="save-row">
+            <button class="btn ghost" type="button" id="port-reset">恢复默认</button>
+            <button class="btn primary" type="button">保存</button></div>`);
+          $('#port-reset', row).onclick = () => {
+            S.httpPort = PORT_DEFAULT.http;
+            S.rtspPort = PORT_DEFAULT.rtsp;
+            draw();
+            toast('已填入默认值，点保存后生效');
+          };
+          const btn = row.querySelector('button.primary');
+          btn.onclick = () => {
+            btn.disabled = true;
+            Promise.resolve().then(save)
+              .then((msg) => toast(typeof msg === 'string' && msg ? msg : '保存成功'))
+              .catch((e) => toast((e && e.message) || '保存失败'))
+              .finally(() => { btn.disabled = false; });
+          };
+          b.append(row);
+        };
+        const save = () => {
+          const hv = +S.httpPort, rv = +S.rtspPort;
+          if (!Number.isInteger(hv) || hv < 1 || hv > 65535)
+            return Promise.reject(new Error('HTTP 端口需为 1-65535'));
+          if (!Number.isInteger(rv) || rv < 1 || rv > 65535)
+            return Promise.reject(new Error('RTSP 端口需为 1-65535'));
+          return IPC.api('POST', '/api/v1/system/port/apply', { http: hv, rtsp: rv })
+            .then((r) => {
+              const cur = location.port || (location.protocol === 'https:' ? '443' : '80');
+              if (r.new_port != null && String(r.new_port) !== String(cur)) {
+                jumpTo(null, +r.new_port);   /* 设备已换端口，倒计时后跳过去 */
+                return;
+              }
+              return r.msg || '保存成功';
+            });
+        };
+        draw();
+      })
+      .catch((e) => { if (box.isConnected) box.textContent = '读取失败：' + e.message; });
   });
 
   /**

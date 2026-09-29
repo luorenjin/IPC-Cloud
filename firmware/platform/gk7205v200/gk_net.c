@@ -36,21 +36,76 @@ static hal_err_t net_get_caps(hal_net_caps_t *caps)
 }
 
 #ifndef _WIN32
-/* 填充 eth0 的 IPv4 地址；未获取到时保持空串（hal_net.h 契约） */
-static void fill_ipv4(const char *ifname, char *out, size_t cap)
+/* 填充 eth0 的 IPv4 地址与掩码；未获取到时保持空串（hal_net.h 契约） */
+static void fill_ipv4_mask(const char *ifname, char *ip, size_t ipc, char *mask, size_t maskc)
 {
     struct ifaddrs *ifa = NULL, *p;
 
-    out[0] = '\0';
+    if (ip) ip[0] = '\0';
+    if (mask) mask[0] = '\0';
     if (getifaddrs(&ifa) != 0) return;
     for (p = ifa; p; p = p->ifa_next) {
         if (!p->ifa_addr || !p->ifa_name) continue;
         if (p->ifa_addr->sa_family != AF_INET) continue;
         if (strcmp(p->ifa_name, ifname) != 0) continue;
-        inet_ntop(AF_INET, &((struct sockaddr_in *)p->ifa_addr)->sin_addr, out, (socklen_t)cap);
+        if (ip) inet_ntop(AF_INET, &((struct sockaddr_in *)p->ifa_addr)->sin_addr, ip, (socklen_t)ipc);
+        if (mask && p->ifa_netmask)
+            inet_ntop(AF_INET, &((struct sockaddr_in *)p->ifa_netmask)->sin_addr, mask, (socklen_t)maskc);
         break;
     }
     freeifaddrs(ifa);
+}
+
+/**
+ * 默认网关：/proc/net/route 里 Destination 为全 0 的那一行。
+ * 网关列是**主机字节序的十六进制**（192.168.1.1 打印成 0101A8C0），
+ * 直接塞进 in_addr 再 inet_ntop 即可——本平台是小端，字节序天然对上。
+ */
+static void fill_gw(const char *ifname, char *out, size_t cap)
+{
+    FILE *fp;
+    char line[256], iface[HAL_IFNAME_MAX];
+    unsigned long dest = 1, gw = 0;
+    bool head = true;
+
+    out[0] = '\0';
+    fp = fopen("/proc/net/route", "r");
+    if (!fp) return;
+    while (fgets(line, sizeof(line), fp)) {
+        if (head) { head = false; continue; }   /* 跳过表头 */
+        if (sscanf(line, "%15s %lx %lx", iface, &dest, &gw) != 3) continue;
+        if (strcmp(iface, ifname) != 0 || dest != 0) continue;
+        {
+            struct in_addr a;
+            a.s_addr = (uint32_t)gw;
+            if (!inet_ntop(AF_INET, &a, out, (socklen_t)cap)) out[0] = '\0';
+        }
+        break;
+    }
+    fclose(fp);
+}
+
+/** 主 DNS：/etc/resolv.conf 的第一条 nameserver */
+static void fill_dns(char *out, size_t cap)
+{
+    FILE *fp;
+    char line[256];
+
+    out[0] = '\0';
+    fp = fopen("/etc/resolv.conf", "r");
+    if (!fp) return;
+    while (fgets(line, sizeof(line), fp)) {
+        char *p = line, *v;
+        while (*p == ' ' || *p == '\t') p++;
+        if (strncmp(p, "nameserver", 10) != 0) continue;
+        p += 10;
+        while (*p == ' ' || *p == '\t' || *p == '=') p++;
+        v = p;
+        while (*p && *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r') p++;
+        if (p > v) { *p = '\0'; snprintf(out, cap, "%s", v); }
+        break;
+    }
+    fclose(fp);
 }
 #endif
 
@@ -91,7 +146,14 @@ static hal_err_t net_get_status(hal_netif_t type, hal_netif_status_t *st)
 
     fill_mac(ETH_IFNAME, st->mac);
 #ifndef _WIN32
-    fill_ipv4(ETH_IFNAME, st->ip, sizeof(st->ip));
+    fill_ipv4_mask(ETH_IFNAME, st->ip, sizeof(st->ip), st->mask, sizeof(st->mask));
+    fill_gw(ETH_IFNAME, st->gw, sizeof(st->gw));
+    fill_dns(st->dns, sizeof(st->dns));
+    {
+        uint64_t mtu = 0;
+        snprintf(path, sizeof(path), "/sys/class/net/%s/mtu", ETH_IFNAME);
+        if (gk_read_u64(path, &mtu) && mtu > 0 && mtu <= 65535) st->mtu = (uint32_t)mtu;
+    }
 #endif
 
     /* 网卡不存在时以上全部取不到值，仍返回 HAL_OK：ip 为空串即表示“未知”，

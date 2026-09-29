@@ -21,6 +21,14 @@ CONTENT_TYPES = {
     '.png':  'image/png',
 }
 
+# gzip 后的总预算（PRD §6 非功能需求「资源」）。
+# 2026-09-29 由 200KB 上调到 400KB：资源是**内嵌进 ipc_app 二进制**的，
+# 体积会直接变成 rootfs 占用（16MB NOR，rootfs 分区 10M，实测可用 ~2.8M；
+# ipc_app 当前 1.56MB，其中内嵌资源 gzip 约 190KB）。预算翻倍后 ipc_app
+# 约 1.77MB，rootfs 仍余 ~2.65M——所以 400KB 是有实测依据的，不是拍脑袋。
+GZIP_BUDGET = 400 * 1024
+GZIP_WARN_AT = int(GZIP_BUDGET * 0.9)   # 用到 90% 就提醒，留整改余量
+
 
 def c_array(data: bytes) -> str:
     out = []
@@ -103,7 +111,18 @@ def main() -> int:
 
     dst.parent.mkdir(parents=True, exist_ok=True)
     dst.write_text('\n'.join(parts), encoding='utf-8')
-    print(f'已生成 {dst}：{len(entries)} 个资源，原始 {total_raw} 字节，gzip 后 {total_gz} 字节')
+    pct = total_gz * 100 // GZIP_BUDGET
+    print(f'已生成 {dst}：{len(entries)} 个资源，原始 {total_raw} 字节，'
+          f'gzip 后 {total_gz} 字节（预算 {GZIP_BUDGET}，已用 {pct}%）')
+    # 门禁：文件照常生成（好定位是哪些资源涨的），但退出码非 0 让 CI/流水线变红。
+    # 没有这道闸，体积只会一路悄悄涨到上线烧不进去才发现。
+    if total_gz > GZIP_BUDGET:
+        print(f'错误：gzip 后 {total_gz} 字节已超过预算 {GZIP_BUDGET} 字节（PRD §6）——'
+              f'资源会内嵌进 ipc_app 吃掉 rootfs，请压缩或拆分资源', file=sys.stderr)
+        return 1
+    if total_gz > GZIP_WARN_AT:
+        print(f'警告：已用预算 {total_gz}/{GZIP_BUDGET} 字节（{pct}%），'
+              f'接近上限，请评估新增资源', file=sys.stderr)
     return 0
 
 

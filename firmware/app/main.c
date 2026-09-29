@@ -71,6 +71,7 @@ int main(int argc, char **argv)
     const char *profile_path = NULL;
     const char *persist_path = DEFAULT_PERSIST;
     int port = DEFAULT_PORT;
+    bool port_arg = false;          /* 是否显式传了 --port（显式值优先于配置） */
     char *profile_json = NULL;
     hal_err_t rc;
     int i;
@@ -80,6 +81,7 @@ int main(int argc, char **argv)
             profile_path = argv[++i];
         } else if (strcmp(argv[i], "--port") == 0 && i + 1 < argc) {
             port = atoi(argv[++i]);
+            port_arg = true;
         } else if (strcmp(argv[i], "--persist") == 0 && i + 1 < argc) {
             persist_path = argv[++i];
         } else {
@@ -113,6 +115,16 @@ int main(int argc, char **argv)
     if (rc != HAL_OK) {
         LOGE("app", "配置中心初始化失败: %s", hal_strerror(rc));
         goto fail_hal;
+    }
+
+    /* 监听端口（PRD LC-NET-02）：显式 --port 优先（开发/测试/板端脚本用）；
+       否则用已保存的 port.http（控制台「网络设置→端口」保存的值，缺省 8080）。 */
+    if (!port_arg) {
+        int64_t cfg_port = 0;
+        if (cfg_get_int("port.http", &cfg_port) == HAL_OK && cfg_port >= 1 && cfg_port <= 65535) {
+            port = (int)cfg_port;
+            LOGI("app", "按配置使用 HTTP 端口 %d", port);
+        }
     }
 
     /* 评审 Ruling 21（I-5）：生产启动流程此前完全没有调用 event_bus_init，

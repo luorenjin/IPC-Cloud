@@ -8,7 +8,6 @@
 APP=/usr/bin/ipc_app
 PROFILE=/etc/ipc/SP-R1-02.json
 LOG=/var/log/ipc_app.log
-PORT=8080
 
 [ -x "$APP" ] || exit 0
 [ -f "$PROFILE" ] || exit 0
@@ -16,7 +15,10 @@ PORT=8080
 mkdir -p /var/log /etc/ipc/sec
 chmod 700 /etc/ipc/sec 2>/dev/null
 
-echo "[S90ipcapp] starting console on port $PORT"
-"$APP" --profile "$PROFILE" --port "$PORT" --persist /etc/ipc/config.json >> "$LOG" 2>&1 &
+# 不传 --port：监听端口由 app 自己决定——读 cfg 的 port.http（控制台
+# 「网络设置→端口」保存的值），缺省 8080。原先这里写死 --port 8080，会在
+# 重启时把保存的端口盖回去，造成 cfg 与实际监听不一致（PRD LC-NET-02）。
+echo "[S90ipcapp] starting console (port from config, default 8080)"
+"$APP" --profile "$PROFILE" --persist /etc/ipc/config.json >> "$LOG" 2>&1 &
 
 exit 0

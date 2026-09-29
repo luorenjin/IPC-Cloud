@@ -256,23 +256,34 @@ static bool ipv4_chars_ok(const char *s)
     return true;
 }
 
-static hal_err_t sys_apply_net(const char *ip, const char *mask, const char *gw, const char *dns)
+/** DNS 允许 "首选,备用"：在点分十进制基础上多放一个逗号（同样防注入） */
+static bool dns_chars_ok(const char *s)
+{
+    for (; s && *s; s++) if (!((*s >= '0' && *s <= '9') || *s == '.' || *s == ',')) return false;
+    return true;
+}
+
+static hal_err_t sys_apply_net(const char *ip, const char *mask, const char *gw, const char *dns, int mtu)
 {
 #ifdef _WIN32
-    (void)ip; (void)mask; (void)gw; (void)dns;
+    (void)ip; (void)mask; (void)gw; (void)dns; (void)mtu;
     return HAL_ENOTSUP;
 #else
     const char *tmp = GK_NET_CONF ".tmp";
     bool dhcp = !ip || !ip[0];
     FILE *fp;
 
-    if (!ipv4_chars_ok(ip) || !ipv4_chars_ok(mask) || !ipv4_chars_ok(gw) || !ipv4_chars_ok(dns))
+    if (!ipv4_chars_ok(ip) || !ipv4_chars_ok(mask) || !ipv4_chars_ok(gw) || !dns_chars_ok(dns))
         return HAL_EINVAL;
+    if (mtu != 0 && (mtu < 576 || mtu > 1500))
+        return HAL_EINVAL;                     /* 与 core/config.c 的 net.mtu 规则同区间 */
     fp = fopen(tmp, "w");
     if (!fp) return HAL_EIO;
     if (dhcp) fprintf(fp, "MODE=dhcp\n");
     else fprintf(fp, "MODE=static\nIP=%s\nMASK=%s\nGW=%s\nDNS=%s\n", ip, mask ? mask : "",
                  gw ? gw : "", dns ? dns : "");
+    /* MTU 两种模式都要生效：S81dhcp 读它设置 ifconfig eth0 mtu；0 = 不写，保持默认 */
+    if (mtu > 0) fprintf(fp, "MTU=%d\n", mtu);
     if (fflush(fp) != 0 || fsync(fileno(fp)) != 0) { fclose(fp); remove(tmp); return HAL_EIO; }
     fclose(fp);
     if (rename(tmp, GK_NET_CONF) != 0) { remove(tmp); return HAL_EIO; }

@@ -10,6 +10,13 @@
 - 运行：经设备（或本地 mock `ipc_app`）内嵌静态资源访问。`file://` 只能看壳层——激活、登录、保存都要设备接口
 - 设计依据：`Docs/superpowers/specs/2026-09-07-ipc-local-web-console-design.md`、`2026-09-21-控制台真机落地-design.md`
 
+## 功能取舍：对标 TP-LINK 实机（强制，详见根 `AGENTS.md`）
+
+- 对标基准 = TP-LINK 摄像头实机控制台（`http://172.16.1.180/`，登录凭据向用户索取，勿写入仓库文件）；设置/功能模块按**通用能力**呈现，当前设备虽是 IDP 自研摄像头，也**先照实机对齐，不要隐藏功能模块**。
+- **认为对标功能不合理时不得自行删除/隐藏/改语义**：先向用户说明「实机怎样、我们怎样、我为何觉得不合理、建议怎么办」，拿到确认后再改；未确认前保持原样。
+- 可自行处理的只有纯样式微调、既有 `IPC.feat(id)` 能力门控（设备未上报即隐藏）、以及用户已授权的重构。
+- **先懂功能再对齐**：逐项对齐前先弄清①业务场景（这选项解决什么问题）②参数语义与原理（范围/单位/默认值/联动，及背后的机制，如码率控制、侦测灵敏度、录像触发、NTP/时区）③本项目落点（`cfg_*` 键 + feature/module ID + `console_api.c` 端点，还是**暂无后端能力**）。查 PRD 或问用户，别照抄控件却不接后端、别猜默认值；多项对齐先做「参数 → 语义 → 原理 → 键/ID → 现状」清单。
+
 ## 改完必须重新生成内嵌资源
 
 **`console_assets.c` 不是手写文件，也不会被 CMake 自动再生成。**
@@ -20,6 +27,7 @@ python firmware/scripts/gen_assets.py firmware/web firmware/modules/console/cons
 ```
 
 - 改 `firmware/web/**` 任意文件后**必须**跑上面命令，并把 `console_assets.c` 一并提交。
+- **gzip 总量预算 400KB（PRD §6，2026-09-29 由 200KB 上调）**：资源 gzip 后会**内嵌进 `ipc_app`**，直接吃 rootfs（16MB NOR，rootfs 分区 10M，实测可用 ~2.8M）。`gen_assets.py` 已带门禁——超 400KB 打印错误并返回非 0，用到 90% 打印警告；当前实测约 190KB（47%）。删资源/压资源时别顺手改预算，要改先量 flash。
 - 跑完后确认生成物条目数 ≈ `firmware/web` 下文件数（当前源侧已有 `js/views/*`、`assets/*` 等；若 `s_assets` 仍只有 `/index.html` `/app.js` `/style.css`，说明**未再生成**，真机会 404/兜底回 `index.html`）。
 - gzip 用 `mtime=0`：相同输入 → 相同字节，避免无意义 diff。
 - 生成物头注释：**请勿手工编辑** `console_assets.c`。
@@ -52,6 +60,12 @@ python firmware/scripts/gen_assets.py firmware/web firmware/modules/console/cons
 ## 前端结构约定
 
 - 全局命名空间 `window.IPC`：`S` 状态、`page(id, fn)` 注册页、`render()` 由 `router.js` 提供。
+- **预览只有两种接法，别自己开 WebSocket**（接流/断流由 `core.js` 的 `attachPreviews` / `detachPreviews` 统一管，`router.js` 在换页前后各调一次）：
+  - 子码流（MJPEG）→ `<img data-preview="sub">`；
+  - **主码流（H.264 裸流）→ `<video data-preview-h264="/ws/v1/preview?stream=main" muted playsinline>`**，由 `js/preview-player.js` transmux 到 MSE。**写成 `img data-preview="main"` 一定黑屏**——主码流帧是 `'K'/'P' + Annex-B`，`<img>` 解不了（实测 `naturalWidth` 恒 0）。
+  - 板端预览是**单消费者**：同一时刻只能有一条，所以换页/换码流必须先 `detachPreviews()` 再接新的。
+- 页面上有**暂无设备端接口**的控件时（如图像页的曝光/白平衡/补光设置），按根 `AGENTS.md` 保持可见，但**必须在页面上如实标注"不会下发"**，不得做成假开关；真接上的项要能走 `IPC.saveCfg` / `IPC.api` 并有 cfg 键。
+
 - 页面插件在 `js/views/*.js`，通过 `IPC.page('pImage', …)` 注册；`router.js` 的 `TAB_PAGE` 把页签映到 id——**加页要同时改 views 与 TAB_PAGE**。
 - 文案当前硬编码中文（无 i18n 目录）；与 `platform/web` 的 `locales/` **无关**。
 - 预览图：`assets/preview-still.jpg` 占位；实时 WS-FLV / h265web **本期未接**（真机 milestone 明确非目标）。

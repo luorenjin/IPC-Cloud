@@ -4,6 +4,8 @@ add_library(ipc_console STATIC
     console_api.c
     console_apply.c
     console_net.c
+    console_maint.c
+    console_preview.c
     console_assets.c
     console_static.c
 )

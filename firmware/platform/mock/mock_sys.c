@@ -243,10 +243,10 @@ static hal_err_t s_ota_abort(void)
 static char    g_last_net[256];
 static char    g_last_ntp[128];
 
-static hal_err_t s_apply_net(const char *ip, const char *mask, const char *gw, const char *dns)
+static hal_err_t s_apply_net(const char *ip, const char *mask, const char *gw, const char *dns, int mtu)
 {
-    snprintf(g_last_net, sizeof(g_last_net), "%s/%s/%s/%s",
-             ip ? ip : "", mask ? mask : "", gw ? gw : "", dns ? dns : "");
+    snprintf(g_last_net, sizeof(g_last_net), "%s/%s/%s/%s/%d",
+             ip ? ip : "", mask ? mask : "", gw ? gw : "", dns ? dns : "", mtu);
     return HAL_OK;
 }
 

@@ -596,6 +596,18 @@ func handleUpdateChannel(c *gin.Context) {
 var cfgKeys = []string{
 	// 画面（画面信息组，0–100 归一化；flip/mirror 为 0/1 开关）
 	"image.brightness", "image.contrast", "image.saturation", "image.sharpness", "image.flip", "image.mirror",
+	// 日夜配置与宽动态：daynight 是 common|timed|auto 三态，逐字对齐实机
+	// dayNightMode 的 日夜通用/日夜定时切换/日夜自动切换（其中 timed 的时段表
+	// 固件侧尚未实现，见 Docs/遗留问题清单.md LEG-UI-13）；wdr 是开关。
+	// GC2053 是线性 sensor，宽动态走 ISP 的 DRC 而非多帧合成。
+	"image.daynight", "image.wdr",
+	// 区域补偿（背光补偿）：开关，对应固件 image.blc ↔ hal_image_t.backlight_comp
+	"image.blc",
+	// 曝光组（PRD LC-IMG-04）/ 白平衡 / 补光组（LC-IMG-05）：与图像参数同属一屏，
+	// 枚举值就是 UI 下拉的取值，三处键表（固件规则表 / 平台 / 模拟器）必须逐字一致
+	"image.exposure.mode", "image.exposure.level", "image.antiflicker",
+	"image.awb",
+	"image.ir.mode", "image.ir.sensitivity", "image.ir.delay",
 	// 编码（主码流）
 	"video.0.main.codec", "video.0.main.w", "video.0.main.h", "video.0.main.fps",
 	"video.0.main.kbps", "video.0.main.gop", "video.0.main.rc",
@@ -613,9 +625,12 @@ var cfgKeys = []string{
 	"alarm.motion.enable", "alarm.motion.sensitivity", "alarm.motion.regions",
 	// 时间同步
 	"time.ntp.enable", "time.ntp.server", "time.timezone",
-	// 网络（reboot_required；静态地址四件套 + DHCP 开关，编辑交互见 [id].vue 的
+	// 网络（reboot_required；静态地址四件套 + DHCP 开关 + MTU，编辑交互见 [id].vue 的
 	// NetworkSettings 区块，前端带独立保存与强确认）
-	"net.dhcp", "net.ip", "net.mask", "net.gw", "net.dns",
+	"net.dhcp", "net.ip", "net.mask", "net.gw", "net.dns", "net.mtu",
+	// 端口（PRD LC-NET-02：默认 HTTP 8080、RTSP 554）。设备本机保存会立即重绑
+	// HTTP 监听；远程 cfg 下发属通用路径，标注重启生效（与固件规则表一致）
+	"port.http", "port.rtsp",
 	// 本地设置（设备维护页签）
 	"localUser.name", "led.enable", "device.name",
 	// 本地账户口令（接入规范 §5.7 的 cfg 最小集里就有 localUser.password）。
@@ -636,9 +651,9 @@ var cfgWriteOnly = map[string]bool{
 // cfgRebootRequired 是固件配置规则表里 reboot_required=true 项的静态镜像，
 // 不做实时抓取：这个属性在固件侧是编译期常量（cfg_rule_t.reboot_required），
 // 没必要为一个不会在运行时变化的标记多打一次设备往返。
-// 与 firmware/core/src/config.c 的 video.%d.%s.w/h、net.dhcp/net.ip/net.mask/net.gw/net.dns
-// 逐字对齐——这九项（各通道的 w/h 各算一项）是当前固件规则表里*仅有*的 reboot_required 键；
-// 固件规则表调整后需要手动同步这里。
+// 与 firmware/core/src/config.c 的 video.%d.%s.w/h、net.dhcp/net.ip/net.mask/net.gw/net.dns/net.mtu、
+// port.http/port.rtsp 逐字对齐——这些项（各通道的 w/h 各算一项）是当前固件规则表里
+// *仅有*的 reboot_required 键；固件规则表调整后需要手动同步这里。
 var cfgRebootRequired = map[string]bool{
 	"video.0.main.w": true,
 	"video.0.main.h": true,
@@ -647,6 +662,9 @@ var cfgRebootRequired = map[string]bool{
 	"net.mask":       true,
 	"net.gw":         true,
 	"net.dns":        true,
+	"net.mtu":        true,
+	"port.http":      true,
+	"port.rtsp":      true,
 }
 
 func handleDeviceConfigGet(c *gin.Context) {

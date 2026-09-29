@@ -17,7 +17,7 @@ extern "C" {
 #endif
 
 /** 安全存储预定义键 */
-#define HAL_SEC_KEY_DEVICE_ID     "device_id"      /**< 17 位 DeviceID */
+#define HAL_SEC_KEY_DEVICE_ID     "device_id"      /**< 17 位 DeviceID（唯一身份，即序列码） */
 #define HAL_SEC_KEY_VERIFY_CODE   "verify_code"    /**< 6 位验证码 */
 #define HAL_SEC_KEY_DEVICE_CERT   "device_cert"    /**< PEM */
 #define HAL_SEC_KEY_DEVICE_KEY    "device_key"     /**< 私钥（仅 HAL 内可读） */

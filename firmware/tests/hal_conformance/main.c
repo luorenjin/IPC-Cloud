@@ -193,6 +193,35 @@ static void test_video(void)
         CHECK(v->set_image(&img) == HAL_OK && v->get_image(&rd) == HAL_OK && rd.brightness == 70, "image brightness");
         img.brightness = 101;
         CHECK(v->set_image(&img) == HAL_EINVAL, "brightness>100 rejected");
+        /* 图像页其它项：逐字段卡上界，越界必须 EINVAL（-1 依旧 = 不修改） */
+        memset(&img, -1, sizeof(img));
+        img.exposure_level = -4;
+        CHECK(v->set_image(&img) == HAL_EINVAL, "exposure_level<-3 rejected");
+        img.exposure_level = 4;
+        CHECK(v->set_image(&img) == HAL_EINVAL, "exposure_level>3 rejected");
+        memset(&img, -1, sizeof(img)); img.ir_sensitivity = 8;
+        CHECK(v->set_image(&img) == HAL_EINVAL, "ir_sensitivity>7 rejected");
+        img.ir_sensitivity = -1; img.ir_delay_s = 4;
+        CHECK(v->set_image(&img) == HAL_EINVAL, "ir_delay_s<5 rejected");
+        img.ir_delay_s = 61;
+        CHECK(v->set_image(&img) == HAL_EINVAL, "ir_delay_s>60 rejected");
+        /* 合法组合一次性下发，并逐字段读回（验证 merge 没漏字段） */
+        memset(&img, -1, sizeof(img));
+        img.exposure_mode = HAL_EXP_AUTO; img.exposure_level = 2;
+        img.antiflicker = HAL_FLICKER_50HZ; img.awb_mode = HAL_AWB_OUTDOOR;
+        img.ir_mode = HAL_IR_ON; img.ir_sensitivity = 6; img.ir_delay_s = 20;
+        CHECK(v->set_image(&img) == HAL_OK, "image extras accepted");
+        CHECK(v->get_image(&rd) == HAL_OK && rd.exposure_level == 2 && rd.antiflicker == HAL_FLICKER_50HZ &&
+              rd.awb_mode == HAL_AWB_OUTDOOR && rd.ir_mode == HAL_IR_ON &&
+              rd.ir_sensitivity == 6 && rd.ir_delay_s == 20,
+              "image extras roundtrip (mode=%d lvl=%d flicker=%d awb=%d ir=%d sens=%d delay=%d)",
+              rd.exposure_mode, rd.exposure_level, rd.antiflicker, rd.awb_mode,
+              rd.ir_mode, rd.ir_sensitivity, rd.ir_delay_s);
+        /* 还原：不让后续断言看到脏状态 */
+        memset(&img, -1, sizeof(img));
+        img.exposure_level = 0; img.antiflicker = HAL_FLICKER_OFF; img.awb_mode = HAL_AWB_AUTO;
+        img.ir_mode = HAL_IR_AUTO; img.ir_sensitivity = 4; img.ir_delay_s = 5;
+        CHECK(v->set_image(&img) == HAL_OK, "image extras restored");
         CHECK(v->set_daynight(HAL_DAYNIGHT_NIGHT) == HAL_OK && v->get_daynight(&dn, &night) == HAL_OK && dn == HAL_DAYNIGHT_NIGHT, "daynight");
     }
 
@@ -257,6 +286,35 @@ static void test_osd_ivs(void)
     } else printf("  ivs skipped\n");
 }
 
+/** 点分十进制四段；空串算合法（hal_net.h 的「未知即空串」约定）。允许尾部空白。 */
+static bool dotted4_or_empty(const char *s)
+{
+    size_t i = 0, len;
+    int segs = 0;
+
+    if (!s) return false;
+    len = strlen(s);
+    while (len && (s[len - 1] == '\n' || s[len - 1] == '\r' || s[len - 1] == ' ' || s[len - 1] == '\t')) len--;
+    if (len == 0) return true;
+    while (i < len) {
+        int n = 0, d = 0;
+        while (i < len && s[i] >= '0' && s[i] <= '9') {
+            if (d == 1 && n == 0) return false;   /* 拒前导 0 */
+            n = n * 10 + (s[i] - '0');
+            if (++d > 3 || n > 255) return false;
+            i++;
+        }
+        if (!d) return false;
+        segs++;
+        if (i < len) {
+            if (s[i] != '.') return false;
+            i++;
+            if (i == len) return false;   /* 末尾多个点 */
+        }
+    }
+    return segs == 4;
+}
+
 /* ---------------- HAL-07 gpio / net / storage ---------------- */
 static void test_gpio_net_storage(void)
 {
@@ -283,6 +341,13 @@ static void test_gpio_net_storage(void)
        （否则 console 侧的 "%s" 格式化会读出界）。 */
     CHECK(memchr(ns.ip, '\0', sizeof(ns.ip)) != NULL,
           "eth status.ip 必须是缓冲区内 NUL 结尾的字符串（空串合法，表示尚未获取地址）");
+    /* v1.3 追加的运行期 IPv4 参数：同一约定——未知即空串/0；给了值就必须是
+       合法点分十进制（否则 console 的 "%s" 透传会把脏数据带到前端）与合理 MTU */
+    CHECK(dotted4_or_empty(ns.mask), "mask 是空串或合法点分掩码，实际：[%s]", ns.mask);
+    CHECK(dotted4_or_empty(ns.gw), "gw 是空串或合法点分地址，实际：[%s]", ns.gw);
+    CHECK(dotted4_or_empty(ns.dns), "dns 是空串或合法点分地址，实际：[%s]", ns.dns);
+    CHECK(ns.mtu == 0 || (ns.mtu >= 68 && ns.mtu <= 65535),
+          "mtu 为 0（未知）或 68..65535，实际：%u", (unsigned)ns.mtu);
     rc = n->poll_event(&ne, 20);
     CHECK(rc == HAL_OK || rc == HAL_EAGAIN, "net poll_event");
 

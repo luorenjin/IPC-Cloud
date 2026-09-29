@@ -351,28 +351,75 @@ a { color: var(--brand); text-decoration: none; }
 .user-tb th:nth-child(5),
 .user-tb td:nth-child(5) { text-align: left; }
 
-/* auth */
-.auth {
-  min-height: 100vh; display: flex; align-items: center; justify-content: center;
-  background: linear-gradient(180deg, var(--brand) 0 46%, var(--bg) 46%);
-}
-.auth-card {
-  width: 400px; background: #fff; border-radius: 6px; padding: 36px 40px 28px;
-  box-shadow: 0 12px 40px rgba(20, 50, 90, .18);
-}
-.auth-brand { display: flex; align-items: center; gap: 10px; margin-bottom: 28px; }
-.auth-brand strong { color: var(--brand); font-size: 20px; letter-spacing: .03em; }
-.auth-brand em { font-style: normal; color: var(--muted); font-size: 13px; padding-left: 10px; border-left: 1px solid var(--line); }
+/* auth —— 布局/配色对齐实机登录页：#e6e6e6 底 + 44px 顶栏 + 518px 白卡 + 260px 表单列 */
 .logo {
   width: 28px; height: 28px; border-radius: 8px;
   background: linear-gradient(135deg, var(--brand), #3ec8c8);
   display: inline-block; position: relative;
 }
 .logo::after { content: ""; position: absolute; inset: 8px; border: 2px solid #fff; border-radius: 50%; }
-.auth-card h1 { font-size: 18px; margin-bottom: 6px; }
-.auth-card form { display: grid; gap: 14px; margin-top: 18px; }
-.auth-card label { display: grid; gap: 6px; font-size: 13px; color: var(--ink-2); }
-.link { display: inline-block; margin-top: 14px; font-size: 13px; }
+.link { display: inline-block; margin-top: 14px; font-size: 13px; color: var(--brand); }
+.auth { min-height: 100vh; background: #e6e6e6; }
+.lg-head {
+  height: 44px; background: #e6e6e6;
+  display: flex; align-items: center; gap: 8px; padding-left: 40px;
+}
+.lg-head .logo { width: 20px; height: 20px; border-radius: 5px; }
+.lg-head .logo::after { inset: 4px; border-width: 2px; }
+.lg-head strong { color: var(--brand); font-size: 15px; letter-spacing: .06em; }
+.auth-card {
+  position: relative;
+  width: 520px; min-height: 384px; margin: 171px auto 0;
+  background: #fff; border: 1px solid #c8cdd9; border-radius: 4px;
+  box-shadow: 0 0 8px rgba(0, 0, 0, .1); padding-bottom: 55px;
+}
+.auth-card h1 {
+  font-size: 24px; font-weight: 400; color: #333;
+  text-align: center; padding-top: 32px; margin-bottom: 20px;
+}
+/* 登录/激活失败的常驻提示：对齐实机 div.errMsg（卡片内 top:277px，不挤动表单） */
+.auth-err {
+  position: absolute; top: 277px; left: 0; right: 0;
+  text-align: center; font-size: 12px; line-height: 16px; color: #f50;
+}
+.auth-p { display: block; width: 260px; margin: -6px auto 0; text-align: center; font-size: 12px; color: #666; }
+.auth-card form { display: block; }
+/* flow-root：不让 label 的外边距折叠到 row 外，保持实机 16px 的标签上间距 */
+.auth-card .row { display: flow-root; width: 260px; margin: 0 auto; }
+.auth-card label.tip { display: block; font-size: 12px; line-height: 16px; font-weight: 400; color: #333; margin: 16px 0 8px; }
+.auth-card .fld { display: block; position: relative; width: 260px; height: 34px; }
+.auth-card .fld input {
+  width: 100%; height: 34px; padding: 0 32px 0 44px;
+  border: 1px solid #ced7e0; border-radius: 2px;
+  background-color: #fff; background-repeat: no-repeat; background-position: 8px 6px;
+  font-size: 14px; color: #333;
+}
+.auth-card .fld.user input { background-color: #f5f5f5; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 24 24' fill='none' stroke='%238a9bad' stroke-width='1.8'%3E%3Ccircle cx='12' cy='8.6' r='3.4'/%3E%3Cpath d='M5.2 19c1.4-3.1 3.9-4.7 6.8-4.7s5.4 1.6 6.8 4.7'/%3E%3C/svg%3E"); }
+.auth-card .fld.pwd input { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 24 24' fill='none' stroke='%238a9bad' stroke-width='1.8'%3E%3Crect x='5' y='10.4' width='14' height='9.6' rx='1.5'/%3E%3Cpath d='M8.3 10.4V7.9a3.7 3.7 0 0 1 7.4 0v2.5'/%3E%3C/svg%3E"); }
+.auth-card .fld input::placeholder { color: #666; opacity: 1; }
+.auth-card .fld input:focus { outline: none; border-color: #5a92ff; }
+.auth-card .fld input:disabled { color: #8a9bad; }
+.auth-card .eye {
+  position: absolute; right: 5px; top: 5px; width: 24px; height: 24px;
+  display: flex; align-items: center; justify-content: center; padding: 0;
+}
+.auth-card .eye svg { display: none; width: 16px; height: 16px; fill: none; stroke: #8a9bad; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.auth-card .eye .i-eye { display: block; }
+.auth-card .eye.on .i-eye { display: none; }
+.auth-card .eye.on .i-off { display: block; }
+.auth-card .eye:hover svg { stroke: var(--brand); }
+.auth-card .link {
+  display: block; width: 260px; margin: 8px auto 0; text-align: right;
+  font-size: 12px; color: #666; line-height: 16px;
+}
+.auth-card .link:hover { color: #325fe0; }
+.auth-card form .btn.primary {
+  display: block; width: 260px; height: 32px; margin: 40px auto 0; padding: 0;
+  background: #578fff; border: 1px solid #356aff; border-radius: 2px;
+  color: #fff; font-size: 14px;
+}
+.auth-card form .btn.primary:hover { background: #70a0ff; border-color: #4684fb; box-shadow: 0 1px 2px rgba(0, 0, 0, .2); }
+.auth-card form .btn.primary:disabled { background: #578fff; opacity: .7; }
 
 input, select, textarea {
   height: 34px; border: 1px solid var(--line); border-radius: 4px; padding: 0 10px; background: #fff;
@@ -772,6 +819,24 @@ input:focus, select:focus { outline: 2px solid #cfe0f5; border-color: var(--bran
   overflow: hidden;
 }
 .video-box img { width: 100%; height: 100%; object-fit: contain; display: block; background: #0d1116; }
+.video-box video { width: 100%; height: 100%; object-fit: contain; display: block; background: #0d1116; }
+/* 画面比例（对齐实机 #widthHeightSel：1x 原始比例 / 4:3 / 16:9 / 100% 满屏）。
+   盒子尺寸由 shell.js 按所选比例 contain 算好后 inline 写进 img/video，
+   这里只负责两件事：把盒子在 .video-box 里居中、用 cover 等比填充（变比例时裁边而非拉伸）。 */
+.video-box[data-ratio] { display: flex; align-items: center; justify-content: center; }
+.video-box[data-ratio] > img,
+.video-box[data-ratio] > video { flex: none; object-fit: cover; }
+/* 断流提示：预览断开时盖一层，避免露出浏览器的"破损图像"图标。
+   img 在断流时会被换成 1×1 透明图（见 core.js 的 BLANK_PIXEL），
+   所以这里只需负责文案与遮罩。 */
+.video-box .stream-off {
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  color: #cfd8dc; font-size: 14px; letter-spacing: .5px;
+  background: rgba(6, 12, 18, .72);
+  pointer-events: none;   /* 不要挡住下面的控件与全屏入口 */
+}
+.video-box .stream-off[hidden] { display: none; }
 .video-bar {
   display: flex; align-items: center; gap: 10px; padding: 10px 12px;
   border: 1px solid var(--line); border-top: none; background: #fafbfd;
@@ -781,6 +846,61 @@ input:focus, select:focus { outline: 2px solid #cfe0f5; border-color: var(--bran
 .mini { height: 30px; min-width: 96px; max-width: none; width: auto; }
 .vico { width: 34px; height: 34px; color: var(--ink-2); border-radius: 4px; display: inline-flex; align-items: center; justify-content: center; font-size: 16px; }
 .vico:hover { background: #eef4fb; color: var(--brand); }
+.vico.on { color: var(--danger); background: #fdeceb; }
+
+/* 底栏弹出层（对齐实机 bpToolNote：挂在图标正上方） */
+.vol-wrap, .rec-wrap { position: relative; display: inline-flex; }
+.vol-note, .rec-note {
+  position: absolute; bottom: calc(100% + 8px); left: 50%; transform: translateX(-50%);
+  background: #fff; border: 1px solid var(--line); border-radius: 4px;
+  box-shadow: 0 6px 18px rgba(15, 30, 45, .16);
+  padding: 9px 12px; display: flex; align-items: center; gap: 10px;
+  white-space: nowrap; z-index: 40;
+}
+.vol-note::after, .rec-note::after {   /* 指向图标的小三角 */
+  content: ''; position: absolute; top: 100%; left: 50%; transform: translateX(-50%);
+  border: 5px solid transparent; border-top-color: #fff;
+}
+.vol-note[hidden], .rec-note[hidden] { display: none; }
+.vol-note input[type=range] { width: 132px; max-width: none; height: auto; padding: 0; border: none; background: none; }
+.vol-note input[type=range]:focus { outline: none; border: none; }
+.vol-num { width: 58px; height: 26px; min-width: 0; padding: 0 6px; font-size: 12px; text-align: right; }
+.rec-note { color: var(--danger); font-size: 12px; }
+.rec-note i { font-style: normal; }
+
+/* 抓图预览框（结构照实机 #tableEditCon：标题 + 图 + 时间/设备名 + 工具行） */
+.snap-ly {
+  position: fixed; inset: 0; background: rgba(6, 12, 18, .55);
+  display: flex; align-items: center; justify-content: center; z-index: 90;
+}
+.snap-ly[hidden] { display: none; }
+.snap-pop {
+  position: relative; background: #fff; border-radius: 6px;
+  box-shadow: 0 16px 48px rgba(4, 12, 20, .42);
+  width: min(760px, 92vw); padding-bottom: 12px;
+}
+.snap-head { padding: 11px 44px 9px 14px; font-size: 14px; font-weight: 600; color: var(--ink); border-bottom: 1px solid var(--line); }
+.snap-x { position: absolute; top: 6px; right: 8px; width: 30px; height: 30px; font-size: 19px; color: var(--ink-2); border-radius: 4px; }
+.snap-x:hover { background: #eef4fb; color: var(--brand); }
+.snap-body { display: flex; gap: 16px; align-items: flex-start; padding: 14px; }
+.snap-body img { flex: 1; min-width: 0; max-height: 56vh; object-fit: contain; background: #0d1116; border-radius: 4px; }
+.snap-meta { width: 176px; flex-shrink: 0; font-size: 12px; }
+.snap-meta p { display: flex; gap: 8px; margin-bottom: 9px; align-items: baseline; }
+.snap-meta label { color: #8a9bad; flex-shrink: 0; }
+.snap-meta span { color: var(--ink); word-break: break-all; }
+.snap-tools { display: flex; gap: 10px; justify-content: flex-end; align-items: center; padding: 0 14px; }
+.snap-tools .btn { min-width: 76px; }
+.snap-tools .btn.ghost, .snap-tools .btn.primary { padding: 7px 18px; }
+
+/* 电子放大：框选模式 + 放大后漫游 */
+.video-box.ez-mode { cursor: crosshair; }
+.ez-rect {
+  position: absolute; border: 2px solid var(--brand);
+  background: rgba(47, 111, 214, .16); pointer-events: none; z-index: 6;
+}
+.ez-rect[hidden] { display: none; }
+.video-box .ez-on { cursor: grab; }
+.video-box .ez-on:active { cursor: grabbing; }
 
 /* forms — 对齐实机标签列 */
 .sec { margin-bottom: 22px; }
@@ -893,6 +1013,14 @@ td[data-h].gated-off {
 .pager { display: flex; gap: 10px; align-items: center; margin-top: 12px; color: var(--muted); font-size: 12px; }
 
 /* 系统日志 · 筛选与底部分页（对齐实机） */
+/* 诊断结果：等宽、可换行、浅底（对齐实机「诊断结果」框） */
+.diag-out {
+  min-height: 96px; max-height: 320px; overflow: auto;
+  background: var(--sel-bg); border: 1px solid var(--line); border-radius: 3px;
+  padding: 10px 12px; margin: 0;
+  font-family: Consolas, "Courier New", monospace; font-size: 12px; line-height: 1.6;
+  color: var(--ink); white-space: pre-wrap; word-break: break-all;
+}
 .log-filter { margin-bottom: 8px; }
 .log-filter-row {
   display: flex;
@@ -909,11 +1037,42 @@ td[data-h].gated-off {
   white-space: nowrap;
 }
 .log-filter-row select {
-  height: 32px;
-  border: 1px solid var(--line);
-  border-radius: 3px;
+  height: 30px;
+  width: 155px;
+  border: 1px solid #c8cdd9;
+  border-radius: 2px;
   padding: 0 8px;
   background: #fff;
+  font-size: 13px;
+}
+/* 系统日志对齐 TP-LINK：日期/时间分列输入、查找按钮靠右 */
+.log-filter-row input[type="date"],
+.log-filter-row input[type="time"] {
+  height: 30px; border: 1px solid #c8cdd9; border-radius: 2px;
+  padding: 0 8px; background: #fff; color: var(--ink); font-size: 13px;
+}
+.log-d { width: 156px; }
+.log-t { width: 132px; }
+.log-find { margin-left: auto; }
+.log-scope {
+  margin: 12px 0 8px; line-height: 32px; font-size: 13px; color: #666;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* 表格：表头浅灰、外框与行分隔线（实机 dataGrid 观感） */
+.log-tbl { border: 1px solid #dfe4ea; }
+.log-tbl th { background: #eff1f4; color: var(--ink-2); border-bottom: 1px solid #dfe4ea; }
+.log-tbl td { padding: 10px 8px; }
+/* 时间列等宽（原始行挂在 td title 上） */
+.log-time {
+  font-family: Consolas, "Courier New", monospace; font-size: 12px;
+  white-space: nowrap; color: var(--ink-2);
+}
+/* 分页行：共N条 → 箭头+页码 → 第N页 跳转 */
+.log-jump { display: inline-flex; align-items: center; gap: 6px; margin-left: 14px; }
+.log-jump input[type="number"] {
+  width: 56px; min-width: 56px !important; max-width: 56px;
+  height: 28px; padding: 0 4px; text-align: center;
+  border: 1px solid var(--line); border-radius: 3px;
 }
 .log-bottom {
   display: flex;
@@ -1095,6 +1254,15 @@ td[data-h].gated-off {
   display: flex; align-items: center; gap: 14px; padding: 0 14px 0 22px;
 }
 .mirror-bar select { width: 96px; height: 30px; max-width: none; }
+/* 预览工具条左侧的抓图按钮（对齐实机 .snapPicBtn；此前 .snap-btn 一直没有样式，
+   OSD/区域覆盖页的同名按钮同样是裸按钮） */
+.snap-btn {
+  width: 28px; height: 28px; padding: 0; flex: none;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid var(--line); border-radius: 4px;
+  background: #fff; color: var(--ink-2); cursor: pointer;
+}
+.snap-btn:hover { color: var(--brand); border-color: var(--brand); }
 
 .divider { height: 1px; background: var(--line-2); margin: 18px 0; }
 .kv { display: grid; grid-template-columns: 110px 1fr; gap: 8px 14px; font-size: 13px; max-width: 560px; }
@@ -1134,6 +1302,8 @@ td[data-h].gated-off {
   border: 1px solid var(--line);
   padding: 4px;
   box-sizing: border-box;
+  display: block;
+  image-rendering: pixelated;   /* canvas 放大保持方块清晰 */
 }
 .sys-qr svg { display: block; width: 100%; height: 100%; }
 
@@ -1365,7 +1535,7 @@ select:disabled {
 }
 .algo-pill option { color: var(--ink); background: #fff; }
 
-/* ���� ������ģ����� ���� */
+/* ���� ������ģ����� ���� */
 .cap-banner {
   font-size: 12.5px;
   color: var(--muted);

@@ -63,6 +63,21 @@ var cfgRules = map[string]cfgRule{
 	"image.sharpness":  {t: cfgInt, min: 0, max: 100},
 	"image.flip":       {t: cfgInt, min: 0, max: 1},
 	"image.mirror":     {t: cfgInt, min: 0, max: 1},
+	// 日夜配置与宽动态：daynight 的取值与固件 register_common_rules 的字符集、
+	// 以及实机 dayNightMode 的三项逐字一致（common=日夜通用 / timed=日夜定时切换 /
+	// auto=日夜自动切换）；wdr 走 ISP 的 DRC
+	"image.daynight": {t: cfgStr, enum: []string{"common", "timed", "auto"}},
+	"image.wdr":      {t: cfgBool},
+	// 区域补偿（背光补偿）：固件里落 hal_image_t.backlight_comp，Goke 侧是整幅 AE 策略
+	"image.blc": {t: cfgBool},
+	// 曝光组 / 白平衡 / 补光组：枚举取值与固件 register_common_rules 逐字一致
+	"image.exposure.mode":  {t: cfgStr, enum: []string{"auto", "manual"}},
+	"image.exposure.level": {t: cfgInt, min: -3, max: 3},
+	"image.antiflicker":    {t: cfgStr, enum: []string{"off", "50hz", "60hz"}},
+	"image.awb":            {t: cfgStr, enum: []string{"auto", "indoor", "outdoor"}},
+	"image.ir.mode":        {t: cfgStr, enum: []string{"auto", "off", "on"}},
+	"image.ir.sensitivity": {t: cfgInt, min: 0, max: 7},
+	"image.ir.delay":       {t: cfgInt, min: 5, max: 60},
 
 	// 编码（主码流；w/h 在固件里 reboot_required）
 	"video.0.main.codec": {t: cfgStr, enum: []string{"h265", "h264", "mjpeg"}},
@@ -108,6 +123,11 @@ var cfgRules = map[string]cfgRule{
 	"net.mask": {t: cfgStr},
 	"net.gw":   {t: cfgStr},
 	"net.dns":  {t: cfgStr},
+	// 接口 MTU：与固件 core/config.c 的 net.mtu 同区间（576–1500）
+	"net.mtu": {t: cfgInt, min: 576, max: 1500},
+	// 监听端口：与固件 register_common_rules 的 port.* 同区间（PRD LC-NET-02）
+	"port.http": {t: cfgInt, min: 1, max: 65535},
+	"port.rtsp": {t: cfgInt, min: 1, max: 65535},
 
 	// 本地设置
 	"localUser.name": {t: cfgStr},
@@ -124,12 +144,22 @@ var cfgRules = map[string]cfgRule{
 // 画面项取 0–100 的中点 50（中位观感，厂商面板的出厂值同为 50/50/50）。
 func cfgDefaults() map[string]any {
 	return map[string]any{
-		"image.brightness": 50,
-		"image.contrast":   50,
-		"image.saturation": 50,
-		"image.sharpness":  50,
-		"image.flip":       0,
-		"image.mirror":     0,
+		"image.brightness":     50,
+		"image.contrast":       50,
+		"image.saturation":     50,
+		"image.sharpness":      50,
+		"image.flip":           0,
+		"image.mirror":         0,
+		"image.daynight":       "auto",
+		"image.wdr":            false,
+		"image.blc":            false,
+		"image.exposure.mode":  "auto",
+		"image.exposure.level": 0,
+		"image.antiflicker":    "off",
+		"image.awb":            "auto",
+		"image.ir.mode":        "auto",
+		"image.ir.sensitivity": 4,
+		"image.ir.delay":       5,
 
 		"video.0.main.codec": "h265",
 		"video.0.main.w":     1920,
@@ -172,11 +202,14 @@ func cfgDefaults() map[string]any {
 		// net.* 全为占位内网地址，仅用于模拟配置读写，不代表真实网络环境。
 		// 注意：cfgDefaults 必须覆盖 cfgRules 的每一个键——平台侧的 supported 是
 		// “平台白名单 ∩ 设备回包”，少了默认值的键会直接从配置面板上消失。
-		"net.dhcp": true,
-		"net.ip":   "192.168.1.64",
-		"net.mask": "255.255.255.0",
-		"net.gw":   "192.168.1.1",
-		"net.dns":  "223.5.5.5",
+		"net.dhcp":  true,
+		"net.ip":    "192.168.1.64",
+		"net.mask":  "255.255.255.0",
+		"net.gw":    "192.168.1.1",
+		"net.dns":   "223.5.5.5",
+		"net.mtu":   1500,
+		"port.http": 8080,
+		"port.rtsp": 554,
 
 		"localUser.name": "admin",
 		"device.name":    "IPC",

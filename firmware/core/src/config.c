@@ -306,6 +306,14 @@ static void seed_channel(const profile_channel_t *c)
 
 #define CFG_CHARSET_HOST "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-"
 #define CFG_CHARSET_TZ   "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/_+-:"
+/* 定时重启：时间固定 "HH:MM"（5 字节，字符集只放数字与冒号，格式合法性由
+ * 控制台在读取时二次校验——cfg 规则只能按字符集/长度卡，卡不了冒号位置）；
+ * 星期表为 0–6 的逗号列表（0=周日，与前端 Date.getDay 一致），如 "1,2,3,4,5"。*/
+#define CFG_CHARSET_HHMM "0123456789:"
+#define CFG_CHARSET_DAYS "0123456789,"
+/* DNS 可给首选/备用两个地址，控制台静态页两框合并为 "首选,备用" 写入（对齐实机）。
+ * 该键原样落进 /etc/ipc/net.conf 再进 resolv.conf，字符集只放数字、点与逗号。*/
+#define CFG_CHARSET_DNS  "0123456789.,"
 
 static void register_common_rules(void)
 {
@@ -320,6 +328,38 @@ static void register_common_rules(void)
         { "image.sharpness",         CFG_T_INT,  0, 100, NULL, false },
         { "image.flip",              CFG_T_INT,  0, 1, NULL, false },
         { "image.mirror",            CFG_T_INT,  0, 1, NULL, false },
+        /* 日夜配置与宽动态：wdr 的能力由 profile 的 video.isp.wdr 声明（见
+         * profile.c），这里存用户的选择；wdr 在 GC2053 上走 ISP 的 DRC 实现——
+         * 线性 sensor 没有真多帧 WDR，所以 profile 里 hdr 为 false。
+         *
+         * daynight 三态**逐字对齐实机 dayNightMode**（2026-09-29 从参照实机
+         * 172.16.1.180 直接抓取选项：日夜通用 / 日夜定时切换 / 日夜自动切换）：
+         *   · common = 日夜通用     不分昼夜、不切夜视（保持彩色，IRCUT 停白天位）；
+         *   · timed  = 日夜定时切换 按用户时段切 —— **时段表尚未实现**，只落 cfg，
+         *                          HAL 不动，见 Docs/遗留问题清单.md LEG-UI-13；
+         *   · auto   = 日夜自动切换 按 ISP 的 AE 亮度自动切（判据见 image.ir.*）。
+         * 旧值 day/night 已废弃：那是把「白天 / 夜晚」当用户档位（PRD LC-IMG-03
+         * 的写法），与实机这三项不是同一个语义。HAL 的 HAL_DAYNIGHT_DAY/NIGHT
+         * 仍保留（HAL 能力，conformance 与以后的手动档还会用）。 */
+        { "image.daynight",          CFG_T_STR,  0, 0, "common,timed,auto", false },
+        { "image.wdr",               CFG_T_BOOL, 0, 1, NULL, false },
+        /* 区域补偿（背光补偿）：0/1，对应 hal_image_t.backlight_comp。Goke SDK 没有
+         * 分区域测光权重表，落地是整幅 AE 曝光策略（见 gk_video.c image_apply），
+         * 与实机的"选区域"语义差异已登记到 Docs/遗留问题清单.md。 */
+        { "image.blc",               CFG_T_BOOL, 0, 1, NULL, false },
+        /* 曝光组（PRD LC-IMG-04，P0）：模式 / 补偿档位 / 防闪烁，都落 ISP 的 AE 属性。
+         * 档位 -3..3 与实机 expLevelSel 一致，0 = 出厂基线（不是"关"）。 */
+        { "image.exposure.mode",     CFG_T_STR,  0, 0, "auto,manual", false },
+        { "image.exposure.level",    CFG_T_INT, -3, 3, NULL, false },
+        { "image.antiflicker",       CFG_T_STR,  0, 0, "off,50hz,60hz", false },
+        /* 白平衡（PRD LC-IMG-07）：自动 / 室内 / 室外 → AWB 的室内外模式 */
+        { "image.awb",               CFG_T_STR,  0, 0, "auto,indoor,outdoor", false },
+        /* 补光灯组（PRD LC-IMG-05，P0）：灯模式 + 日夜切换灵敏度 + 切换延迟。
+         * 本 SKU 只有红外补光灯（profile gpio_map.ir_led），没有白光灯与 PWM
+         * 调光（见遗留清单 LEG-FW-03），所以强度类项不在这里。 */
+        { "image.ir.mode",           CFG_T_STR,  0, 0, "auto,off,on", false },
+        { "image.ir.sensitivity",    CFG_T_INT,  0, 7, NULL, false },
+        { "image.ir.delay",          CFG_T_INT,  5, 60, NULL, false },
         /* 时区与 NTP 服务器会拼进平台命令/配置：限定字符集，长度与 console 缓冲一致 */
         { "time.timezone",           CFG_T_STR,  1, 63, NULL, false, false, CFG_CHARSET_TZ },
         { "time.ntp.enable",         CFG_T_BOOL, 0, 1, NULL, false },
@@ -331,7 +371,18 @@ static void register_common_rules(void)
          * 固件只负责逐键校验类型与范围（与 cfg_apply_json 的逐键语义一致）。 */
         { "net.mask",                CFG_T_STR,  0, 0, NULL, true },
         { "net.gw",                  CFG_T_STR,  0, 0, NULL, true },
-        { "net.dns",                 CFG_T_STR,  0, 0, NULL, true },
+        { "net.dns",                 CFG_T_STR,  0, 0, NULL, true, false, CFG_CHARSET_DNS },
+        /* 接口 MTU（字节）：控制台「网络设置→连接→高级设置」与平台远程配置。
+         * 与 net.* 同族——改动后同样要重启网络栈才生效（POST /system/net/apply）；
+         * 未写入 = 保持系统默认（console_net_read 读作 -1）。576–1500：IPv4 最小
+         * 重组缓冲 576，以太网最大传输单元 1500。*/
+        { "net.mtu",                 CFG_T_INT,  576, 1500, NULL, true },
+        /* 监听端口（PRD LC-NET-02：默认 HTTP 8080、RTSP 554）。
+         * 本机改端口走 POST /system/port/apply（HTTP 保存后立即重绑监听）；
+         * 远程 cfg 下发属通用路径，故标重启生效（平台 cfgRebootRequired 镜像同步）；
+         * 开机时 app/main.c 在未显式传 --port 时读 port.http 作为监听端口。*/
+        { "port.http",                CFG_T_INT,  1, 65535, NULL, true },
+        { "port.rtsp",                CFG_T_INT,  1, 65535, NULL, true },
         { "localUser.name",          CFG_T_STR,  0, 0, NULL, false },
         /* 设备名称（控制台基本设置 / 平台远程配置）：1–32 字节 UTF-8 */
         { "device.name",             CFG_T_STR,  1, 32, NULL, false },
@@ -365,7 +416,13 @@ static void register_common_rules(void)
         { "alarm.motion.enable",     CFG_T_BOOL, 0, 1, NULL, false },
         { "alarm.motion.sensitivity",CFG_T_INT,  0, 100, NULL, false },
         { "alarm.motion.regions",    CFG_T_JSON, 0, 0, NULL, false },
-        { "led.enable",              CFG_T_BOOL, 0, 1, NULL, false }
+        { "led.enable",              CFG_T_BOOL, 0, 1, NULL, false },
+        /* 定时重启（对齐实机「系统设置→系统配置→系统维护→重启计划」）。
+         * 到点执行在 console 的工作线程里按分钟节拍检查，cfg 只负责存参数；
+         * plan.time 的 "HH:MM" 是**设备本地时间**（按 time.timezone 换算）。*/
+        { "system.reboot.plan.enable", CFG_T_BOOL, 0, 1, NULL, false },
+        { "system.reboot.plan.time",   CFG_T_STR,  5, 5, NULL, false, false, CFG_CHARSET_HHMM },
+        { "system.reboot.plan.days",   CFG_T_STR,  1, 20, NULL, false, false, CFG_CHARSET_DAYS }
     };
     for (size_t i = 0; i < sizeof(common) / sizeof(common[0]); i++) {
         cfg_rule_t r;

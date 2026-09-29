@@ -24,16 +24,63 @@
 int console_http_status(hal_err_t e);
 /** 统一错误响应：{"code":<e>,"msg":"中文说明"} */
 hal_err_t console_reply_err(http_conn_t *c, hal_err_t e);
+/**
+ * 同上，但由调用点指定文案。
+ * 用途：`HAL_EPERM_` 的默认文案「无权限：请先修改初始密码」只对**强制改密拦截**
+ * 成立；`/auth/login`、`/auth/password` 的凭据校验失败也返回 `HAL_EPERM_`，
+ * 直接沿用那句话会把「口令错了」说成「请先改初始密码」，误导用户。
+ * `msg` 为 NULL 或空串时回退到 `console_err_msg(e)`。
+ */
+hal_err_t console_reply_err_msg(http_conn_t *c, hal_err_t e, const char *msg);
 /** 错误码对应的中文说明 */
 const char *console_err_msg(hal_err_t e);
 
 /* 各子模块的路由注册入口（在 console_init 中调用） */
 hal_err_t console_auth_init(void);
 hal_err_t console_api_init(void);
+/** 维护子模块（console_maint.c）：诊断 + 定时重启。
+ *  init 只建互斥/条件变量，工作线程在 start 里起（module.h 契约）。 */
+hal_err_t console_maint_init(void);
+hal_err_t console_maint_start(void);
+hal_err_t console_maint_stop(void);
+
+/* console_preview.c：实时预览（WebSocket 推 MJPEG 帧），单消费者、懒启动 */
+hal_err_t console_preview_init(void);
+hal_err_t console_preview_start(void);
+hal_err_t console_preview_stop(void);
+/** 投递「切换 HTTP 监听端口」任务给维护线程（console_maint.c）。
+ *  端口重绑**必须**在维护线程做：投递点是 http_server 的 after_flush 回调
+ * （运行在 http_server 事件循环线程里），在那里 stop() 会 join 自己而死锁；
+ *  维护线程还会等一拍再停旧监听，让响应与连接先收尾。old_port 用于新端口
+ *  绑定失败时回滚，保证设备不会掉进“两个端口都没有”的状态。 */
+hal_err_t console_maint_post_port(int new_port, int old_port);
+/** POST /api/v1/system/diag：校验并投递诊断任务（失败时 out 为 {"code":..,"msg":..}） */
+hal_err_t console_maint_diag(const http_req_t *req, char *out, size_t cap);
+/** GET /api/v1/system/diag：状态 + 结果（前端轮询） */
+hal_err_t console_maint_diag_state(char *out, size_t cap);
 /** 注册 "/" 兜底路由，暴露 Task 9 内嵌的前端静态资源（console_assets.c）。
  *  必须在其余路由注册之后调用——route_lookup 虽是最长前缀匹配，不依赖
  *  注册顺序，但把兜底路由放在最后仍是防御性写法，可读性也更好。 */
 hal_err_t console_static_init(void);
+
+/**
+ * 时区缺省值（POSIX TZ 串）。`time.timezone` 未配置时使用，**必须两处同值**：
+ * `ep_time_get`（回给前端显示）与 `console_maint` 的定时重启（换算设备本地
+ * 时间）——否则会出现「页面显示东八区、定时重启按 UTC 走」差 8 小时的错位。
+ */
+#define CONSOLE_TZ_DEFAULT "CST-8"
+
+/**
+ * NTP 缺省服务器。`time.ntp.enable` / `time.ntp.server` 未写入 cfg 时按
+ * 「**默认开启** + 此服务器」取值（PRD LC-SYS-01「默认 NTP」）——设备没有
+ * RTC，墙钟开机从 0 起算，不默认校时就是永远停在 1970-01-01。
+ * 唯一读取入口是 `console_ntp_read()`：`console_apply_time`（真正起 ntpd）
+ * 与 `GET /system/time`（回显给前端）必须同源，否则会出现
+ * 「页面显示已开启、设备却没起 ntpd」这类对不上的假状态。
+ */
+#define CONSOLE_NTP_DEFAULT_HOST "ntp.aliyun.com"
+/** 未校时的判据：墙钟还落在 2000-01-01 之前，说明仍是开机计时（无 RTC） */
+#define CONSOLE_CLOCK_UNSET_S 946684800LL
 
 /* ---- 鉴权 ---- */
 #define CONSOLE_SALT_LEN     16
@@ -96,7 +143,9 @@ hal_err_t console_hmac_sha256(const uint8_t *key, size_t key_len,
 
 typedef struct {
     bool dhcp;
-    char ip[16], mask[16], gw[16], dns[16];
+    /* dns 放得下 "首选,备用" 两个 IPv4（15+1+15）——对齐实机静态页的首选/备用两框 */
+    char ip[16], mask[16], gw[16], dns[64];
+    int  mtu;              /**< 字节；-1 = 未指定/未配置（保持系统默认），576–1500 */
 } console_net_cfg_t;
 
 /** 严格解析点分十进制 IPv4（不接受多余字符）；out 为主机字节序 */
@@ -108,6 +157,12 @@ const char *console_net_check(const console_net_cfg_t *c);
 hal_err_t   console_apply_net(void);
 /** 按 time.ntp.* 配置经 HAL 起停 NTP */
 hal_err_t   console_apply_time(void);
+/**
+ * 读 NTP 期望状态：cfg 未写入时返回**默认开启** + `CONSOLE_NTP_DEFAULT_HOST`
+ * （设备无 RTC，不默认校时就一直是 1970）。`server`/`cap` 可为 NULL/0。
+ * 起 ntpd 与 GET /system/time 必须都走它，保证显示与实际一致。
+ */
+hal_err_t   console_ntp_read(bool *en, char *server, size_t cap);
 
 hal_err_t console_auth_seed(const char *password, const char *user, bool must_change);
 /** 恢复出厂：删除本地账号凭据、清空会话与挑战，设备回到"未激活"。 */
@@ -187,6 +242,16 @@ hal_err_t console_api_register_rules(void);
 hal_err_t console_caps_json(char *buf, size_t cap);
 
 #ifdef IPC_TESTING
+/** 测试桩（console_maint.c）：POSIX TZ 串 → 本地相对 UTC 的偏移秒数。
+ *  定时重启按设备本地时间到点，换算错了就是整段错 8 小时，故单独暴露纯函数。 */
+int  console_maint_test_tz_offset(const char *tz);
+/** 测试桩（console_maint.c）：星期表 "0,1,..6"（0=周日，与前端 Date.getDay 一致）是否含某天 */
+bool console_maint_test_day_in(const char *days, int wd);
+/** 测试桩（console_maint.c）：NTP 是否仍需重试（开启 ∧ 墙钟还停在 2000 年前） */
+bool console_maint_test_ntp_needed(bool enabled, int64_t utc);
+#endif
+
+#ifdef IPC_TESTING
 /**
  * 测试桩：不经 http_respond/真实连接直接跑一次 /api/v1/ 下（除
  * /api/v1/auth/ 外）的分发。返回 HAL_OK 时 body 为 200 响应体；其他返回值
@@ -199,6 +264,8 @@ hal_err_t console_caps_json(char *buf, size_t cap);
  */
 hal_err_t console_api_test_dispatch(const http_req_t *req, char *body, size_t body_cap,
                                     bool *deferred_out);
+/** 测试桩：执行一次开机 image.* 回放（console_api_init 里那一步） */
+void console_api_test_image_apply_cfg(void);
 /** 测试桩：执行最近一次 console_api_test_dispatch 登记的延后动作（模拟响应已送达） */
 hal_err_t console_api_test_run_deferred(void);
 /**

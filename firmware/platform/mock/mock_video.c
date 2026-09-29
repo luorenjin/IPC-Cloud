@@ -288,6 +288,9 @@ static hal_err_t v_set_image(const hal_image_t *img)
     APPLY(brightness, 0, 100); APPLY(contrast, 0, 100); APPLY(saturation, 0, 100);
     APPLY(sharpness, 0, 100); APPLY(hue, 0, 100); APPLY(flip, 0, 1); APPLY(mirror, 0, 1);
     APPLY(denoise_3d, 0, 100); APPLY(backlight_comp, 0, 1);
+    APPLY(exposure_mode, 0, HAL_EXP_MANUAL); APPLY(exposure_level, -3, 3);
+    APPLY(antiflicker, 0, HAL_FLICKER_60HZ); APPLY(awb_mode, 0, HAL_AWB_OUTDOOR);
+    APPLY(ir_mode, 0, HAL_IR_ON); APPLY(ir_sensitivity, 0, 7); APPLY(ir_delay_s, 5, 60);
 #undef APPLY
     return HAL_OK;
 }
