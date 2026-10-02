@@ -1313,7 +1313,16 @@
       ctx.strokeRect(p.x + 1, p.y + 1, Math.max(0, p.w - 2), Math.max(0, p.h - 2));
     };
 
+    /** 工具条可用性：没选中就不给按「删除」，没有区域就不给按「清空」。
+     *  实机这两颗是无条件可按、按了静默无事；置灰是有意差异（已写进 PRD LC-OSD-12）。 */
+    const syncBtns = () => {
+      const del = $('#pv-del'), clr = $('#pv-clear');
+      if (del) del.disabled = !(sel >= 0 && !!S.coverRegions[sel]);
+      if (clr) clr.disabled = S.coverRegions.length === 0;
+    };
+
     const paint = () => {
+      syncBtns();
       const g = geom();
       if (!g) { cv.style.visibility = 'hidden'; return; }
       cv.style.visibility = '';
@@ -1460,13 +1469,13 @@
     /* ---- 工具条 ---- */
     $('#pv-snap').onclick = () => snapFrom(b.querySelector('#pv-video'));
     $('#pv-del').onclick = () => {
-      if (sel < 0 || !S.coverRegions[sel]) return void toast('请先点选要删除的遮挡区域');
+      if (sel < 0 || !S.coverRegions[sel]) return;   /* 未选中时按钮已置灰，走到这里只可能是状态竞态 */
       S.coverRegions.splice(sel, 1);
       sel = -1;
       paint();
     };
     $('#pv-clear').onclick = () => {
-      if (!S.coverRegions.length) return void toast('当前没有遮挡区域');
+      if (!S.coverRegions.length) return;            /* 同上：无区域时按钮已置灰 */
       S.coverRegions = [];
       sel = -1;
       paint();

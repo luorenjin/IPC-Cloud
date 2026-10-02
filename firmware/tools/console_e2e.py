@@ -588,6 +588,97 @@ class E2E:
                         f"{tx0},{ty0} → {mid['time_x']},{mid['time_y']}（+{moved_pct}%）；已还原")
             self.case("E15", "OSD 叠加层拖动定位", e15)
 
+            def e16():
+                # 区域覆盖（遮挡矩形）：**真实鼠标拖框 → 保存 → 设备回读 → 删除/清空**。
+                # 遮挡是隐私功能，验收点四件：①拖出的框按万分比真进设备；②**保存后画面真的黑了**
+                # （读主码流解码像素，不是只看接口回显）；③过小的框被拒；④工具条没有"点了没反应"
+                # 的死按钮（无可操作对象时置灰，是有意差异，见 PRD LC-OSD-12）。跑完清干净。
+                self.go("摄像头", "画面显示", "区域覆盖")
+                for _ in range(30):                      # 主码流 MSE 起流要几秒
+                    if self.pg.evaluate("() => { const v=document.querySelector('#pv-video');"
+                                        " return !!(v && v.videoWidth); }"):
+                        break
+                    self.pg.wait_for_timeout(500)
+                self.expect(self.pg.evaluate("() => { const v=document.querySelector('#pv-video');"
+                                             " return !!(v && v.videoWidth); }"),
+                            "区域覆盖页预览未出图，无法验证拖框")
+
+                # E13 刚恢复过出厂：无矩形、开关关 → 两颗按钮都该置灰
+                self.expect(self.pg.is_disabled("#pv-del"), "未选中矩形时「删除」未置灰")
+                self.expect(self.pg.is_disabled("#pv-clear"), "无矩形时「清空」未置灰")
+
+                self.pg.check("input.sw[data-key=coverOn]")   # 只改本地态，点「保存」才下发
+                self.pg.wait_for_timeout(300)
+                bx = self.pg.locator("#pv-canvas").bounding_box()
+                # 画面在 canvas 里是 object-fit: contain 居中，取中段拖，避开黑边
+                x0 = bx["x"] + bx["width"] * 0.30
+                y0 = bx["y"] + bx["height"] * 0.28
+                x1 = bx["x"] + bx["width"] * 0.62
+                y1 = bx["y"] + bx["height"] * 0.66
+
+                def drag(ax, ay, bx_, by_):
+                    self.pg.mouse.move(ax, ay)
+                    self.pg.mouse.down()
+                    self.pg.mouse.move(bx_, by_, steps=10)
+                    self.pg.mouse.up()
+                    self.pg.wait_for_timeout(400)
+
+                drag(x0, y0, x1, y1)
+                self.expect(not self.pg.is_disabled("#pv-del"),
+                            "拖出矩形后「删除」仍置灰（新框应自动选中）")
+
+                # 过小的框要被拒（不进列表）：拖 2px ≈ 28 万分比 < 下限 100
+                drag(x0 + 8, y0 + 8, x0 + 10, y0 + 10)
+                n_small = self.pg.evaluate("() => window.IPC.S.coverRegions.length")
+                self.expect(n_small == 1, f"过小的框不该进列表，实际 {n_small} 个")
+
+                # 上限 4：再拖 4 个（第 4 个成功、第 5 个被拒）
+                for i in range(4):
+                    drag(bx["x"] + bx["width"] * (0.05 + 0.06 * i), bx["y"] + bx["height"] * 0.06,
+                         bx["x"] + bx["width"] * (0.09 + 0.06 * i), bx["y"] + bx["height"] * 0.13)
+                n_max = self.pg.evaluate("() => window.IPC.S.coverRegions.length")
+                self.expect(n_max == 4, f"遮挡矩形上限应为 4，实际 {n_max} 个")
+                # 第 5 次拖框被拒后没有任何选中项 → 「删除」该灰、「清空」该可点
+                self.expect(self.pg.is_disabled("#pv-del"), "第 5 个框被拒后「删除」未置灰")
+                self.expect(not self.pg.is_disabled("#pv-clear"), "有 4 个矩形时「清空」不该置灰")
+                self.shot("E16-cover-draw")
+
+                self.pg.click("#pv-save")
+                self.pg.wait_for_timeout(2200)
+                rb = self.page_api("/api/v1/cover")
+                self.expect(rb["enable"] and len(rb["regions"]) == 4,
+                            f"保存后设备侧不对：enable={rb['enable']} regions={len(rb['regions'])}")
+                r0 = rb["regions"][0]
+                self.expect(r0["w"] > 1000 and r0["h"] > 1000,
+                            f"第一个框尺寸不合理（万分比）：{r0}")
+                # 设备侧真的挡住了吗——读主码流解帧后统计矩形区内的纯黑像素
+                blk = self.pg.evaluate(
+                    """(r) => { const v=document.querySelector('#pv-video');
+                        const c=document.createElement('canvas');
+                        c.width=v.videoWidth; c.height=v.videoHeight;
+                        const x=c.getContext('2d'); x.drawImage(v,0,0);
+                        const X0=Math.round(r.x/10000*c.width)+4, Y0=Math.round(r.y/10000*c.height)+4;
+                        const W=Math.round(r.w/10000*c.width)-8, H=Math.round(r.h/10000*c.height)-8;
+                        const d=x.getImageData(X0,Y0,W,H).data; let b=0;
+                        for(let i=0;i<d.length;i+=4) if(d[i]<16&&d[i+1]<16&&d[i+2]<16) b++;
+                        return +(100*b/(d.length/4)).toFixed(1); }""", r0)
+                self.expect(blk > 95, f"保存后矩形区不是纯黑（黑像素 {blk}%），遮挡没落到设备上")
+
+                # 清理：清空 → 按钮置灰 → 关开关并保存 → 设备必须干净
+                self.pg.click("#pv-clear")
+                self.pg.wait_for_timeout(400)
+                self.expect(self.pg.is_disabled("#pv-clear") and self.pg.is_disabled("#pv-del"),
+                            "清空后两颗按钮都应置灰")
+                self.pg.uncheck("input.sw[data-key=coverOn]")
+                self.pg.click("#pv-save")
+                self.pg.wait_for_timeout(1400)
+                back = self.page_api("/api/v1/cover")
+                self.expect((not back["enable"]) and not back["regions"],
+                            f"设备未清干净：{back}")
+                return (f"{n_max} 个框可行（过小被拒后仍 {n_small} 个）、保存后矩形区黑像素 {blk}%、"
+                        f"按钮按可操作性置灰；已清空并关闭")
+            self.case("E16", "区域覆盖拖框与遮挡", e16)
+
             self.browser.close()
 
     def report(self):
