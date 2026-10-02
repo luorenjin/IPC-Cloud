@@ -62,10 +62,11 @@
                   { "$ref": "#/$defs/videoMode" },
                   { "type": "object", "required": ["codec", "kbps", "rc", "gop"],
                     "properties": {
-                      "codec": { "enum": ["h264", "h265", "mjpeg"] },
-                      "kbps":  { "type": "integer", "minimum": 32, "maximum": 16384 },
-                      "rc":    { "enum": ["cbr", "vbr", "avbr", "fixqp"] },
-                      "gop":   { "type": "integer", "minimum": 1, "maximum": 300 }
+                      "codec":     { "enum": ["h264", "h265", "mjpeg"] },
+                      "smart_enc": { "type": "boolean" },
+                      "kbps":      { "type": "integer", "minimum": 32, "maximum": 16384 },
+                      "rc":        { "enum": ["cbr", "vbr", "avbr", "fixqp"] },
+                      "gop":       { "type": "integer", "minimum": 1, "maximum": 300 }
                     } }
                 ]
               }

@@ -597,10 +597,15 @@ var cfgKeys = []string{
 	// 画面（画面信息组，0–100 归一化；flip/mirror 为 0/1 开关）
 	"image.brightness", "image.contrast", "image.saturation", "image.sharpness", "image.flip", "image.mirror",
 	// 日夜配置与宽动态：daynight 是 common|timed|auto 三态，逐字对齐实机
-	// dayNightMode 的 日夜通用/日夜定时切换/日夜自动切换（其中 timed 的时段表
-	// 固件侧尚未实现，见 Docs/遗留问题清单.md LEG-UI-13）；wdr 是开关。
-	// GC2053 是线性 sensor，宽动态走 ISP 的 DRC 而非多帧合成。
-	"image.daynight", "image.wdr",
+	// dayNightMode 的 日夜通用/日夜定时切换/日夜自动切换；timed 的两个时刻由
+	// image.daynight.day_start / night_start（"HH:MM"）给出，默认 06:00 / 18:00，
+	// 固件 console_maint 按设备本地时间切（设备无 RTC，未校时前不切）。
+	// wdr 是开关。GC2053 是线性 sensor，宽动态走 ISP 的 DRC 而非多帧合成。
+	"image.daynight", "image.daynight.day_start", "image.daynight.night_start", "image.wdr",
+	// 监控场景（图像页）：normal|back_light|clear_licence，逐字对齐实机
+	// image_scene_mode_common（普通/逆光/车牌）。固件侧落成整幅 DRC + AE 曝光策略
+	// 的组合（APPROXIMATION，实机是分区域测光表），见遗留清单。
+	"image.scene",
 	// 区域补偿（背光补偿）：开关，对应固件 image.blc ↔ hal_image_t.backlight_comp
 	"image.blc",
 	// 曝光组（PRD LC-IMG-04）/ 白平衡 / 补光组（LC-IMG-05）：与图像参数同属一屏，
@@ -608,6 +613,13 @@ var cfgKeys = []string{
 	"image.exposure.mode", "image.exposure.level", "image.antiflicker",
 	"image.awb",
 	"image.ir.mode", "image.ir.sensitivity", "image.ir.delay",
+	// 夜晚套（日夜两套配置，2026-09-29）：白天套复用上面的 image.*；夜晚套键
+	// 没写过时固件侧回落白天套（升级零回归）。分套范围对照实机 shedday/shednight
+	// 抓包：亮度/对比度/饱和度/锐度/宽动态/区域补偿/白平衡/监控场景/曝光模式/
+	// 曝光等级 分两套；镜像、防闪烁、补光组与日夜模式/时刻为全局。
+	"image.night.brightness", "image.night.contrast", "image.night.saturation",
+	"image.night.sharpness", "image.night.wdr", "image.night.blc", "image.night.scene",
+	"image.night.awb", "image.night.exposure.mode", "image.night.exposure.level",
 	// 编码（主码流）
 	"video.0.main.codec", "video.0.main.w", "video.0.main.h", "video.0.main.fps",
 	"video.0.main.kbps", "video.0.main.gop", "video.0.main.rc",
@@ -615,10 +627,24 @@ var cfgKeys = []string{
 	// 像素高度（12–72，固件规则表也卡了同一区间）；前端的「画面贴合」编辑器直接读写这些键，不做单位换算。
 	"osd.channelName.enable", "osd.channelName.pos", "osd.channelName.fontPx",
 	"osd.time.enable", "osd.time.pos", "osd.time.fontPx",
-	// 自定义文字叠加：**变长列表**，每条一个 OSD 区域（{text, x, y, font_px}，见
+	// 时间串的分段开关（对齐实机 OSD 页的「日期」「星期」两个勾选）：时间文本是
+	// `[日期] [星期] 时间`，日期段看 time.date、星期段看 time.week；缺省 true/false
+	// 与升级前的时间串逐字一致。星期由 HAL 的 `%a` 渲染成本地语言（中文）星期。
+	"osd.time.date", "osd.time.week",
+	// OSD 模式与显示参数（对齐实机 OSD 模块，2026-09-29）：mode=normal 时 4 条自定义字符、
+	// 位置可自由定位；mode=gb（国标）时 8 条、时间与通道名右对齐、margin 才生效。
+	// 枚举取值与固件 register_common_rules、模拟器 cfgRules 三处逐字一致。
+	"osd.mode", "osd.flicker", "osd.colorType", "osd.color", "osd.margin",
+	"osd.channelName.text", "osd.linkDeviceName",
+	// 自定义文字叠加：**变长列表**，每条一个 OSD 区域（{enabled?, text, x, y, font_px?}，见
 	// firmware/core/src/config.c 的规则注释）。用数组而不是若干扁平键，是为了让“加/删一条文字”
-	// 不必每次都在三处契约里增删键：条数上限由设备区域数决定，平台按当前叠加项实时收紧。
+	// 不必每次都在三处契约里增删键：条数上限由设备区域数决定（普通 4 / 国标 8），
+	// 平台按当前模式实时收紧。
 	"osd.text.regions",
+	// 区域覆盖（隐私遮挡，对齐实机「设置→摄像头→区域覆盖」）：开关 + 归一化矩形表
+	// [[x,y,w,h], …]（0–1，最多 4 个）。元素形状与 alarm.motion.regions 同族，
+	// 平台侧可直接复用区域框选编辑器；固件侧落 HAL_OSD_COVER（RGN COVER_RGN）。
+	"osd.cover.enable", "osd.cover.regions",
 	// 录像
 	"record.enabled", "record.mode", "record.retention_days", "record.channel",
 	// 移动侦测（regions 对应固件的 CFG_T_JSON，值是 [[x,y,w,h], …] 归一化元组）

@@ -12,12 +12,70 @@
     return String(n).padStart(2, '0');
   }
 
-  function fmtClock(d) {
-    return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+  /* ---------------- 设备本地时间（口径统一，避免混用浏览器时区） ----------------
+     设备时区是 POSIX TZ 串（`CST-8` = 东八区、`UTC-5:30` = 东五区半、`UTC+3` = 西三区），
+     板上**没有 zoneinfo 数据库**，只有偏移写法能生效（区名如 Asia/Shanghai 存得进去
+     但不生效 —— 固件侧 console_tz_ok 已直接拒掉）。
+     POSIX 约定 `local = UTC − offset` ⇒ 东八区写作 `-8`；下面 tzOffsetMin 统一换算成
+     **相对 UTC 的分钟数（东正西负）**，与固件 console_tz_offset_seconds 同口径。
+
+     用法：把"设备本地墙钟"当作 UTC 时刻存进 Date，再用 getUTC* 读出来格式化——
+     格式化结果只取决于设备时区，与浏览器所在时区无关（原来用 getHours() 等本地
+     getter，设备时区一改，页面显示就会与画面上 OSD 的时间对不上）。 */
+  function tzOffsetMin(tz) {
+    const m = /([+-]?)(\d{1,2})(?::(\d{1,2}))?/.exec(String(tz || ''));
+    if (!m) return 0;                                  /* 解不出按 UTC（与固件一致，不猜） */
+    const h = parseInt(m[2], 10);
+    const mi = m[3] ? parseInt(m[3], 10) : 0;
+    if (!isFinite(h) || h > 24 || mi > 59) return 0;
+    return (m[1] === '-' ? -1 : 1) * (h * 60 + mi) * -1;   /* POSIX 符号相反 */
   }
 
-  function fmtDate(d) {
-    return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+  function fmtDevClock(d) {
+    return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())} ` +
+      `${pad2(d.getUTCHours())}:${pad2(d.getUTCMinutes())}:${pad2(d.getUTCSeconds())}`;
+  }
+  function fmtDevDate(d) {
+    return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`;
+  }
+  function fmtDevHms(d) {
+    return `${pad2(d.getUTCHours())}:${pad2(d.getUTCMinutes())}:${pad2(d.getUTCSeconds())}`;
+  }
+  /** 设备本地墙钟字符串（如 `2026-10-01T22:34:05`）→ 真实 UTC 毫秒 */
+  function devWallToUtcMs(wall, offMin) {
+    const v = Date.parse(String(wall) + 'Z');   /* 先当成 UTC 解析，再扣掉时区偏移 */
+    return isNaN(v) ? NaN : v - offMin * 60000;
+  }
+
+  /* 时区选项表：覆盖 -12:00 ~ +14:00（30 分钟步进，实际存在的时区都落在区间内）。
+     值 = POSIX TZ 串（板上唯一生效的写法），标签里同时给出 UTC 偏移便于对照；
+     +08:00 用 `CST-8`（本项目缺省，与固件 CONSOLE_TZ_DEFAULT 同值）。
+     不给 DST 命名（设备只有固定偏移，写"北美东部时间"之类会在夏令时期间说错）。 */
+  function tzOptionList() {
+    const out = [];
+    for (let off = -12 * 60; off <= 14 * 60; off += 30) {
+      const a = Math.abs(off);
+      const h = Math.floor(a / 60);
+      const mm = a % 60;
+      const utcLab = `(UTC${off < 0 ? '-' : '+'}${pad2(h)}:${mm ? pad2(mm) : '00'})`;
+      const value = `UTC${off > 0 ? '-' : '+'}${h}${mm ? ':' + pad2(mm) : ''}`;   /* POSIX 符号相反 */
+      if (off === 480) out.push({ v: 'CST-8', t: `${utcLab} 中国标准时间` });
+      else if (off === 0) out.push({ v: 'UTC0', t: `${utcLab} 协调世界时` });
+      else out.push({ v: value, t: utcLab });
+    }
+    return out;
+  }
+
+  /** 时区下拉的 options：当前值不在表里时（远程/模拟器写入的其它写法）按解析出的
+      偏移匹配同名项，仍匹配不上就把原值作为「当前」项置顶，绝不静默改成别的时区 */
+  function tzOptionsHtml(cur) {
+    const list = tzOptionList();
+    const off = tzOffsetMin(cur);
+    let idx = list.findIndex((o) => o.v === cur);
+    if (idx < 0) idx = list.findIndex((o) => tzOffsetMin(o.v) === off && off !== 0);
+    const opts = list.map((o, i) => `<option value="${esc(o.v)}"${i === idx ? ' selected' : ''}>${esc(o.t)}</option>`);
+    if (idx < 0) opts.unshift(`<option value="${esc(cur || 'UTC0')}" selected>${esc(cur || 'UTC0')}（当前）</option>`);
+    return opts.join('');
   }
 
   /* 配置码登记表（DeviceID 的 TTTT 段）：与 Docs/PRD/IpcCloud设备序列号生成规则_v1.0.md §2.2
@@ -78,13 +136,15 @@
       ].forEach((n) => { if (n) s1.append(n); });
       b.append(s1);
 
-      /* 日期时间：设备墙钟每秒走（与时间校对页同源，未校时也如实显示） */
+      /* 日期时间：设备墙钟每秒走（与时间校对页同源，未校时也如实显示）。
+         按**设备时区**显示（fmtDevClock 用 UTC getter 读设备本地墙钟） */
       if (tm && tm.utc) {
-        const base = tm.utc * 1000 - Date.now();
+        const off = tzOffsetMin(tm.timezone);
+        const base = tm.utc * 1000 + off * 60000 - Date.now();
         const el = trow.querySelector('.sys-info-val');
         const tick = () => {
           if (!el.isConnected) { clearInterval(IPC._devClockT); return; }
-          el.textContent = fmtClock(new Date(Date.now() + base));
+          el.textContent = fmtDevClock(new Date(Date.now() + base));
         };
         tick();
         if (IPC._devClockT) clearInterval(IPC._devClockT);
@@ -124,7 +184,9 @@
 
   /**
    * 时间校对：设备墙钟为准（每秒本地自增，不用浏览器时间）；
-   * NTP 自动校时写 time.ntp.*，手动/同步计算机时间直接设墙钟并停 NTP。
+   * NTP 自动校时写 time.ntp.*（**默认方式**），手动/同步计算机时间直接设墙钟并停 NTP；
+   * 「时区」两种方式下都在，写 time.timezone（POSIX 偏移串），设备端立即生效。
+   * 设备时间一律按**设备时区**渲染（见 fmtDevClock/tzOffsetMin 的口径说明）。
    */
   function loadTimePage(b) {
     const box = h('<div class="sys-loading">正在读取设备时间…</div>');
@@ -132,8 +194,10 @@
     IPC.api('GET', '/api/v1/system/time').then((t) => {
       if (!box.isConnected) return;
       box.remove();
-      const base = t.utc * 1000 - Date.now();
-      let manual = !t.ntp_enable;
+      const off = tzOffsetMin(t.timezone);
+      const base = t.utc * 1000 + off * 60000 - Date.now();   /* 设备本地墙钟 → 当前时刻的差值 */
+      /* 默认 NTP：只有设备明确回了 ntp_enable=false 才算手动（旧固件/字段缺失按 NTP） */
+      let manual = t.ntp_enable === false;
       const draw = () => {
         b.innerHTML = '';
         const rows = [
@@ -155,9 +219,15 @@
               <span class="${t.ntp_synced ? '' : 'muted'}">${t.ntp_synced ? '已与服务器同步' : '同步中（尚未与服务器完成校时，请检查服务器地址与网络）'}</span></div>`));
           }
         }
+        /* 时区：放在校时方式之后、保存之前（两种方式下都要能改——改时区与怎么校时是两件事）。
+           设备只有固定偏移（板上无 zoneinfo），故选项即 POSIX 偏移串，改完立即生效：
+           OSD 时间叠加与页面显示同源，不需要重启设备。 */
+        rows.push(h(`<div class="frow"><div class="lab">时区</div>
+          <select id="tm-tz" aria-label="设备时区">${tzOptionsHtml(t.timezone)}</select>
+          <span class="unit">设备本地时间（页面显示与画面上 OSD 时间）按此时区计算</span></div>`));
         b.append(sec('', rows));
         const clock = $('#sys-clock', b);
-        const tick = () => { if (clock.isConnected) clock.textContent = fmtClock(new Date(Date.now() + base)); };
+        const tick = () => { if (clock.isConnected) clock.textContent = fmtDevClock(new Date(Date.now() + base)); };
         tick();
         if (IPC._clockT) clearInterval(IPC._clockT);
         IPC._clockT = setInterval(() => { if (!clock.isConnected) clearInterval(IPC._clockT); else tick(); }, 1000);
@@ -166,22 +236,26 @@
         /* 提示以设备回复为准：开启 NTP 时设备只说"正在同步"，不能替它说"已生效" */
         const put = (body) => IPC.api('PUT', '/api/v1/system/time', body)
           .then((r) => { setTimeout(() => IPC.render(), 1500); return (r && r.msg) || '时间设置已保存'; });
+        /* 保存时一并提交当前选中的时区（不选也提交：下拉必有值，等价于"保持/改到这一项"） */
+        const tzNow = () => $('#tm-tz', b).value;
         if (manual) {
           const set = $('#tm-set', b);
-          const d = new Date(Date.now() + base);
-          set.value = `${fmtDate(d)}T${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+          /* 输入框里是**设备本地时间**（与上方时钟同口径），保存时按设备时区反解成 UTC */
+          const nowDev = new Date(Date.now() + base);
+          set.value = `${fmtDevDate(nowDev)}T${fmtDevHms(nowDev)}`;
           $('#tm-pc', b).onclick = () => put({ ntp_enable: false, utc: Math.floor(Date.now() / 1000) })
             .then((m) => toast(m)).catch((e) => toast(e.message));
           b.append(IPC.ui.saveRow(() => {
-            const ms = new Date(set.value).getTime();
-            if (!set.value || isNaN(ms)) return Promise.reject(new Error('请选择时间'));
-            return put({ ntp_enable: false, utc: Math.floor(ms / 1000) });
+            if (!set.value) return Promise.reject(new Error('请选择时间'));
+            const ms = devWallToUtcMs(set.value, tzOffsetMin(tzNow()));
+            if (isNaN(ms)) return Promise.reject(new Error('请选择时间'));
+            return put({ ntp_enable: false, utc: Math.floor(ms / 1000), timezone: tzNow() });
           }));
         } else {
           b.append(IPC.ui.saveRow(() => {
             const v = $('#tm-ntp', b).value.trim();
             if (!/^[A-Za-z0-9.-]{1,127}$/.test(v)) return Promise.reject(new Error('服务器地址只能包含字母、数字、点和横线，最多 127 个字符'));
-            return put({ ntp_enable: true, ntp_server: v });
+            return put({ ntp_enable: true, ntp_server: v, timezone: tzNow() });
           }));
         }
       };
@@ -662,10 +736,14 @@
      * 行首是单调毫秒：墙钟(行) = 设备 utc −(此刻单调 − 行单调)，锚点由 /system/log 返回；
      * 设备未校时时时间列显示 "--" 且时间范围不生效。
      */
-    const now = new Date();
-    const from = new Date(now.getTime() - 7 * 86400 * 1000);
-    const dStr = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
-    const hmsStr = (d) => `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+    /* 设备时区未知时先按 UTC 填（下面 load() 拿到 /system/time 后按设备时区重填：
+       否则浏览器与设备时区不同时，默认的「近 7 天」窗口会把最新日志滤掉）。 */
+    let devOff = 0, rangeTouched = false;
+    const dStr = fmtDevDate;      /* 设备本地墙钟 → "YYYY-MM-DD"（UTC getter 读） */
+    const hmsStr = fmtDevHms;     /* → "HH:MM:SS" */
+    const rangeOf = (ms) => { const d = new Date(ms + devOff * 60000); return [dStr(d), hmsStr(d)]; };
+    const [defD1, defT1] = rangeOf(Date.now() - 7 * 86400 * 1000);
+    const [defD2, defT2] = rangeOf(Date.now());
     const MT = ['全部', '报警', '异常', '操作', '信息'];
     const RE_ALARM = /alarm|motion|ivs|侦测|告警|报警|事件|越界|入侵|移动侦测/;
     const RE_OP = /登录|注销|口令|密码|保存|应用|重启|恢复|激活|升级|导入|导出|诊断|校时|配置|会话|锁定/;
@@ -674,13 +752,13 @@
       <div class="log-filter">
         <div class="log-filter-row">
           <span class="log-lab">开始时间</span>
-          <input type="date" id="log-d1" class="log-d" value="${dStr(from)}">
-          <input type="time" id="log-t1" class="log-t" step="1" value="${hmsStr(from)}">
+          <input type="date" id="log-d1" class="log-d" value="${defD1}">
+          <input type="time" id="log-t1" class="log-t" step="1" value="${defT1}">
         </div>
         <div class="log-filter-row">
           <span class="log-lab">结束时间</span>
-          <input type="date" id="log-d2" class="log-d" value="${dStr(now)}">
-          <input type="time" id="log-t2" class="log-t" step="1" value="${hmsStr(now)}">
+          <input type="date" id="log-d2" class="log-d" value="${defD2}">
+          <input type="time" id="log-t2" class="log-t" step="1" value="${defT2}">
         </div>
         <div class="log-filter-row log-type">
           <span class="log-lab">主类型</span>
@@ -722,9 +800,8 @@
     const fmtTime = (ms) => {
       const t = lineMs(ms);
       if (t == null) return '--';
-      const d = new Date(t);
-      return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ` +
-        `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+      /* + 设备时区偏移 → 设备本地墙钟，再用 UTC getter 格式化（不是浏览器时区） */
+      return fmtDevClock(new Date(t + devOff * 60000));
     };
     const parse = (l) => LINE_RE.exec(l);
     const eventOf = (m) => `[${m[3]}] ${m[6]}`;
@@ -793,21 +870,48 @@
       scope();
     };
 
-    /* 从控件读条件（仅「查找」时调用） */
+    /* 从控件读条件（仅「查找」时调用）：选择器里是**设备本地时间**（与时间列同口径），
+       故按设备时区反解成 UTC，否则跨时区时筛选会整体偏掉 */
     const readCond = () => {
-      const t1 = Date.parse(`${$('#log-d1', b).value}T${$('#log-t1', b).value || '00:00:00'}`);
-      const t2 = Date.parse(`${$('#log-d2', b).value}T${$('#log-t2', b).value || '23:59:59'}`);
+      rangeTouched = true;
+      const t1 = devWallToUtcMs(`${$('#log-d1', b).value}T${$('#log-t1', b).value || '00:00:00'}`, devOff);
+      const t2 = devWallToUtcMs(`${$('#log-d2', b).value}T${$('#log-t2', b).value || '23:59:59'}`, devOff);
       cond = { mt: $('#log-mt', b).value, t1: isNaN(t1) ? null : t1, t2: isNaN(t2) ? null : t2 };
     };
 
-    const load = () => IPC.api('GET', '/api/v1/system/log?lines=1000')
-      .then((r) => {
+    /* 时间列与时间范围都按设备时区解读：/system/log 只回 utc+单调毫秒，时区得另取
+       /system/time。两张单并行发起：**日志一到就先画**（不因时区请求拖慢首屏），
+       时区到了再按设备时区重画一次；首屏拿到时区后按设备时区重填默认范围
+       （用户已点过查找就不动它）。 */
+    let firstLoad = true;
+    const load = () => {
+      const logP = IPC.api('GET', '/api/v1/system/log?lines=1000');
+      const tzP = IPC.api('GET', '/api/v1/system/time').catch(() => null);
+      return logP.then((r) => {
         all = r.lines || [];
         aUtc = r.utc || 0;
         aMono = r.mono_ms || 0;
         filter();
-      })
-      .catch((e) => { const tb = $('#log-tb', b); if (tb) tb.innerHTML = `<tr><td colspan="3">读取失败：${esc(e.message)}</td></tr>`; });
+        return tzP;
+      }).then((tm) => {
+        const off = tm ? tzOffsetMin(tm.timezone) : 0;
+        if (off === devOff) return;
+        devOff = off;
+        if (firstLoad) {
+          firstLoad = false;
+          if (!rangeTouched) {
+            const f = rangeOf(Date.now() - 7 * 86400 * 1000), n = rangeOf(Date.now());
+            $('#log-d1', b).value = f[0]; $('#log-t1', b).value = f[1];
+            $('#log-d2', b).value = n[0]; $('#log-t2', b).value = n[1];
+            readCond();
+          }
+        }
+        filter();
+      }).catch((e) => {
+        const tb = $('#log-tb', b);
+        if (tb) tb.innerHTML = `<tr><td colspan="3">读取失败：${esc(e.message)}</td></tr>`;
+      });
+    };
 
     /* 查找 = 拉取设备日志并按当前条件过滤（与实机一致，不是即时筛选） */
     $('#log-go', b).onclick = () => { readCond(); load(); };
@@ -819,7 +923,7 @@
     $('#log-prev', b).onclick = () => { page -= 1; paint(); };
     $('#log-next', b).onclick = () => { page += 1; paint(); };
     $('#log-last', b).onclick = () => { page = pages(); paint(); };
-    readCond();   /* 首屏用默认条件（近 7 天 + 全部） */
+    /* 首屏：默认条件（近 7 天 + 全部）在 load() 里按设备时区填；查找 = 读条件+重拉日志 */
     load();
   });
 

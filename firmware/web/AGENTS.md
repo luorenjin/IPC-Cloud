@@ -64,7 +64,7 @@ python firmware/scripts/gen_assets.py firmware/web firmware/modules/console/cons
   - 子码流（MJPEG）→ `<img data-preview="sub">`；
   - **主码流（H.264 裸流）→ `<video data-preview-h264="/ws/v1/preview?stream=main" muted playsinline>`**，由 `js/preview-player.js` transmux 到 MSE。**写成 `img data-preview="main"` 一定黑屏**——主码流帧是 `'K'/'P' + Annex-B`，`<img>` 解不了（实测 `naturalWidth` 恒 0）。
   - 板端预览是**单消费者**：同一时刻只能有一条，所以换页/换码流必须先 `detachPreviews()` 再接新的。
-- 页面上有**暂无设备端接口**的控件时（如图像页的曝光/白平衡/补光设置），按根 `AGENTS.md` 保持可见，但**必须在页面上如实标注"不会下发"**，不得做成假开关；真接上的项要能走 `IPC.saveCfg` / `IPC.api` 并有 cfg 键。
+- 页面上有**无设备端能力**的控件时，按根 `AGENTS.md` 处理：**保持控件/区块可见 + 待办登记在 `Docs/遗留问题清单.md`，不在页面上注入开发态提示**（2026-09-29 用户明确：“待办不进产品”）；与**硬件能力强绑定**的项改用能力位门控（见下节「能力驱动 UI」）。真接上的项必须能走 `IPC.saveCfg` / `IPC.api` 并有 cfg 键，不得做成假开关。
 
 - 页面插件在 `js/views/*.js`，通过 `IPC.page('pImage', …)` 注册；`router.js` 的 `TAB_PAGE` 把页签映到 id——**加页要同时改 views 与 TAB_PAGE**。
 - 文案当前硬编码中文（无 i18n 目录）；与 `platform/web` 的 `locales/` **无关**。
@@ -74,6 +74,7 @@ python firmware/scripts/gen_assets.py firmware/web firmware/modules/console/cons
   - `router.js` 的 `NAV[].feat`、`SUB_FEAT`、`TOP_FEAT` 是功能 ID → 入口映射表；**新增入口必须挂 feature ID**。
   - `IPC.feat(id)` 只在设备上报 `true` 时可见，**未上报的 ID 同样隐藏**。没有后端实现的入口挂一个设备不会上报的 ID（如 `network.ports`、`network.ftp`、`system.diag`），就会一直隐藏；后端实现后再上报。
   - 功能 ID 与 `console_api.c` 的 `build_features_object` 一一对应，改一侧必须同步另一侧。
+  - **页内控件也能用能力位门控**（不只是导航/页签）：与硬件强绑定的项挂 feature ID，由 `IPC.feat(id)` 决定整块显隐 —— 例如图像页「补光设置」由 `image.white_led`（判据 = HAL 映射了 `HAL_PIN_WHITE_LED`）与 `image.human_exp`（判据 = `profile.ivs.humanoid`）控制，本 SKU 两项均 false → 整块不出现（2026-09-29 用户裁定，与实机 `image_capability` 的 `smart_white_lamp_supported` / `overexposure_people_suppression_supported` 同做法）。将来 SKU 加硬件后上报能力位即自动出现，**不需要改前端**。
 - **能力与模块管理（R1）**：页签在「系统设置 → 能力与模块」（`js/views/modules.js`）。
   - 数据源 `GET /api/v1/system/capabilities`（features 明细 + modules 目录）。
   - 模块开关写 `module.<name>.enabled`（`console_api_register_rules` 登记，**需重启生效**）；只有固件里已注册的模块 `toggleable=true`，其余开关禁用。

@@ -17,6 +17,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 static int g_pass, g_fail;
 #define CHECK(cond, ...) do { \
@@ -24,6 +25,16 @@ static int g_pass, g_fail;
     else { g_fail++; printf("  FAIL %s:%d: ", __FILE__, __LINE__); printf(__VA_ARGS__); printf("\n"); } \
 } while (0)
 #define SECTION(name) printf("== %s\n", name)
+
+/** 取某 UTC 时刻在**本进程当前时区**下的本地时/分；跨平台（MSVC 没有 localtime_r） */
+static int local_hm(time_t t, int *hh, int *mm)
+{
+    const struct tm *pt = localtime(&t);
+    if (!pt) return -1;
+    *hh = pt->tm_hour;
+    *mm = pt->tm_min;
+    return 0;
+}
 
 static void test_err_mapping(void)
 {
@@ -1263,11 +1274,14 @@ static void test_image_blc(void)
     CHECK(strstr(body, "\"ir_delay\":20") != NULL, "回读切换延迟");
 
     /* ---- 日夜配置三态（common/timed/auto，选项逐字对齐实机 dayNightMode）----
-       两个容易写错的点：
-         ① timed（日夜定时切换）在 HAL 里没有对应档，必须只落 cfg、**不动 HAL**，
-            否则"选了定时切换"会静默变成别的档；
+       三个容易写错的点：
+         ① timed（日夜定时切换）由 console_maint 的时段定时器按**设备本地时间**
+            在白天/夜晚之间切（2026-09-29 实现，见 LEG-UI-13 的落地）；下发时
+            立刻同步一次，不等维护线程下一拍；
          ② GET 必须以 cfg 为准回报 timed，否则界面会把用户的选择显示成
-            「日夜自动切换」，看着就是"没保存"。 */
+            「日夜自动切换」，看着就是"没保存"；
+         ③ 开机回放**不**替 timed 选边：那时墙钟还没校时（设备无 RTC），
+            按它算出来的必然是假结论，交给维护线程在校时后接手。 */
     {
         hal_daynight_t dn = HAL_DAYNIGHT_AUTO;
         bool night = false;
@@ -1284,13 +1298,14 @@ static void test_image_blc(void)
         CHECK(hal()->video->get_daynight(&dn, &night) == HAL_OK && dn == HAL_DAYNIGHT_DAY,
               "common 落到 HAL_DAYNIGHT_DAY（实际 %d）", (int)dn);
 
-        /* timed → cfg 记账，HAL 停在上一档 */
+        /* timed → cfg 记账，并按本地时间立刻落实一档（白天或夜晚，取决于跑测试的时刻） */
         req_make(&req, "POST", "/api/v1/image/params", "{\"daynight\":\"timed\"}", cookie);
         CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "下发 timed");
         CHECK(cfg_get_str("image.daynight", sv, sizeof(sv)) == HAL_OK && strcmp(sv, "timed") == 0,
               "timed 落盘 cfg");
-        CHECK(hal()->video->get_daynight(&dn, &night) == HAL_OK && dn == HAL_DAYNIGHT_DAY,
-              "timed 不改 HAL（仍是上一档 %d）", (int)dn);
+        CHECK(hal()->video->get_daynight(&dn, &night) == HAL_OK &&
+              (dn == HAL_DAYNIGHT_DAY || dn == HAL_DAYNIGHT_NIGHT),
+              "timed 按本地时间落到白天/夜晚档（实际 %d）", (int)dn);
         req_make(&req, "GET", "/api/v1/image/params", NULL, cookie);
         CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "回读 timed");
         CHECK(strstr(body, "\"daynight\":\"timed\"") != NULL,
@@ -1308,15 +1323,112 @@ static void test_image_blc(void)
         console_api_test_image_apply_cfg();
         CHECK(hal()->video->get_daynight(&dn, &night) == HAL_OK && dn == HAL_DAYNIGHT_DAY,
               "回放 common 后 HAL=DAY（实际 %d）", (int)dn);
-        /* timed 在回放里同样不动 HAL（避免被当成某个已知档下发） */
+        /* timed 在回放里不选边（开机墙钟未校时，算出来必然是假结论），
+           交给 console_maint 的工作线程在校时后按本地时间落实 */
         CHECK(cfg_set_str("image.daynight", "timed") == HAL_OK, "写 cfg daynight=timed");
         CHECK(hal()->video->set_daynight(HAL_DAYNIGHT_AUTO) == HAL_OK, "再把 HAL 复位成 auto");
         console_api_test_image_apply_cfg();
         CHECK(hal()->video->get_daynight(&dn, &night) == HAL_OK && dn == HAL_DAYNIGHT_AUTO,
-              "回放 timed 后 HAL 仍是 auto（实际 %d）", (int)dn);
+              "回放 timed 不选边（仍是 auto，实际 %d）", (int)dn);
         /* 复位，别把状态留给后续用例 */
         CHECK(cfg_set_str("image.daynight", "auto") == HAL_OK, "复位 cfg daynight=auto");
     }
+
+    /* ---- 监控场景（image.scene）：三个取值都是实机 image_scene_mode_common 的原值，
+       落点是「DRC + AE 曝光策略」的组合（近似，见 console_api.c 的 scene_effective）。
+       这里钉住三件最容易写错的事：
+         ① 场景非普通时**接管**宽动态/区域补偿的生效值；
+         ② cfg 里存的仍是**用户自己的开关**（不许把预设值写回用户选择）；
+         ③ 开机回放要把场景重新算一遍，否则重启后画面掉回"只看用户开关"那一档。 */
+    {
+        hal_image_t rd;
+        hal_isp_mode_t isp = HAL_ISP_LINEAR;
+
+        /* 先把用户开关都关掉，便于观察"场景接管" */
+        req_make(&req, "POST", "/api/v1/image/params", "{\"wdr\":false,\"blc\":false}", cookie);
+        CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "用户开关置 false");
+
+        /* 逆光 = DRC 开 + AE 保暗部（blc=1） */
+        req_make(&req, "POST", "/api/v1/image/params", "{\"scene\":\"back_light\"}", cookie);
+        CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "下发 逆光模式");
+        CHECK(hal()->video->get_isp_mode(&isp) == HAL_OK && isp == HAL_ISP_WDR, "逆光开出 DRC");
+        memset(&rd, 0, sizeof(rd));
+        CHECK(hal()->video->get_image(&rd) == HAL_OK && rd.backlight_comp == 1,
+              "逆光下发 AE 保暗部（backlight_comp=%d）", rd.backlight_comp);
+        req_make(&req, "GET", "/api/v1/image/params", NULL, cookie);
+        CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "回读逆光");
+        CHECK(strstr(body, "\"scene\":\"back_light\"") != NULL, "回读 scene，实际：%.360s", body);
+        CHECK(strstr(body, "\"scene_lock\":true") != NULL, "回读 scene_lock=true");
+        CHECK(strstr(body, "\"wdr\":true") != NULL && strstr(body, "\"blc\":true") != NULL,
+              "回读生效值 wdr/blc 均为 true");
+        CHECK(strstr(body, "\"wdr_user\":false") != NULL && strstr(body, "\"blc_user\":false") != NULL,
+              "用户开关保持 false（不被预设污染），实际：%.400s", body);
+
+        /* 车牌 = DRC 开 + AE 防过曝（blc=0） */
+        req_make(&req, "POST", "/api/v1/image/params", "{\"scene\":\"clear_licence\"}", cookie);
+        CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "下发 车牌模式");
+        CHECK(hal()->video->get_isp_mode(&isp) == HAL_OK && isp == HAL_ISP_WDR, "车牌开出 DRC");
+        memset(&rd, 0, sizeof(rd));
+        CHECK(hal()->video->get_image(&rd) == HAL_OK && rd.backlight_comp == 0, "车牌走 AE 防过曝");
+
+        /* 普通 = 交回用户开关（此时两边都是 false） */
+        req_make(&req, "POST", "/api/v1/image/params", "{\"scene\":\"normal\"}", cookie);
+        CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "下发 普通模式");
+        CHECK(hal()->video->get_isp_mode(&isp) == HAL_OK && isp == HAL_ISP_LINEAR, "普通关掉 DRC");
+        req_make(&req, "GET", "/api/v1/image/params", NULL, cookie);
+        CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "回读普通");
+        CHECK(strstr(body, "\"scene_lock\":false") != NULL, "普通模式不接管（scene_lock=false）");
+
+        /* 非法取值要被拒，且不能改 cfg */
+        req_make(&req, "POST", "/api/v1/image/params", "{\"scene\":\"licence\"}", cookie);
+        CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "非法场景仍 200");
+        CHECK(strstr(body, "监控场景") != NULL, "非法场景给出原因，实际：%.160s", body);
+        {
+            char sv[24];
+            CHECK(cfg_get_str("image.scene", sv, sizeof(sv)) == HAL_OK && strcmp(sv, "normal") == 0,
+                  "非法场景不改 cfg（仍是 normal）");
+        }
+
+        /* 开机回放：cfg 写 back_light + 用户开关 false → 回放后 HAL 必须是 DRC 开/保暗部 */
+        CHECK(cfg_set_str("image.scene", "back_light") == HAL_OK, "写 cfg scene=back_light");
+        CHECK(cfg_set_bool("image.wdr", false) == HAL_OK && cfg_set_bool("image.blc", false) == HAL_OK,
+              "用户开关仍为 false");
+        CHECK(hal()->video->set_isp_mode(HAL_ISP_LINEAR) == HAL_OK, "先把 HAL 复位成 LINEAR");
+        console_api_test_image_apply_cfg();
+        CHECK(hal()->video->get_isp_mode(&isp) == HAL_OK && isp == HAL_ISP_WDR,
+              "回放 back_light 后 DRC 开（实际 %d）", (int)isp);
+        memset(&rd, 0, sizeof(rd));
+        CHECK(hal()->video->get_image(&rd) == HAL_OK && rd.backlight_comp == 1,
+              "回放 back_light 后 AE 保暗部");
+        CHECK(cfg_set_str("image.scene", "normal") == HAL_OK, "复位 cfg scene=normal");
+        console_api_test_image_apply_cfg();
+    }
+
+    /* ---- 日夜定时切换的两个时刻：格式校验 + 落盘 + 回读 ---- */
+    {
+        char sv[16];
+
+        req_make(&req, "POST", "/api/v1/image/params", "{\"daynight_day_start\":\"6:00\"}", cookie);
+        CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "非法时刻仍 200");
+        CHECK(strstr(body, "白天开始") != NULL, "非法时刻给出原因，实际：%.160s", body);
+        req_make(&req, "POST", "/api/v1/image/params", "{\"daynight_night_start\":\"24:00\"}", cookie);
+        CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "越界时刻仍 200");
+        CHECK(strstr(body, "夜晚开始") != NULL, "越界时刻给出原因，实际：%.160s", body);
+
+        req_make(&req, "POST", "/api/v1/image/params",
+                 "{\"daynight_day_start\":\"07:30\",\"daynight_night_start\":\"19:45\"}", cookie);
+        CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "合法时刻下发成功");
+        CHECK(cfg_get_str("image.daynight.day_start", sv, sizeof(sv)) == HAL_OK &&
+              strcmp(sv, "07:30") == 0, "白天开始落盘 07:30");
+        CHECK(cfg_get_str("image.daynight.night_start", sv, sizeof(sv)) == HAL_OK &&
+              strcmp(sv, "19:45") == 0, "夜晚开始落盘 19:45");
+        req_make(&req, "GET", "/api/v1/image/params", NULL, cookie);
+        CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "回读时段");
+        CHECK(strstr(body, "\"daynight_day_start\":\"07:30\"") != NULL &&
+              strstr(body, "\"daynight_night_start\":\"19:45\"") != NULL,
+              "回读两个时刻，实际：%.400s", body);
+    }
+
 
     /* 部分提交（只动亮度）不能把其它项刷成默认档：这是最容易写错的一处——
        若回写 cfg 时不判 -1，一次滑杆拖动就会把刚设好的曝光/补光灯全清掉。 */
@@ -1370,6 +1482,297 @@ static void test_image_blc(void)
 
     cfg_deinit();
     remove("console_test_cfg_img.json");
+}
+
+/**
+ * 日夜定时切换（image.daynight=timed）的判定：两个纯函数 + 一次真实同步。
+ *   · "HH:MM" 解析 —— 与定时重启（system.reboot.plan.time）同一格式口径；
+ *   · 夜晚窗口判定 —— **跨零点**那一支最容易写反，单独枚举钉住；
+ *   · console_maint_daynight_sync 真的会按本地时间切档。两侧时段都用"相对当前
+ *     时刻"构造（留 2 分钟余量），所以结论不取决于跑测试的时刻。
+ */
+/* 日夜两套配置（2026-09-29 用户裁定）：白天套 = image.*、夜晚套 = image.night.*。
+   period 决定编辑目标；目标不含当前时段时只落 cfg、不碰 HAL；夜晚套键没写过
+   回落白天套（升级零回归）；console_image_apply_period 按套回放（维护线程切段
+   与开机回放都走它）。实机对照：shedday/shednight 两套独立（2026-09-29 抓包实测）。 */
+static void test_image_two_sets(void)
+{
+    http_req_t req;
+    char body[4096];
+    char cookie[128];
+    bool must_change = false;
+    int64_t lv = 0;
+    hal_image_t rd, before;
+    char sv[16];
+    const char *np;
+
+    SECTION("日夜两套图像参数");
+    /* 上一轮残留的 cfg 会让“键不存在/回落”类断言失效（跨进程也会留下文件），
+       先删掉保证每轮从空白开始 */
+    remove("console_test_cfg_2set.json");
+    CHECK(cfg_init(NULL, "console_test_cfg_2set.json") == HAL_OK, "配置中心就绪");
+    CHECK(console_api_register_rules() == HAL_OK, "登记规则");
+    console_auth_reset_lockout();
+    CHECK(console_auth_seed("ABCD1234", NULL, true) == HAL_OK, "播种凭据");
+    CHECK(console_auth_set_password("ABCD1234", "NewPass@123") == HAL_OK, "改密解除强制改密");
+    CHECK(do_login("admin", "NewPass@123", "192.168.70.15", cookie, sizeof(cookie), &must_change) == HAL_OK,
+          "登录成功");
+
+    /* 确定当前时段 = 白天（mock 的 g_dn 可能被前面的用例留在夜晚） */
+    req_make(&req, "POST", "/api/v1/image/params", "{\"daynight\":\"auto\"}", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "复位日夜=自动");
+
+    /* 1) period=night：只写夜晚套 cfg，且**不碰** HAL（当前是白天） */
+    CHECK(hal()->video->get_image(&before) == HAL_OK, "读改动前 HAL");
+    req_make(&req, "POST", "/api/v1/image/params",
+             "{\"period\":\"night\",\"brightness\":71}", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "period=night 下发成功");
+    CHECK(cfg_get_int("image.night.brightness", &lv) == HAL_OK && lv == 71,
+          "夜晚套亮度落盘 71（实际 %d）", (int)lv);
+    CHECK(cfg_get_int("image.brightness", &lv) != HAL_OK, "白天套未被写（键还不存在）");
+    CHECK(hal()->video->get_image(&rd) == HAL_OK && rd.brightness == before.brightness,
+          "HAL 亮度未被动过（编辑另一套不该改画面，实际 %d）", rd.brightness);
+
+    /* 2) 缺省 period=cur（=白天）：写白天套 + HAL 生效 */
+    req_make(&req, "POST", "/api/v1/image/params", "{\"brightness\":66}", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "cur（白天）下发成功");
+    CHECK(cfg_get_int("image.brightness", &lv) == HAL_OK && lv == 66, "白天套亮度落盘 66");
+    CHECK(hal()->video->get_image(&rd) == HAL_OK && rd.brightness == 66,
+          "白天套打进 HAL（实际 %d）", rd.brightness);
+
+    /* 3) GET：顶层（白天套）与 night 对象各自独立回读 */
+    req_make(&req, "GET", "/api/v1/image/params", NULL, cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "回读");
+    CHECK(strstr(body, "\"brightness\":66") != NULL, "顶层（白天套）亮度 66，实际：%.240s", body);
+    CHECK(strstr(body, "\"night\":{\"brightness\":71") != NULL,
+          "night 对象亮度 71，实际：%.240s", body);
+
+    /* 4) period=both：两套同写（日夜通用的“共用”语义） */
+    req_make(&req, "POST", "/api/v1/image/params",
+             "{\"period\":\"both\",\"contrast\":58}", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "both 下发成功");
+    CHECK(cfg_get_int("image.contrast", &lv) == HAL_OK && lv == 58, "白天套对比度 58");
+    CHECK(cfg_get_int("image.night.contrast", &lv) == HAL_OK && lv == 58, "夜晚套对比度 58");
+
+    /* 5) 按套回放：夜套 71 / 白套 66 各自落到 HAL（切段与开机回放同一实现） */
+    console_image_apply_period(true);
+    CHECK(hal()->video->get_image(&rd) == HAL_OK && rd.brightness == 71,
+          "回放夜套 → 亮度 71（实际 %d）", rd.brightness);
+    console_image_apply_period(false);
+    CHECK(hal()->video->get_image(&rd) == HAL_OK && rd.brightness == 66,
+          "回放白套 → 亮度 66（实际 %d）", rd.brightness);
+
+    /* 6) 夜晚套没写过的项回落白天套（升级零回归的关键口径）：白平衡 */
+    req_make(&req, "POST", "/api/v1/image/params", "{\"awb\":\"indoor\"}", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "下发白平衡 indoor");
+    CHECK(cfg_get_str("image.awb", sv, sizeof(sv)) == HAL_OK && strcmp(sv, "indoor") == 0,
+          "白天套白平衡=indoor");
+    CHECK(cfg_get_int("image.night.awb", &lv) != HAL_OK, "夜晚套白平衡键未写");
+    req_make(&req, "GET", "/api/v1/image/params", NULL, cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "回读白平衡");
+    np = strstr(body, "\"night\":{");
+    CHECK(np != NULL && strstr(np, "\"awb\":\"indoor\"") != NULL,
+          "night 对象白平衡回落白天套，实际：%.240s", body);
+    console_image_apply_period(true);
+    CHECK(hal()->video->get_image(&rd) == HAL_OK && rd.awb_mode == (int)HAL_AWB_INDOOR,
+          "回放夜套：白平衡按回落值 indoor 生效（实际 %d）", rd.awb_mode);
+
+    /* 7) 非法 period 被拒（不能静默当 cur 处理） */
+    req_make(&req, "POST", "/api/v1/image/params",
+             "{\"period\":\"bothh\",\"brightness\":1}", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "非法 period 仍 200");
+    CHECK(strstr(body, "period 只支持") != NULL, "报错指明 period 取值，实际：%.240s", body);
+
+    /* 复位：两套都回 50/默认，HAL 同步回出厂，别把脏状态留给后续用例 */
+    req_make(&req, "POST", "/api/v1/image/params",
+             "{\"period\":\"both\",\"brightness\":50,\"contrast\":50,\"awb\":\"auto\"}", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "复位两套");
+    console_api_test_image_apply_cfg();      /* cur=day → 白套 50 进 HAL */
+    console_image_apply_period(true);        /* 夜套也回 50（防后续用例 cur=night） */
+    CHECK(hal()->video->get_image(&rd) == HAL_OK && rd.brightness == 50 && rd.contrast == 50,
+          "HAL 复位 50/50（实际 %d/%d）", rd.brightness, rd.contrast);
+    cfg_deinit();   /* 与其它用例对称：不给后续 cfg_init 留 ESTATE */
+    remove("console_test_cfg_2set.json");    /* 收尾删档，别把残留留在仓库目录 */
+}
+
+/**
+ * 顶层四滑杆 = **白天套**；白天套从没写过 cfg 而**此刻跑的是夜晚套**时，
+ * 不能拿 HAL 读数（=夜晚套的值）冒充白天套——否则"改夜晚参数 → 白天滑杆
+ * 跟着跳"。2026-09-29 夜间真机 E14 实测复现：白天套键从未写入，夜晚写 63
+ * 后顶层 brightness 也变 63。白天套没写过 = 出厂未改，应回中性值 50。
+ */
+static void test_image_day_fallback_at_night(void)
+{
+    http_req_t req;
+    char body[4096];
+    char cookie[128];
+    bool must_change = false;
+    hal_image_t rd;
+
+    SECTION("白天套未写过时的顶层回读（夜间）");
+    remove("console_test_cfg_dayfb.json");
+    CHECK(cfg_init(NULL, "console_test_cfg_dayfb.json") == HAL_OK, "配置中心就绪");
+    CHECK(console_api_register_rules() == HAL_OK, "登记规则");
+    console_auth_reset_lockout();
+    CHECK(console_auth_seed("ABCD1234", NULL, true) == HAL_OK, "播种凭据");
+    CHECK(console_auth_set_password("ABCD1234", "NewPass@123") == HAL_OK, "改密解除强制改密");
+    CHECK(do_login("admin", "NewPass@123", "192.168.70.15", cookie, sizeof(cookie), &must_change) == HAL_OK,
+          "登录成功");
+
+    /* 白天时段写夜晚套：目标不含当前时段 → 只落 cfg、不碰 HAL */
+    CHECK(hal()->video->set_daynight(HAL_DAYNIGHT_DAY) == HAL_OK, "当前=白天");
+    req_make(&req, "POST", "/api/v1/image/params",
+             "{\"period\":\"night\",\"brightness\":77}", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "夜晚套写 77");
+    CHECK(hal()->video->get_image(&rd) == HAL_OK && rd.brightness != 77,
+          "编辑另一套不改画面（实际 %d）", rd.brightness);
+
+    /* 切到夜视并按套回放 → HAL 跑的是夜晚套 */
+    CHECK(hal()->video->set_daynight(HAL_DAYNIGHT_NIGHT) == HAL_OK, "当前=夜晚");
+    console_image_apply_period(true);
+    CHECK(hal()->video->get_image(&rd) == HAL_OK && rd.brightness == 77,
+          "HAL 跑夜晚套 77（实际 %d）", rd.brightness);
+
+    /* 白天套键从未写过 → 顶层必须是中性 50（不能是 HAL 里的 77），night 才是 77 */
+    req_make(&req, "GET", "/api/v1/image/params", NULL, cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "回读");
+    CHECK(strstr(body, "\"brightness\":50") != NULL,
+          "顶层（白天套）=50，实际：%.260s", body);
+    CHECK(strstr(body, "\"night\":{\"brightness\":77") != NULL,
+          "night 对象=77，实际：%.260s", body);
+    CHECK(strstr(body, "\"night_now\":true") != NULL, "回报此刻是夜晚");
+
+    /* 收尾：两套回 50、日夜回自动、HAL 同步回白天套，别把夜视状态留给后续用例 */
+    req_make(&req, "POST", "/api/v1/image/params",
+             "{\"period\":\"both\",\"brightness\":50,\"daynight\":\"auto\"}", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "复位两套+日夜");
+    console_image_apply_period(false);
+    console_image_apply_period(true);
+    CHECK(hal()->video->get_image(&rd) == HAL_OK && rd.brightness == 50,
+          "HAL 复位 50（实际 %d）", rd.brightness);
+    cfg_deinit();
+    remove("console_test_cfg_dayfb.json");
+}
+
+static void test_daynight_timed(void)
+{
+    http_req_t req;
+    char body[4096];
+    char cookie[128];
+    bool must_change = false;
+    hal_daynight_t dn = HAL_DAYNIGHT_AUTO;
+    bool night = false;
+    char sv[16];
+    hal_image_t rd;
+
+    SECTION("日夜定时切换（timed）");
+    CHECK(cfg_init(NULL, "console_test_cfg_dntimed.json") == HAL_OK, "配置中心就绪");
+    CHECK(console_api_register_rules() == HAL_OK, "登记规则");
+    console_auth_reset_lockout();
+    CHECK(console_auth_seed("ABCD1234", NULL, true) == HAL_OK, "播种凭据");
+    CHECK(console_auth_set_password("ABCD1234", "NewPass@123") == HAL_OK, "改密解除强制改密");
+    CHECK(do_login("admin", "NewPass@123", "192.168.70.14", cookie, sizeof(cookie), &must_change) == HAL_OK,
+          "登录成功");
+
+    /* 格式：必须 5 字节 HH:MM、冒号在第 3 位、时分都在范围内 */
+    CHECK(console_maint_test_hhmm_min("06:00") == 360, "06:00 → 360 分钟");
+    CHECK(console_maint_test_hhmm_min("23:59") == 1439, "23:59 → 1439 分钟");
+    CHECK(console_maint_test_hhmm_min("00:00") == 0, "00:00 → 0 分钟");
+    CHECK(console_maint_test_hhmm_min("6:00") == -1, "缺前导零被拒");
+    CHECK(console_maint_test_hhmm_min("24:00") == -1, "24 点被拒");
+    CHECK(console_maint_test_hhmm_min("06:60") == -1, "60 分被拒");
+    CHECK(console_maint_test_hhmm_min("06-00") == -1, "分隔符错误被拒");
+    CHECK(console_maint_test_hhmm_min(NULL) == -1, "空指针被拒");
+
+    /* 窗口：白天 = [day, night)；night < day 时窗口跨零点 */
+    CHECK(!console_maint_test_timed_is_night(360, 1080, 600), "10:00 在白天窗口内");
+    CHECK(console_maint_test_timed_is_night(360, 1080, 300), "05:00 属于夜晚");
+    CHECK(console_maint_test_timed_is_night(360, 1080, 1080), "18:00 整点属于夜晚（左闭右开）");
+    CHECK(console_maint_test_timed_is_night(360, 1080, 359), "05:59 仍属于夜晚");
+    CHECK(console_maint_test_timed_is_night(1200, 360, 800), "跨零点：13:20 属于夜晚窗口");
+    CHECK(!console_maint_test_timed_is_night(1200, 360, 100), "跨零点：01:40 属于白天窗口");
+    CHECK(!console_maint_test_timed_is_night(360, 360, 600), "时段退化（两时刻相同）= 全天白天");
+
+    /* 非 timed 档：同步函数不得插手（用户选的档位不能被它改掉） */
+    CHECK(cfg_set_str("image.daynight", "auto") == HAL_OK, "写 cfg daynight=auto");
+    CHECK(hal()->video->set_daynight(HAL_DAYNIGHT_NIGHT) == HAL_OK, "先把 HAL 设成夜晚");
+    console_maint_daynight_sync();
+    CHECK(hal()->video->get_daynight(&dn, &night) == HAL_OK && dn == HAL_DAYNIGHT_NIGHT,
+          "auto 档时同步函数不介入（实际 %d）", (int)dn);
+
+    /* 两套参数各写一个可辨识值：维护线程切到哪套，HAL 就该跑哪套
+       （console_maint_daynight_sync 里的 console_image_apply_period 钩子）。 */
+    CHECK(cfg_set_int("image.brightness", 55) == HAL_OK &&
+          cfg_set_int("image.night.brightness", 88) == HAL_OK, "写两套亮度 55/88");
+
+    /* 时段退化 = 全天白天：确定性落 DAY（不依赖跑测试的时刻） */
+    CHECK(cfg_set_str("image.daynight.day_start", "00:00") == HAL_OK &&
+          cfg_set_str("image.daynight.night_start", "00:00") == HAL_OK, "写退化时段");
+    req_make(&req, "POST", "/api/v1/image/params", "{\"daynight\":\"timed\"}", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "切到 timed");
+    CHECK(hal()->video->get_daynight(&dn, &night) == HAL_OK && dn == HAL_DAYNIGHT_DAY,
+          "退化时段按白天落实（实际 %d）", (int)dn);
+    CHECK(hal()->video->get_image(&rd) == HAL_OK && rd.brightness == 55,
+          "切到白天同时回放白套参数（亮度 55，实际 %d）", rd.brightness);
+
+    /* 相对当前本地时间构造两侧时段（留 2 分钟余量），两档都要能真的切过去 */
+    {
+        int64_t utc = 0;
+        int now_min, n2, n3;
+        char d_s[8], n_s[8];
+        char jbody[96];
+
+        CHECK(hal()->sys->get_wallclock(&utc) == HAL_OK && utc > 0, "读墙钟");
+        now_min = (int)(((utc + console_maint_test_tz_offset(CONSOLE_TZ_DEFAULT)) % 86400) / 60);
+        n2 = (now_min + 2) % 1440;
+        n3 = (now_min + 3) % 1440;
+
+        /* 白天 = [now, now+2) → 现在落在白天 */
+        snprintf(d_s, sizeof(d_s), "%02d:%02d", now_min / 60, now_min % 60);
+        snprintf(n_s, sizeof(n_s), "%02d:%02d", n2 / 60, n2 % 60);
+        snprintf(jbody, sizeof(jbody),
+                 "{\"daynight_day_start\":\"%s\",\"daynight_night_start\":\"%s\"}", d_s, n_s);
+        req_make(&req, "POST", "/api/v1/image/params", jbody, cookie);
+        CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "写入相对时段（白天侧）");
+        console_maint_daynight_sync();
+        CHECK(hal()->video->get_daynight(&dn, &night) == HAL_OK && dn == HAL_DAYNIGHT_DAY,
+              "落在白天窗口 → 切白天（时段 %s/%s，实际 %d）", d_s, n_s, (int)dn);
+        CHECK(hal()->video->get_image(&rd) == HAL_OK && rd.brightness == 55,
+              "切白天同时回放白套参数（亮度 55，实际 %d）", rd.brightness);
+
+        /* 白天 = [now+2, now+3) → 现在的时刻落在夜晚 */
+        snprintf(d_s, sizeof(d_s), "%02d:%02d", n2 / 60, n2 % 60);
+        snprintf(n_s, sizeof(n_s), "%02d:%02d", n3 / 60, n3 % 60);
+        snprintf(jbody, sizeof(jbody),
+                 "{\"daynight_day_start\":\"%s\",\"daynight_night_start\":\"%s\"}", d_s, n_s);
+        req_make(&req, "POST", "/api/v1/image/params", jbody, cookie);
+        CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "写入相对时段（夜晚侧）");
+        console_maint_daynight_sync();
+        CHECK(hal()->video->get_daynight(&dn, &night) == HAL_OK && dn == HAL_DAYNIGHT_NIGHT,
+              "落在夜晚窗口 → 切夜晚（时段 %s/%s，实际 %d）", d_s, n_s, (int)dn);
+        CHECK(hal()->video->get_image(&rd) == HAL_OK && rd.brightness == 88,
+              "切夜晚同时回放夜套参数（亮度 88，实际 %d）", rd.brightness);
+    }
+
+    /* 离开 timed 档后同步函数放手（清缓存），档位回到自动 */
+    req_make(&req, "POST", "/api/v1/image/params", "{\"daynight\":\"auto\"}", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "切回 auto");
+    CHECK(hal()->video->get_daynight(&dn, &night) == HAL_OK && dn == HAL_DAYNIGHT_AUTO,
+          "auto 落到 HAL_DAYNIGHT_AUTO（实际 %d）", (int)dn);
+
+    /* 复位时段，别把超短窗口留给后续用例 */
+    CHECK(cfg_set_str("image.daynight.day_start", "06:00") == HAL_OK &&
+          cfg_set_str("image.daynight.night_start", "18:00") == HAL_OK, "复位时段 06:00/18:00");
+    /* 复位两套亮度（上面的 55/88 别传给后续用例），两套都推一次 */
+    CHECK(cfg_set_int("image.brightness", 50) == HAL_OK &&
+          cfg_set_int("image.night.brightness", 50) == HAL_OK, "复位两套亮度 50");
+    console_api_test_image_apply_cfg();   /* cur=auto → 白套进 HAL */
+    console_image_apply_period(true);     /* 夜套也推 50（防后续用例 cur=night） */
+    CHECK(cfg_get_str("image.daynight", sv, sizeof(sv)) == HAL_OK && strcmp(sv, "auto") == 0,
+          "cfg daynight 复位为 auto");
+
+    cfg_deinit();
+    remove("console_test_cfg_dntimed.json");
 }
 
 /**
@@ -1924,6 +2327,66 @@ static void test_api_time(void)
 
     req_make(&req, "PUT", "/api/v1/system/time", "{\"ntp_enable\":false,\"utc\":-5}", cookie);
     CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_EINVAL, "负时间被拒");
+
+    /*
+     * 时区（2026-10-01 新增）：PUT /system/time 可另带 `timezone`（POSIX 偏移串），
+     * 落盘后**立即**设进本进程 —— 板端 OSD 的时间叠加走 localtime_r，不当场 apply
+     * 就要重启 ipc_app 才跟着变。板上无 zoneinfo，区名（Asia/Shanghai）必须拒掉：
+     * 它"存得进去、不生效"，会让页面显示的时区与画面上的时间对不上。
+     */
+    req_make(&req, "GET", "/api/v1/system/time", NULL, cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "读时间");
+    CHECK(strstr(body, "\"timezone\":\"" CONSOLE_TZ_DEFAULT "\"") != NULL,
+          "未配置时区时回显缺省 " CONSOLE_TZ_DEFAULT "，实际：%.200s", body);
+
+    /* 冬季时刻（北半球 DST 已结束）：MSVC 的 _tzset 在 TZ 未写 DST 规则时会套用
+       美国夏令时规则，挑 12 月可让下面的绝对断言与平台 DST 规则无关。 */
+    {
+        const time_t t = 1797344000;              /* 2026-12-15T14:13:20Z */
+        int hh = -1, mm = -1;
+
+        req_make(&req, "PUT", "/api/v1/system/time",
+                 "{\"ntp_enable\":true,\"ntp_server\":\"ntp.aliyun.com\",\"timezone\":\"UTC0\"}", cookie);
+        CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "设置 UTC0 成功");
+        CHECK(local_hm(t, &hh, &mm) == 0, "localtime 可用");
+        CHECK(hh == 14 && mm == 13,
+              "UTC0 下 14:13Z 应显示 14:13（进程时区已当场生效），实际 %02d:%02d", hh, mm);
+
+        req_make(&req, "PUT", "/api/v1/system/time",
+                 "{\"ntp_enable\":false,\"utc\":1797344000,\"timezone\":\"UTC-5:30\"}", cookie);
+        CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "手动校时同时改时区");
+        CHECK(local_hm(t, &hh, &mm) == 0, "localtime 可用");
+        CHECK(hh == 19 && mm == 43,
+              "东五区半下 14:13Z 应为 19:43（POSIX 符号相反，别写反），实际 %02d:%02d", hh, mm);
+        req_make(&req, "GET", "/api/v1/system/time", NULL, cookie);
+        CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "读时间");
+        CHECK(strstr(body, "\"timezone\":\"UTC-5:30\"") != NULL, "时区已落盘并回显，实际：%.200s", body);
+    }
+
+    /* 非法时区一律拒绝（含区名、shell 元字符、超长），不得静默落盘 */
+    req_make(&req, "PUT", "/api/v1/system/time",
+             "{\"ntp_enable\":true,\"ntp_server\":\"ntp.aliyun.com\",\"timezone\":\"Asia/Shanghai\"}", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_EINVAL, "区名写法被拒（板上无 zoneinfo）");
+    CHECK(strstr(body, "时区") != NULL, "拒绝原因里点明时区格式，实际：%.200s", body);
+    req_make(&req, "PUT", "/api/v1/system/time",
+             "{\"ntp_enable\":true,\"ntp_server\":\"ntp.aliyun.com\",\"timezone\":\"CST-8;reboot\"}", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_EINVAL, "时区里的 shell 元字符被拒");
+    {
+        char put[256];
+        snprintf(put, sizeof(put),
+                 "{\"ntp_enable\":true,\"ntp_server\":\"ntp.aliyun.com\",\"timezone\":\"CST-8%s\"}",
+                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");   /* 共 65 字节 */
+        req_make(&req, "PUT", "/api/v1/system/time", put, cookie);
+        CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_EINVAL, "超长时区被拒");
+    }
+    req_make(&req, "GET", "/api/v1/system/time", NULL, cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "读时间");
+    CHECK(strstr(body, "\"timezone\":\"UTC-5:30\"") != NULL,
+          "被拒的写入不得改动已存值，实际：%.200s", body);
+    /* 复位成缺省：本测试进程的 TZ 是全局状态，别留给后面的用例 */
+    req_make(&req, "PUT", "/api/v1/system/time",
+             "{\"ntp_enable\":true,\"ntp_server\":\"ntp.aliyun.com\",\"timezone\":\"" CONSOLE_TZ_DEFAULT "\"}", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "时区复位为缺省");
 
     /* 小问题 1：服务器名上限与缓冲一致，128 字节的名字不得被静默截断 */
     {
@@ -3165,8 +3628,330 @@ static void test_maint_tz_days(void)
           "临界：到 2000-01-01 即视为已校时");
 }
 
+/* mock OSD 测试钩子（见 platform/mock/mock_misc.c） */
+int mock_osd_get(int n, hal_osd_cfg_t *out, bool *enabled);
+int mock_osd_count(void);
+void mock_osd_reset(void);
+
+/* OSD 模块对齐实机（2026-09-29）：模式 / 显示效果 / 字体颜色 / 最小边距 / 通道名
+   / 自定义字符的**全链路**（cfg 落盘 → HAL 真收到 → 回读口径），以及国标模式下
+   时间与通道名的右对齐与 8 条字符。 */
+static void test_osd(void)
+{
+    http_req_t req;
+    char body[8192];
+    char cookie[128];
+    char sv[32];
+    bool must_change = false, on = false;
+    int64_t iv = 0;
+
+    SECTION("OSD 参数（对齐实机：模式/显示/颜色/边距/自定义字符）");
+    cfg_deinit();   /* 与其它用例对称：不给后续 cfg_init 留 ESTATE */
+    remove("console_test_cfg_osd.json");
+    CHECK(cfg_init(NULL, "console_test_cfg_osd.json") == HAL_OK, "配置中心就绪");
+    CHECK(console_api_register_rules() == HAL_OK, "登记规则");
+    console_auth_reset_lockout();
+    CHECK(console_auth_seed("ABCD1234", NULL, true) == HAL_OK, "播种凭据");
+    CHECK(console_auth_set_password("ABCD1234", "NewPass@123") == HAL_OK, "改密解除强制改密");
+    CHECK(do_login("admin", "NewPass@123", "192.168.70.21", cookie, sizeof(cookie), &must_change) == HAL_OK,
+          "登录成功");
+    mock_osd_reset();   /* 别把上一个用例留下的区域算进来 */
+
+    /* ---- 出厂回读：普通模式 / 不闪烁 / 默认白 / 边距 1 / 4 条自定义字符 ---- */
+    req_make(&req, "GET", "/api/v1/osd", NULL, cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "GET OSD 成功");
+    CHECK(strstr(body, "\"mode\":\"normal\"") != NULL, "默认普通模式，实际：%.200s", body);
+    CHECK(strstr(body, "\"color_type\":\"auto\"") != NULL, "默认字体颜色 auto");
+    CHECK(strstr(body, "\"margin\":1") != NULL, "默认最小边距 1");
+    CHECK(strstr(body, "\"flicker\":false") != NULL, "默认不闪烁");
+    CHECK(strstr(body, "\"link_device_name\":false") != NULL, "默认不同步设备名");
+    {
+        json_t *j = json_parse(body, 0, NULL, 0);
+        const json_t *texts = json_get(j, "texts");
+        CHECK(texts != NULL && json_is(texts, JSON_ARRAY) && json_size(texts) == 4,
+              "普通模式回读 4 条自定义字符（实际 %d）", texts ? (int)json_size(texts) : -1);
+        json_free(j);
+    }
+
+    /* ---- 国标模式 + 自定义颜色 + 闪烁 + 边距 2 + 通道名（并同步设备名）+ 8 条字符 ----
+       条目 3 刻意**不带** enabled：平台「OSD 画面贴合」编辑器写的条目没有这个字段，
+       缺省必须按“开”处理，否则用户在平台加的文字永远不上屏。 */
+    req_make(&req, "POST", "/api/v1/osd",
+             "{\"mode\":\"gb\",\"flicker\":true,\"color_type\":\"user_defined\",\"color\":\"red\","
+             "\"margin\":2,\"time_enable\":true,\"name_enable\":true,\"time_font_px\":32,\"name_font_px\":32,"
+             "\"channel_name\":\"GATE-1\",\"link_device_name\":true,"
+             "\"texts\":[{\"enabled\":true,\"text\":\"A1\"},{\"enabled\":true,\"text\":\"A2\"},"
+             "{\"text\":\"A3\"},{\"enabled\":false,\"text\":\"A4\"},{},{},{},{}]}", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "POST 国标模式成功");
+    CHECK(cfg_get_str("osd.mode", sv, sizeof(sv)) == HAL_OK && strcmp(sv, "gb") == 0, "osd.mode 落盘 gb");
+    CHECK(cfg_get_str("osd.colorType", sv, sizeof(sv)) == HAL_OK && strcmp(sv, "user_defined") == 0,
+          "osd.colorType 落盘 user_defined");
+    CHECK(cfg_get_str("osd.color", sv, sizeof(sv)) == HAL_OK && strcmp(sv, "red") == 0, "osd.color 落盘 red");
+    CHECK(cfg_get_int("osd.margin", &iv) == HAL_OK && iv == 2, "osd.margin 落盘 2");
+    CHECK(cfg_get_bool("osd.flicker", &on) == HAL_OK && on, "osd.flicker 落盘 true");
+    /* 开了「同步修改设备名称」→ 通道名同时写进 device.name（实机 link_chn_to_dev 的语义） */
+    CHECK(cfg_get_str("device.name", sv, sizeof(sv)) == HAL_OK && strcmp(sv, "GATE-1") == 0,
+          "device.name 随通道名同步（实际 %s）", sv);
+    /* 字号是全局一项：两个键必须被写成同一个值，否则回读自相矛盾 */
+    CHECK(cfg_get_int("osd.channelName.fontPx", &iv) == HAL_OK && iv == 32,
+          "通道名字号与时间字号同步为 32（实际 %d）", (int)iv);
+
+    /* ---- HAL 侧必须真收到（只写 cfg 不改硬件 = 假保存）----
+       区域构成：时间 + 通道名 + A1/A2/A3（A4 关、其余 4 条空文本不建区）= 5 个。 */
+    {
+        hal_osd_cfg_t c;
+        int n = mock_osd_count(), i, rights = 0, text_regions = 0;
+        bool saw_margin = false, saw_red = false, saw_flicker = false, saw_a3 = false;
+        CHECK(n == 5, "国标模式共 5 个 OSD 区域（实际 %d）", n);
+        for (i = 0; i < n; i++) {
+            bool en = false;
+            if (!mock_osd_get(i, &c, &en)) continue;
+            if (c.align == HAL_OSD_ALIGN_RIGHT) {
+                rights++;
+                if (c.margin_chars == 2) saw_margin = true;
+            }
+            if (c.kind == HAL_OSD_TEXT) text_regions++;
+            if (c.color_argb == 0xFFFF0000u) saw_red = true;
+            if (c.flicker) saw_flicker = true;
+            if (en && strcmp(c.text, "A3") == 0) saw_a3 = true;
+        }
+        CHECK(rights == 2, "时间与通道名右对齐（实际 %d 个）", rights);
+        CHECK(saw_margin, "右对齐区域带上最小边距 2");
+        CHECK(saw_red, "user_defined+red 传到 HAL（ARGB 0xFFFF0000）");
+        CHECK(saw_flicker, "闪烁传到 HAL");
+        CHECK(text_regions == 4, "TEXT 类区域 = 通道名 + A1/A2/A3（实际 %d）", text_regions);
+        CHECK(saw_a3, "enabled 缺省的条目按**开**处理（A3 上了屏）");
+    }
+
+    /* ---- 国标模式回读 8 条自定义字符，且 mode 不再被 HAL 带偏 ---- */
+    req_make(&req, "GET", "/api/v1/osd", NULL, cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "国标回读成功");
+    CHECK(strstr(body, "\"mode\":\"gb\"") != NULL, "回读为 gb");
+    CHECK(strstr(body, "\"color\":\"red\"") != NULL, "回读颜色 red");
+    CHECK(strstr(body, "\"margin\":2") != NULL, "回读边距 2");
+    {
+        json_t *j = json_parse(body, 0, NULL, 0);
+        const json_t *texts = json_get(j, "texts");
+        CHECK(texts != NULL && json_size(texts) == 8, "国标模式回读 8 条自定义字符（实际 %d）",
+              texts ? (int)json_size(texts) : -1);
+        json_free(j);
+    }
+
+    /* ---- 切回普通模式：右对齐取消、只剩前 4 条字符位（实机切档即换排布）---- */
+    req_make(&req, "POST", "/api/v1/osd", "{\"mode\":\"normal\"}", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "切回普通模式成功");
+    {
+        hal_osd_cfg_t c;
+        int n = mock_osd_count(), i, rights = 0;
+        for (i = 0; i < n; i++) {
+            if (mock_osd_get(i, &c, NULL) && c.align == HAL_OSD_ALIGN_RIGHT) rights++;
+        }
+        CHECK(rights == 0, "普通模式不再有右对齐区域（实际 %d 个）", rights);
+        CHECK(n == 5, "普通模式仍是 5 个区域（时间+通道名+A1/A2/A3，实际 %d）", n);
+    }
+
+    /* ---- 「星期」：时间串里的 %a 段（实机勾了星期就是 `2026-09-29 星期二 22:50:56`）
+       与前两轮不同的是，勾「星期」现在**真的改变上屏文字**，不再是只改界面。
+       缺省 date=true / week=false，格式串与升级前逐字一致（老配置回读不变样）。 */
+    {
+        hal_osd_cfg_t c;
+        int i, seen = 0;
+        for (i = 0; i < mock_osd_count(); i++) {
+            if (!mock_osd_get(i, &c, NULL) || c.kind != HAL_OSD_TEXT_TIME) continue;
+            seen++;
+            CHECK(strstr(c.text, "%Y-%m-%d") != NULL && strstr(c.text, "%a") == NULL,
+                  "默认时间格式串 = 日期+时间、不含星期（实际 %s）", c.text);
+        }
+        CHECK(seen == 1, "时间区域只有一个（实际 %d）", seen);
+    }
+    req_make(&req, "POST", "/api/v1/osd", "{\"time_week\":true}", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "开星期成功");
+    CHECK(cfg_get_bool("osd.time.week", &on) == HAL_OK && on, "osd.time.week 落盘 true");
+    {
+        hal_osd_cfg_t c;
+        int i, seen = 0;
+        for (i = 0; i < mock_osd_count(); i++) {
+            if (!mock_osd_get(i, &c, NULL) || c.kind != HAL_OSD_TEXT_TIME) continue;
+            seen++;
+            /* 星期插在日期与时间之间（与实机 qa() 里的拼接位置一致），交给平台层渲染中文 */
+            CHECK(strcmp(c.text, "%Y-%m-%d %a %H:%M:%S") == 0,
+                  "开星期后格式串 = 日期 星期 时间（实际 %s）", c.text);
+        }
+        CHECK(seen == 1, "开星期不改变区域条数（实际 %d）", seen);
+    }
+    req_make(&req, "GET", "/api/v1/osd", NULL, cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "开星期后回读成功");
+    CHECK(strstr(body, "\"time_week\":true") != NULL, "回读带 time_week，实际：%.200s", body);
+    CHECK(strstr(body, "\"time_date\":true") != NULL, "回读带 time_date，实际：%.200s", body);
+    /* 只勾星期（日期关）：串里只剩 星期+时间，不再冒出日期段 */
+    req_make(&req, "POST", "/api/v1/osd", "{\"time_date\":false}", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "关日期段成功");
+    {
+        hal_osd_cfg_t c;
+        int i, seen = 0;
+        for (i = 0; i < mock_osd_count(); i++) {
+            if (!mock_osd_get(i, &c, NULL) || c.kind != HAL_OSD_TEXT_TIME) continue;
+            seen++;
+            CHECK(strcmp(c.text, "%a %H:%M:%S") == 0, "关日期段后串 = 星期 时间（实际 %s）", c.text);
+        }
+        CHECK(seen == 1, "关日期段不改变区域条数（实际 %d）", seen);
+    }
+    /* 区域关着（time_enable=false）时两个勾选都必须回读 false：否则界面会显示
+       「日期勾着、画面上却没有时间」——本轮用户在「星期」上踩的就是这类不一致。 */
+    req_make(&req, "POST", "/api/v1/osd", "{\"time_enable\":false}", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "关时间区域成功");
+    req_make(&req, "GET", "/api/v1/osd", NULL, cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "关区域后回读成功");
+    CHECK(strstr(body, "\"time_date\":false") != NULL && strstr(body, "\"time_week\":false") != NULL,
+          "区域关着时日期/星期都报 false，实际：%.240s", body);
+    /* 复原：日期开、星期关、区域开（后面的用例按缺省口径看时间串） */
+    req_make(&req, "POST", "/api/v1/osd", "{\"time_enable\":true,\"time_date\":true,\"time_week\":false}", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "复原日期/星期/区域成功");
+
+    /* ---- 非法值一律拒绝并给出原因（脏值不进 cfg）---- */
+    req_make(&req, "POST", "/api/v1/osd", "{\"mode\":\"abc\"}", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "非法 mode 仍 200");
+    CHECK(strstr(body, "OSD 模式") != NULL, "非法 mode 被拒并给出原因，实际：%.160s", body);
+    CHECK(cfg_get_str("osd.mode", sv, sizeof(sv)) == HAL_OK && strcmp(sv, "normal") == 0,
+          "被拒后 osd.mode 保持 normal");
+    req_make(&req, "POST", "/api/v1/osd", "{\"margin\":3}", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "越界 margin 仍 200");
+    CHECK(strstr(body, "最小边距") != NULL, "越界 margin 被拒并给出原因，实际：%.160s", body);
+    req_make(&req, "POST", "/api/v1/osd", "{\"color\":\"purple\"}", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "非法 color 仍 200");
+    CHECK(strstr(body, "颜色") != NULL, "非法 color 被拒并给出原因，实际：%.160s", body);
+    req_make(&req, "POST", "/api/v1/osd",
+             "{\"texts\":[{\"text\":\"1\"},{\"text\":\"2\"},{\"text\":\"3\"},{\"text\":\"4\"},"
+             "{\"text\":\"5\"},{\"text\":\"6\"},{\"text\":\"7\"},{\"text\":\"8\"},{\"text\":\"9\"}]}", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "超条数仍 200");
+    CHECK(strstr(body, "最多 8 条") != NULL, "超 8 条被拒并给出原因，实际：%.160s", body);
+
+    cfg_deinit();
+    remove("console_test_cfg_osd.json");
+}
+
+/** 区域覆盖（隐私遮挡）：cfg 落盘 / HAL 收到遮挡区域 / 夹取与拒绝 / 回读口径。
+ *
+ *  只写 cfg 不落 HAL 就是“假保存”，所以每一步都断言 mock HAL 真收到了
+ *  HAL_OSD_COVER 区域（kind/颜色/矩形），与 test_osd 同一套做法。 */
+static void test_cover(void)
+{
+    http_req_t req;
+    char body[4096];
+    char cookie[128];
+    char js[256];
+    bool must_change = false, on = true;
+
+    SECTION("区域覆盖（隐私遮挡，对齐实机「区域覆盖」页）");
+    cfg_deinit();
+    remove("console_test_cfg_cover.json");
+    CHECK(cfg_init(NULL, "console_test_cfg_cover.json") == HAL_OK, "配置中心就绪");
+    CHECK(console_api_register_rules() == HAL_OK, "登记规则");
+    console_auth_reset_lockout();
+    CHECK(console_auth_seed("ABCD1234", NULL, true) == HAL_OK, "播种凭据");
+    CHECK(console_auth_set_password("ABCD1234", "NewPass@123") == HAL_OK, "改密解除强制改密");
+    CHECK(do_login("admin", "NewPass@123", "192.168.70.22", cookie, sizeof(cookie), &must_change) == HAL_OK,
+          "登录成功");
+    mock_osd_reset();
+
+    /* ---- 出厂回读：关闭、无区域、上限 4（对齐实机 graphLimit.rect 与 cover_reg_num）---- */
+    req_make(&req, "GET", "/api/v1/cover", NULL, cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "GET cover 成功");
+    CHECK(strstr(body, "\"enable\":false") != NULL, "默认关闭，实际：%.200s", body);
+    CHECK(strstr(body, "\"max\":4") != NULL, "上限 4");
+    CHECK(mock_osd_count() == 0, "出厂没有遮挡区域（实际 %d）", mock_osd_count());
+
+    /* ---- 保存两条 + 开开关：cfg 落归一化比例、HAL 收到遮挡区域 ---- */
+    req_make(&req, "POST", "/api/v1/cover",
+             "{\"enable\":true,\"regions\":[{\"x\":3139,\"y\":4066,\"w\":2486,\"h\":3838},"
+             "{\"x\":0,\"y\":0,\"w\":10000,\"h\":2000}]}", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "POST 两条区域成功");
+    CHECK(strstr(body, "已生效") != NULL, "POST 响应表明已生效，实际：%.200s", body);
+    CHECK(cfg_get_bool("osd.cover.enable", &on) == HAL_OK && on, "osd.cover.enable 落盘 true");
+    CHECK(cfg_get_json("osd.cover.regions", js, sizeof(js)) == HAL_OK, "osd.cover.regions 落盘");
+    /* 落盘口径是归一化 0–1 的比例（与 alarm.motion.regions 同族）：3139/10000 = 0.3139 */
+    CHECK(strstr(js, "0.3139") != NULL && strstr(js, "0.3838") != NULL,
+          "区域按归一化比例落盘，实际 %s", js);
+    {
+        hal_osd_cfg_t c;
+        int i, covers = 0;
+        bool black = false, en = false, near = false;
+        /* 每个矩形占**两个** HAL 区域（主/子码流各一个位图：分辨率不同、尺寸不能共用） */
+        CHECK(mock_osd_count() == 4, "HAL 收到 4 个区域（2 矩形 × 主/子，实际 %d）", mock_osd_count());
+        for (i = 0; i < mock_osd_count(); i++) {
+            if (!mock_osd_get(i, &c, &en)) continue;
+            if (c.kind != HAL_OSD_COVER) continue;
+            covers++;
+            if (c.color_argb == 0xFF000000u) black = true;
+            if (en) near = true;
+            /* 第一个区域：31.39% / 40.66% / 24.86% / 38.38%（比例直接进 HAL） */
+            if (c.pos.x > 0.31f && c.pos.x < 0.32f && c.pos.y > 0.40f && c.pos.y < 0.41f &&
+                c.pos.w > 0.24f && c.pos.w < 0.25f && c.pos.h > 0.38f && c.pos.h < 0.39f)
+                near = en ? true : near;
+        }
+        CHECK(covers == 4, "四个区域都是 HAL_OSD_COVER（实际 %d）", covers);
+        CHECK(black, "遮挡色传到 HAL（不透明纯黑 0xFF000000）");
+        CHECK(near, "开关开着时区域是启用态");
+    }
+
+    /* ---- 回读：万分比整数（与 POST 对称）---- */
+    req_make(&req, "GET", "/api/v1/cover", NULL, cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "回读成功");
+    CHECK(strstr(body, "\"enable\":true") != NULL, "开关回读 true");
+    CHECK(strstr(body, "\"x\":3139") != NULL && strstr(body, "\"h\":2000") != NULL,
+          "坐标按万分比回读，实际：%.240s", body);
+
+    /* ---- 关开关：区域还在（配置不丢），但 HAL 上是禁用态 ---- */
+    req_make(&req, "POST", "/api/v1/cover", "{\"enable\":false}", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "关开关成功");
+    {
+        hal_osd_cfg_t c;
+        int i, off = 0;
+        for (i = 0; i < mock_osd_count(); i++) {
+            bool en = true;
+            if (!mock_osd_get(i, &c, &en)) continue;
+            if (c.kind == HAL_OSD_COVER && !en) off++;
+        }
+        CHECK(off == 4, "关开关后四个区域都是禁用态（实际 %d）", off);
+    }
+
+    /* ---- 越界只夹取不报错（拖动越界是常事）---- */
+    req_make(&req, "POST", "/api/v1/cover",
+             "{\"regions\":[{\"x\":9000,\"y\":9000,\"w\":5000,\"h\":5000}]}", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "越界区域被接受");
+    CHECK(cfg_get_json("osd.cover.regions", js, sizeof(js)) == HAL_OK, "越界后落盘");
+    CHECK(strstr(js, "0.9000,0.9000,0.1000,0.1000") != NULL, "越界被夹到画面内，实际 %s", js);
+
+    /* ---- 长或宽过小要拦（文案对齐实机 errStr.coverRectSizeErr）---- */
+    req_make(&req, "POST", "/api/v1/cover", "{\"regions\":[{\"x\":100,\"y\":100,\"w\":20,\"h\":300}]}", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "过小区域仍 200");
+    CHECK(strstr(body, "区域长或宽的值过小") != NULL, "过小区域被拒并给出原因，实际：%.160s", body);
+    req_make(&req, "POST", "/api/v1/cover",
+             "{\"regions\":[{\"x\":0,\"y\":0,\"w\":1000,\"h\":1000},{\"x\":0,\"y\":0,\"w\":1000,\"h\":1000},"
+             "{\"x\":0,\"y\":0,\"w\":1000,\"h\":1000},{\"x\":0,\"y\":0,\"w\":1000,\"h\":1000},"
+             "{\"x\":0,\"y\":0,\"w\":1000,\"h\":1000}]}", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "超条数仍 200");
+    CHECK(strstr(body, "最多只能设置 4 个") != NULL, "超 4 条被拒并给出原因，实际：%.160s", body);
+
+    /* ---- 面积上限：单块不能超过画面 1/4（设备端拿不到那么大内存，宁可拒绝也不画小）---- */
+    req_make(&req, "POST", "/api/v1/cover", "{\"regions\":[{\"x\":0,\"y\":0,\"w\":10000,\"h\":5000}]}", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "超大区域仍 200");
+    CHECK(strstr(body, "遮挡区域过大") != NULL, "超大区域被拒并给出原因，实际：%.160s", body);
+
+    /* ---- 清空：cfg 与 HAL 都清掉（实机「清空」是同义）---- */
+    req_make(&req, "POST", "/api/v1/cover", "{\"regions\":[]}", cookie);
+    CHECK(console_api_test_dispatch(&req, body, sizeof(body), NULL) == HAL_OK, "清空成功");
+    CHECK(mock_osd_count() == 0, "清空后 HAL 无遮挡区域（实际 %d）", mock_osd_count());
+
+    cfg_deinit();
+    remove("console_test_cfg_cover.json");
+}
+
 int main(void)
 {
+    /* stdout 不缓冲：测试进程若在断言前就崩了（早先踩过：cfg_get_int 收到 int*
+       写 8 字节打穿栈），缓冲的用例输出会全部丢掉，只剩设备日志，很难定位。 */
+    setvbuf(stdout, NULL, _IONBF, 0);
     if (profile_load("profiles/mock-x86.json") != HAL_OK) {
         printf("  FAIL 无法加载 profiles/mock-x86.json（工作目录应为 firmware/）\n");
         return 1;
@@ -3196,6 +3981,11 @@ int main(void)
     test_caps_json();
     test_capabilities_endpoint();
     test_image_blc();
+    test_image_two_sets();
+    test_image_day_fallback_at_night();
+    test_daynight_timed();
+    test_osd();
+    test_cover();
     test_api_config_endpoints();
     test_api_system_endpoints();
     test_api_system_extras();

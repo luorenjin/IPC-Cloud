@@ -23,17 +23,40 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <io.h>
+#include <intrin.h>
+#include <BaseTsd.h>
+typedef SSIZE_T ssize_t;
+#ifndef F_OK
+#define F_OK 0
+#endif
+#define usleep(us) Sleep((DWORD)((us) / 1000))
+#define __builtin_popcount __popcnt
+#else
 #include <unistd.h>
+#endif
 
 #define GPIO_ROOT "/sys/class/gpio"
 
 /** 单调时钟（微秒）。core/os.h 的 os_monotonic_us 服务的是上层，platform 是
- *  L0，不能反向依赖 core，所以这里自己拿 POSIX 时钟。 */
+ *  L0，不能反向依赖 core，所以这里自己拿 POSIX / Win32 时钟。 */
 static uint64_t now_us(void)
 {
+#ifdef _WIN32
+    static LARGE_INTEGER freq;
+    static int inited = 0;
+    LARGE_INTEGER cnt;
+    if (!inited) { QueryPerformanceFrequency(&freq); inited = 1; }
+    QueryPerformanceCounter(&cnt);
+    return (uint64_t)(cnt.QuadPart * 1000000ull / freq.QuadPart);
+#else
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000000ull + (uint64_t)(ts.tv_nsec / 1000);
+#endif
 }
 
 /** profile 里 gpio_map 的引脚号（-1 = 未声明，视为未映射） */

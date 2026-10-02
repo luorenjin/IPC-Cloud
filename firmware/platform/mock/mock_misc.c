@@ -75,28 +75,76 @@ const hal_audio_ops_t mock_audio_ops = {
 
 /* ======================= OSD ======================= */
 
-#define OSD_MAX 8
+#define OSD_MAX 16
+#define OSD_MAX_PER_CHN 12 /**< 与 gk7205v200 一致：国标模式要 8 条自定义字符 + 通道名 + 时间 */
 typedef struct { bool used; int ch; hal_osd_cfg_t cfg; bool enabled; } osd_region_t;
 static osd_region_t g_osd[OSD_MAX];
 
-static hal_err_t o_caps(hal_osd_caps_t *c) { if (!c) return HAL_EINVAL; c->max_regions_per_channel = 4; c->bitmap = true; c->hw_text = false; return HAL_OK; }
+static hal_err_t o_caps(hal_osd_caps_t *c)
+{
+    if (!c) return HAL_EINVAL;
+    c->max_regions_per_channel = OSD_MAX_PER_CHN;
+    c->bitmap = true;
+    c->hw_text = false;
+    c->right_align = true;
+    c->flicker = true;
+    c->cover = true;   /* v1.6：与控制台「区域覆盖」页一致（mock 需与 gk 同口径） */
+    return HAL_OK;
+}
 static hal_err_t o_create(int ch, const hal_osd_cfg_t *cfg, int *id)
 {
     int per_ch = 0;
     if (ch < 0 || ch > 2 || !cfg || !id) return HAL_EINVAL;
+    /* 遮挡矩形（v1.6）的四个字段都要有效：没有长宽的“矩形”没意义。
+       判据与 gk7205v200 的 o_create 一致，conformance 才对两边都有约束力。 */
+    if (cfg->kind == HAL_OSD_COVER &&
+        (cfg->pos.w <= 0.0f || cfg->pos.w > 1.0f || cfg->pos.h <= 0.0f || cfg->pos.h > 1.0f))
+        return HAL_EINVAL;
     for (int i = 0; i < OSD_MAX; i++) if (g_osd[i].used && g_osd[i].ch == ch) per_ch++;
-    if (per_ch >= 4) return HAL_EBUSY;
+    if (per_ch >= OSD_MAX_PER_CHN) return HAL_EBUSY;
     for (int i = 0; i < OSD_MAX; i++) {
         if (!g_osd[i].used) { g_osd[i].used = true; g_osd[i].ch = ch; g_osd[i].cfg = *cfg; g_osd[i].enabled = true; *id = i; return HAL_OK; }
     }
     return HAL_ENOMEM;
 }
-static hal_err_t o_text(int id, const char *t) { if (id < 0 || id >= OSD_MAX || !g_osd[id].used || !t) return HAL_EINVAL; strncpy(g_osd[id].cfg.text, t, HAL_OSD_TEXT_MAX - 1); return HAL_OK; }
+static hal_err_t o_text(int id, const char *t) { if (id < 0 || id >= OSD_MAX || !g_osd[id].used || !t) return HAL_EINVAL; strncpy(g_osd[id].cfg.text, t, HAL_OSD_TEXT_MAX - 1); g_osd[id].cfg.text[HAL_OSD_TEXT_MAX - 1] = '\0'; return HAL_OK; }
 static hal_err_t o_pos(int id, const hal_rect_t *p) { if (id < 0 || id >= OSD_MAX || !g_osd[id].used || !p) return HAL_EINVAL; g_osd[id].cfg.pos = *p; return HAL_OK; }
 static hal_err_t o_enable(int id, bool e) { if (id < 0 || id >= OSD_MAX || !g_osd[id].used) return HAL_EINVAL; g_osd[id].enabled = e; return HAL_OK; }
 static hal_err_t o_destroy(int id) { if (id < 0 || id >= OSD_MAX || !g_osd[id].used) return HAL_EINVAL; g_osd[id].used = false; return HAL_OK; }
 
 const hal_osd_ops_t mock_osd_ops = { o_caps, o_create, o_text, o_pos, o_enable, o_destroy };
+
+/* 测试钩子（console_test 用；真机不编译本文件） */
+
+/** 取第 n 个已用区域（按槽位顺序）的配置副本；n 越界返回 0，成功返回 1 */
+int mock_osd_get(int n, hal_osd_cfg_t *out, bool *enabled)
+{
+    int seen = 0;
+    if (n < 0) return 0;
+    for (int i = 0; i < OSD_MAX; i++) {
+        if (!g_osd[i].used) continue;
+        if (seen++ == n) {
+            if (out) *out = g_osd[i].cfg;
+            if (enabled) *enabled = g_osd[i].enabled;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/** 已用区域个数 */
+int mock_osd_count(void)
+{
+    int n = 0;
+    for (int i = 0; i < OSD_MAX; i++) if (g_osd[i].used) n++;
+    return n;
+}
+
+/** 清空所有区域（用例开头调，不要把上一个用例留下的区域算进来） */
+void mock_osd_reset(void)
+{
+    memset(g_osd, 0, sizeof(g_osd));
+}
 
 /* ======================= IVS ======================= */
 

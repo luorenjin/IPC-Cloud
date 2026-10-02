@@ -13,10 +13,10 @@
     "channels": [
       { "ch": 0, "name": "main", "codecs": ["h265", "h264"],
         "max":     { "w": 1920, "h": 1080, "fps": 30 },
-        "default": { "codec": "h265", "w": 1920, "h": 1080, "fps": 25, "kbps": 2048, "rc": "vbr", "gop": 50 } },
-      { "ch": 1, "name": "sub", "codecs": ["h264"],
+        "default": { "codec": "h265", "smart_enc": true, "w": 1920, "h": 1080, "fps": 25, "kbps": 2048, "rc": "vbr", "gop": 50 } },
+      { "ch": 1, "name": "sub", "codecs": ["h264", "h265", "mjpeg"],
         "max":     { "w": 704, "h": 396, "fps": 30 },
-        "default": { "codec": "h264", "w": 640, "h": 360, "fps": 15, "kbps": 512, "rc": "cbr", "gop": 30 } }
+        "default": { "codec": "h264", "smart_enc": false, "w": 640, "h": 360, "fps": 15, "kbps": 512, "rc": "cbr", "gop": 30 } }
     ],
     "isp": { "wdr": true, "hdr": false, "3dnr": true, "daynight": "icr_auto", "ircut_driver": "ba6208",
              "note": "GC2053 是线性 sensor，只有一次曝光：真 HDR/多帧 WDR 拿不到，hdr 因此为 false；wdr 走 ISP 的 DRC（数字动态范围压缩）实现" },

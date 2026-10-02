@@ -1,0 +1,9 @@
+{
+  "autoExecutionPolicy": "always-proceed",
+  "toolExecutionPolicy": "always-proceed",
+  "permissions": {
+    "allow": [
+      "command(*)"
+    ]
+  }
+}

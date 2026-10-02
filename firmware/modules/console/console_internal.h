@@ -54,6 +54,17 @@ hal_err_t console_preview_stop(void);
  *  维护线程还会等一拍再停旧监听，让响应与连接先收尾。old_port 用于新端口
  *  绑定失败时回滚，保证设备不会掉进“两个端口都没有”的状态。 */
 hal_err_t console_maint_post_port(int new_port, int old_port);
+/** 立即按本地时间落实一次「日夜定时切换」（image.daynight=timed）。
+ *  由两处调用：① console_maint 的工作线程每拍一次（到点误差 ≤ 工作节拍）；
+ *  ② console_api.c 的 ep_image_set —— 用户刚把日夜配置改成「定时切换」时
+ *  应该马上生效，不该等下一拍。非 timed 档只清内部缓存、不动 HAL。 */
+void console_maint_daynight_sync(void);
+/** 把某一「时段套」的图像参数从 cfg 落实到 HAL（日夜两套配置，2026-09-29）。
+ *  由 console_maint 在定时切换 DAY↔NIGHT 成功后调用——切了夜视却不换参数，
+ *  等于两套配置只有一套在跑。night=false 落白天套（image.*），true 落夜晚套
+ *  （image.night.*，键未写过时回落白天套的值）。开机回放（image_apply_cfg）
+ *  走同一实现，只是前缀由「当前时段」决定。 */
+void console_image_apply_period(bool night);
 /** POST /api/v1/system/diag：校验并投递诊断任务（失败时 out 为 {"code":..,"msg":..}） */
 hal_err_t console_maint_diag(const http_req_t *req, char *out, size_t cap);
 /** GET /api/v1/system/diag：状态 + 结果（前端轮询） */
@@ -64,11 +75,15 @@ hal_err_t console_maint_diag_state(char *out, size_t cap);
 hal_err_t console_static_init(void);
 
 /**
- * 时区缺省值（POSIX TZ 串）。`time.timezone` 未配置时使用，**必须两处同值**：
- * `ep_time_get`（回给前端显示）与 `console_maint` 的定时重启（换算设备本地
- * 时间）——否则会出现「页面显示东八区、定时重启按 UTC 走」差 8 小时的错位。
+ * 时区缺省值（POSIX TZ 串）。`time.timezone` 未配置时使用，**三方必须同值**：
+ * `ep_time_get`（回给前端显示）、`console_apply_timezone`（真正 setenv 生效）、
+ * `console_maint` 的定时重启与日夜定时（换算设备本地时间）——否则会出现
+ * 「页面显示东八区、定时重启按 UTC 走」差 8 小时的错位。
+ * app/main.c 启动期也设一次进程时区（那边字面量同值，必须在 console 起来之前生效）。
  */
 #define CONSOLE_TZ_DEFAULT "CST-8"
+/** 时区串上限，与 cfg 规则 `time.timezone`（`register_common_rules`）的 1..63 对齐 */
+#define CONSOLE_TZ_MAX     63
 
 /**
  * NTP 缺省服务器。`time.ntp.enable` / `time.ntp.server` 未写入 cfg 时按
@@ -164,6 +179,26 @@ hal_err_t   console_apply_time(void);
  */
 hal_err_t   console_ntp_read(bool *en, char *server, size_t cap);
 
+/**
+ * 把 `time.timezone`（未配置用 `CONSOLE_TZ_DEFAULT`）设进**本进程**时区并立即生效
+ * （经 os_set_timezone → setenv+tzset）。启动期由 app/main.c 自己设一次（那时 console
+ * 尚未起来）；运行期改时区由 PUT /system/time 走这里——不 apply 的话 OSD 时间叠加
+ * （localtime_r）要重启 ipc_app 才跟着变。
+ */
+void        console_apply_timezone(void);
+/**
+ * POSIX TZ 串 → 相对 UTC 的**秒**偏移（东正西负，如 "CST-8"→+28800）。
+ * 解析不出偏移时返回 0（按 UTC，不猜时区）。本机（板端）无 zoneinfo 数据库，
+ * 只用得上偏移写法；`console_maint` 的定时重启/日夜定时与本函数同口径。
+ */
+int         console_tz_offset_seconds(const char *tz);
+/**
+ * 校验时区串：长度 1..`CONSOLE_TZ_MAX`、字符集与 cfg 规则一致（`CFG_CHARSET_TZ`），
+ * 且**能解出数值偏移**。最后一条是硬要求：`Asia/Shanghai` 这类名字在板上
+ * 「存得进、却不生效」（libc 找不到 zoneinfo 会退回 UTC），必须拒掉而不是静默接受。
+ */
+bool        console_tz_ok(const char *tz);
+
 hal_err_t console_auth_seed(const char *password, const char *user, bool must_change);
 /** 恢复出厂：删除本地账号凭据、清空会话与挑战，设备回到"未激活"。 */
 hal_err_t console_auth_wipe(void);
@@ -249,6 +284,13 @@ int  console_maint_test_tz_offset(const char *tz);
 bool console_maint_test_day_in(const char *days, int wd);
 /** 测试桩（console_maint.c）：NTP 是否仍需重试（开启 ∧ 墙钟还停在 2000 年前） */
 bool console_maint_test_ntp_needed(bool enabled, int64_t utc);
+/** 测试桩（console_maint.c）：把 "HH:MM" 解析成 0..1439 分钟，非法（长度/冒号位置/
+ *  越界）返回 -1。日夜定时切换与定时重启共用同一套格式口径。 */
+int  console_maint_test_hhmm_min(const char *s);
+/** 测试桩（console_maint.c）：给定白天开始/夜晚开始（分钟）与"现在"分钟，
+ *  判断此刻是否落在**夜晚**窗口。跨零点（day > night）时必须走另一分支，
+ *  这是整段逻辑最易写错的地方，故单独暴露成纯函数钉住。 */
+bool console_maint_test_timed_is_night(int day_min, int night_min, int now_min);
 #endif
 
 #ifdef IPC_TESTING

@@ -78,6 +78,10 @@ static pthread_t s_isp_th;
 static bool s_isp_thread_running;
 static hal_enc_cfg_t s_cfg[2];        /* 当前两条码流的编码配置 */
 static bool s_chn_started[2];
+/** 取流连续失败计数（每通道）：到 90（≈3 秒 @30fps）就自愈重启一次编码通道。
+ *  2026-10-01 真机出过一次“预览永久黑屏、取流永远回 BUSY、日志无任何线索”，
+ *  只能整机重启恢复——这个计数 + venc_restart_stream() 就是给那种情况兜底的。 */
+static uint32_t s_getfail[2];
 
 /** 当前图像参数（HAL 视图）。
  * @note 图像参数是**配置**不是**状态**：未 open 时也要能读写——否则控制台在
@@ -497,23 +501,57 @@ static void fill_chn_attr(VENC_CHN_ATTR_S *a, const hal_enc_cfg_t *cfg)
 
     a->stRcAttr.enRcMode = rc_mode_of(cfg->codec, cfg->rc);
     if (cfg->codec == HAL_CODEC_H265) {
-        a->stRcAttr.stH265Cbr.u32Gop = cfg->gop;
-        a->stRcAttr.stH265Cbr.u32StatTime = 1;
-        a->stRcAttr.stH265Cbr.u32SrcFrameRate = cfg->fps;
-        a->stRcAttr.stH265Cbr.fr32DstFrameRate = cfg->fps;
-        a->stRcAttr.stH265Cbr.u32BitRate = cfg->bitrate_kbps;
+        if (cfg->rc == HAL_RC_CBR) {
+            a->stRcAttr.stH265Cbr.u32Gop = cfg->gop;
+            a->stRcAttr.stH265Cbr.u32StatTime = 1;
+            a->stRcAttr.stH265Cbr.u32SrcFrameRate = cfg->fps;
+            a->stRcAttr.stH265Cbr.fr32DstFrameRate = cfg->fps;
+            a->stRcAttr.stH265Cbr.u32BitRate = cfg->bitrate_kbps;
+        } else if (cfg->rc == HAL_RC_VBR) {
+            a->stRcAttr.stH265Vbr.u32Gop = cfg->gop;
+            a->stRcAttr.stH265Vbr.u32StatTime = 1;
+            a->stRcAttr.stH265Vbr.u32SrcFrameRate = cfg->fps;
+            a->stRcAttr.stH265Vbr.fr32DstFrameRate = cfg->fps;
+            a->stRcAttr.stH265Vbr.u32MaxBitRate = cfg->bitrate_kbps;
+        } else {
+            a->stRcAttr.stH265AVbr.u32Gop = cfg->gop;
+            a->stRcAttr.stH265AVbr.u32StatTime = 1;
+            a->stRcAttr.stH265AVbr.u32SrcFrameRate = cfg->fps;
+            a->stRcAttr.stH265AVbr.fr32DstFrameRate = cfg->fps;
+            a->stRcAttr.stH265AVbr.u32MaxBitRate = cfg->bitrate_kbps;
+        }
     } else {
-        a->stRcAttr.stH264Cbr.u32Gop = cfg->gop;
-        a->stRcAttr.stH264Cbr.u32StatTime = 1;
-        a->stRcAttr.stH264Cbr.u32SrcFrameRate = cfg->fps;
-        a->stRcAttr.stH264Cbr.fr32DstFrameRate = cfg->fps;
-        a->stRcAttr.stH264Cbr.u32BitRate = cfg->bitrate_kbps;
+        if (cfg->rc == HAL_RC_CBR) {
+            a->stRcAttr.stH264Cbr.u32Gop = cfg->gop;
+            a->stRcAttr.stH264Cbr.u32StatTime = 1;
+            a->stRcAttr.stH264Cbr.u32SrcFrameRate = cfg->fps;
+            a->stRcAttr.stH264Cbr.fr32DstFrameRate = cfg->fps;
+            a->stRcAttr.stH264Cbr.u32BitRate = cfg->bitrate_kbps;
+        } else if (cfg->rc == HAL_RC_VBR) {
+            a->stRcAttr.stH264Vbr.u32Gop = cfg->gop;
+            a->stRcAttr.stH264Vbr.u32StatTime = 1;
+            a->stRcAttr.stH264Vbr.u32SrcFrameRate = cfg->fps;
+            a->stRcAttr.stH264Vbr.fr32DstFrameRate = cfg->fps;
+            a->stRcAttr.stH264Vbr.u32MaxBitRate = cfg->bitrate_kbps;
+        } else {
+            a->stRcAttr.stH264AVbr.u32Gop = cfg->gop;
+            a->stRcAttr.stH264AVbr.u32StatTime = 1;
+            a->stRcAttr.stH264AVbr.u32SrcFrameRate = cfg->fps;
+            a->stRcAttr.stH264AVbr.fr32DstFrameRate = cfg->fps;
+            a->stRcAttr.stH264AVbr.u32MaxBitRate = cfg->bitrate_kbps;
+        }
     }
-    /* GOP 模式必须用 NORMALP（严格按 u32Gop 出 I 帧）。SMARTP 把"何时插 I 帧"
-     * 交给编码器按背景变化自行判断，静止画面会**长时间不出 IDR**——实测主码流
-     * 连收 90 帧全是 P 帧、一个 SPS/PPS 都没有，扫描端的播放器拿不到起播点只能
-     * 黑屏（RequestIDR 在 SMARTP 下也不保证被采纳）。 */
-    a->stGopAttr.enGopMode = VENC_GOPMODE_NORMALP;
+
+    /* GOP 模式与智能编码（H.264+ / H.265+，SmartP）支持 */
+    if (cfg->smart_enc && (cfg->codec == HAL_CODEC_H265 || cfg->codec == HAL_CODEC_H264)) {
+        a->stGopAttr.enGopMode = VENC_GOPMODE_SMARTP;
+        a->stGopAttr.stSmartP.u32BgInterval = cfg->bg_interval ? cfg->bg_interval : 250;
+        a->stGopAttr.stSmartP.s32BgQpDelta = -2;  /* 背景参考帧高质量(-2 QP) */
+        a->stGopAttr.stSmartP.s32ViQpDelta = 2;   /* 普通前景/虚拟帧微调 */
+    } else {
+        a->stGopAttr.enGopMode = VENC_GOPMODE_NORMALP;
+        a->stGopAttr.stNormalP.s32IPQpDelta = 0;
+    }
 }
 
 static int venc_bind(int venc_chn, int vpss_chn)
@@ -584,11 +622,14 @@ static hal_err_t v_open(void)
     s_cfg[0].width = GK_MAIN_W;  s_cfg[0].height = GK_MAIN_H;
     s_cfg[0].fps = 30;  s_cfg[0].rc = HAL_RC_CBR;
     s_cfg[0].bitrate_kbps = 2048; s_cfg[0].gop = 50;
+    s_cfg[0].smart_enc = true;    /* 默认开启 Smart 智能编码特性 */
+    s_cfg[0].bg_interval = 250;
     s_cfg[1].codec = HAL_CODEC_MJPEG;   /* 子码流 MJPEG：控制台预览/抓图都用它 */
     s_cfg[1].profile = HAL_H264_MAIN;
     s_cfg[1].width = GK_SUB_W;   s_cfg[1].height = GK_SUB_H;
     s_cfg[1].fps = 25;  s_cfg[1].rc = HAL_RC_CBR;
     s_cfg[1].bitrate_kbps = 512;  s_cfg[1].gop = 30;
+    s_cfg[1].smart_enc = false;
 
     /* 顺序照 mpp_selftest 在真机上验证过的序列，**不可对调**：
      *   MIPI 上电 → VB 池 → SYS_Init → VI → ISP → VPSS → VENC
@@ -721,7 +762,9 @@ static hal_err_t v_set_encoder(int ch, const hal_enc_cfg_t *cfg)
     bool need_recreate = (cfg->codec != old->codec) ||
                          (cfg->width != old->width) ||
                          (cfg->height != old->height) ||
-                         (cfg->profile != old->profile);
+                         (cfg->profile != old->profile) ||
+                         (cfg->smart_enc != old->smart_enc) ||
+                         (cfg->rc != old->rc);
     s_cfg[ch] = *cfg;
 
     /* 只改码率/帧率/GOP 时走运行中可调接口（不断流）；改编码格式或分辨率
@@ -791,6 +834,25 @@ static hal_err_t v_request_idr(int ch)
     return (GK_API_VENC_RequestIDR(venc_chn, GK_TRUE) == GK_SUCCESS) ? HAL_OK : HAL_EIO;
 }
 
+/** 通道级自愈：StopRecvFrame → StartRecvFrame → 要一个 IDR。
+ *
+ *  什么情况下需要：取流连续失败时，GetStream 会一直返回 BUSY/空，前端就是
+ *  **永久黑屏**——2026-10-01 真机踩过一次（预览 0 帧、VENC 只丢帧不编码、
+ *  /var/log/ipc_app.log 干干净净，最后靠整机重启才恢复）。
+ *  这里不销毁通道（那会重来一遍码率/GOP/SPS 配置），只把“收帧”重新拉开。 */
+static void venc_restart_stream(int ch)
+{
+    VENC_RECV_PIC_PARAM_S rp;
+    int venc_chn = (ch == 0) ? GK_VENC_MAIN : GK_VENC_SUB;
+
+    memset(&rp, 0, sizeof(rp));
+    rp.s32RecvPicNum = 1000000;   /* 同 v_start：不能传 -1，本 SDK 会当成 0 */
+    GK_API_VENC_StopRecvFrame(venc_chn);
+    if (GK_API_VENC_StartRecvFrame(venc_chn, &rp) != GK_SUCCESS)
+        fprintf(stderr, "[gk_video] 编码通道 %d 自愈重启失败\n", ch);
+    GK_API_VENC_RequestIDR(venc_chn, GK_TRUE);
+}
+
 /* ---------------------------------------------------------------- 取帧 */
 
 static uint64_t now_us(void)
@@ -808,25 +870,34 @@ static const uint8_t s_dummy_frame_data[4] = { 0, 0, 0, 0 };
  * SPS+PPS+SEI+IDR 的顺序，头一个 NAL 是 SPS(7) 而不是 IDR(5)——只看首包会把
  * 所有关键帧都判成非关键帧（实测主码流 3 个 IDR 全部漏标，前端因此永远等不到
  * 起播点）。顺带兼容 3 字节起始码（00 00 01）。 */
-static bool is_key_frame(const uint8_t *p, uint32_t len, hal_codec_t codec)
+/** 判断访问单元类型，提取 KEY、CONFIG 等标志位。
+ *
+ * @note **必须扫完整个访问单元**，不能只看第一个 NAL：关键帧通常是
+ * SPS+PPS+SEI+IDR (H.264) 或 VPS+SPS+PPS+SEI+IDR (H.265) 的顺序，
+ * 头一个 NAL 是参数集而不是 IDR——只看首包会漏标关键帧。顺带兼容 3 字节起始码。 */
+static uint32_t analyze_frame_flags(const uint8_t *p, uint32_t len, hal_codec_t codec)
 {
-    if (!p || len < 4) return false;
+    if (!p || len < 4) return 0;
+    uint32_t flags = 0;
     for (uint32_t i = 0; i + 3 <= len; i++) {
         uint32_t sc = 0;
         if (p[i] != 0 || p[i + 1] != 0) continue;
         if (p[i + 2] == 1) sc = 3;
         else if (i + 4 <= len && p[i + 2] == 0 && p[i + 3] == 1) sc = 4;
         if (!sc || i + sc >= len) continue;
+
         if (codec == HAL_CODEC_H265) {
             uint8_t t = (uint8_t)((p[i + sc] >> 1) & 0x3F);
-            if (t == 19 || t == 20 || t == 21) return true;
+            if (t == 19 || t == 20 || t == 21) flags |= HAL_FRAME_FLAG_KEY;
+            else if (t == 32 || t == 33 || t == 34) flags |= HAL_FRAME_FLAG_CONFIG;
         } else if (codec == HAL_CODEC_H264) {
             uint8_t t = (uint8_t)(p[i + sc] & 0x1F);
-            if (t == 5) return true;
+            if (t == 5) flags |= HAL_FRAME_FLAG_KEY;
+            else if (t == 7 || t == 8) flags |= HAL_FRAME_FLAG_CONFIG;
         }
         i += sc - 1;
     }
-    return false;
+    return flags;
 }
 
 static hal_err_t v_get_frame(int ch, hal_frame_t *frame, uint32_t timeout_ms)
@@ -853,8 +924,28 @@ static hal_err_t v_get_frame(int ch, hal_frame_t *frame, uint32_t timeout_ms)
     s.pstPack = packs;
     s.u32PackCount = 16;
     rc = GK_API_VENC_GetStream(venc_chn, &s, (GK_S32)(timeout_ms ? timeout_ms : 1000));
-    if (rc == ERR_CODE_VENC_BUSY) { free(packs); return HAL_EAGAIN; }
-    if (rc != GK_SUCCESS || s.u32PackCount == 0) { free(packs); return HAL_EAGAIN; }
+    if (rc == ERR_CODE_VENC_BUSY) {   /* 编码器忙：没有拿到 stream，无需释放 */
+        free(packs);
+        return HAL_EAGAIN;
+    }
+    if (rc != GK_SUCCESS || s.u32PackCount == 0) {
+        /* ⚠ 这条失败路径**也必须** ReleaseStream：GetStream 返回错误码（或返回
+         * 成功但包数为 0）时，MPP 可能已经把一路 stream 划给了调用方；早先直接
+         * free 返回，等于把 stream buffer 一点点漏干——漏到一定程度 GetStream
+         * 就永远只回 BUSY/空，前端永久黑屏（2026-10-01 真机踩过，只能整机重启）。
+         * ReleaseStream 对没拿到的 stream 是空操作，所以这里可以放心调用。 */
+        GK_API_VENC_ReleaseStream(venc_chn, &s);
+        free(packs);
+        /* 连续失败到 3 秒（30fps ≈ 90 帧）就自愈一次，别让黑屏一直挂着 */
+        if (++s_getfail[ch] >= 90) {
+            fprintf(stderr, "[gk_video] 取流连续失败 %u 次（ch=%d rc=0x%08x），重启编码通道\n",
+                    (unsigned)s_getfail[ch], ch, (unsigned)rc);
+            venc_restart_stream(ch);
+            s_getfail[ch] = 0;
+        }
+        return HAL_EAGAIN;
+    }
+    s_getfail[ch] = 0;
 
     /* 拼成一段连续 Annex-B：MPP 的 pack 只在 ReleaseStream 前有效，业务层要
      * 跨阶段持有就必须拷出来（零拷贝约定针对采集侧原始帧，编码码流是产出物）。 */
@@ -873,7 +964,7 @@ static hal_err_t v_get_frame(int ch, hal_frame_t *frame, uint32_t timeout_ms)
             off += packs[i].u32Len;
         }
     }
-    bool key = is_key_frame(buf, off, s_cfg[ch].codec);
+    uint32_t flags = analyze_frame_flags(buf, off, s_cfg[ch].codec);
 
     GK_API_VENC_ReleaseStream(venc_chn, &s);
     free(packs);
@@ -881,7 +972,7 @@ static hal_err_t v_get_frame(int ch, hal_frame_t *frame, uint32_t timeout_ms)
     frame->ch = ch;
     frame->codec = s_cfg[ch].codec;
     frame->pts_us = now_us();
-    frame->flags = key ? HAL_FRAME_FLAG_KEY : 0;
+    frame->flags = flags;
     frame->data = buf;
     frame->size = off;
     frame->priv = buf;      /* release_frame 负责释放 */

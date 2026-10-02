@@ -195,7 +195,9 @@ hal_err_t http_ws_send_text(http_conn_t *c, const char *text);
 hal_err_t http_ws_on_text(http_conn_t *c, http_ws_text_fn fn, void *user);
 
 /**
- * 连接被销毁前的通知，在事件循环线程、conn 内存释放**之前**调用。
+ * 连接被销毁前的通知，在事件循环线程、conn 内存与 WS 内部状态**都还在**
+ * 的时候调用（只是已从连接上摘掉引用：此刻起任何 http_ws_* 新调用都拿不到
+ * 这份状态，但在途的那次发送仍持有引用、仍然安全）。
  *
  * 存在的理由：像实时预览那样「由工作线程持着 conn 指针持续推帧」的用法，
  * 一旦对端断开、conn 被回收，工作线程手里的指针就成了悬空指针——再加锁也
@@ -205,6 +207,10 @@ hal_err_t http_ws_on_text(http_conn_t *c, http_ws_text_fn fn, void *user);
  * 回调内**只允许**做状态清理（清引用、置标志、唤醒等待线程），
  * 不得调用任何 http_ws_* 或 conn_* 接口（此阶段连接正在拆卸），也不得阻塞；
  * 第二个参数 c 仅供与调用方自己保存的指针做相等比较，不要解引用。
+ *
+ * 「在途发送」与「本回调/销毁」之间的关系由 http_ws 的引用计数保证：
+ * 生产者在 http_ws_send 期间持有一份引用，因此回调返回后依然不会释放那块
+ * 状态，直到在途发送自己 ws_release（见 http_ws.c 的“生命周期”一节）。
  */
 typedef void (*http_ws_close_fn)(http_conn_t *c, void *user);
 hal_err_t http_ws_on_close(http_conn_t *c, http_ws_close_fn fn, void *user);
@@ -225,6 +231,15 @@ uint64_t http_ws_dropped(http_conn_t *c);
 /** 测试桩：创建不含真实 socket 的 WS 连接 */
 http_conn_t *http_ws_test_conn_new(size_t queue_cap);
 void         http_ws_test_conn_free(http_conn_t *c);
+/** 测试桩：模拟"生产者正在 http_ws_send 中"——取一份使用中引用；
+ *  返回 NULL 表示该连接已被摘引用（不可再访问）。需用 ref_put 归还。 */
+void        *http_ws_test_ref_take(http_conn_t *c);
+void         http_ws_test_ref_put(void *ref);
+/** 测试桩：模拟 conn_close 对 WS 连接做的拆除（摘引用 + 回调 + 按引用计数释放）。
+ *  与 http_ws_test_conn_free 的区别：不释放 conn 本身，便于在拆除后继续断言。 */
+void         http_ws_test_conn_teardown(http_conn_t *c);
+/** 测试桩：ws_state 累计真正被 free 的次数（断言"在途使用者未归还时不释放"） */
+unsigned     http_ws_test_destroy_count(void);
 /** 测试桩：清空发送队列，模拟数据已发出 */
 void         http_ws_test_drain(http_conn_t *c);
 /** 测试桩：从发送队列头部读出并移除最多 n 字节到 out，返回实际读出字节数；

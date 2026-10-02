@@ -260,7 +260,8 @@ static void test_osd_ivs(void)
     SECTION("HAL-06 osd/ivs (optional)");
     if (hal_has(HAL_MOD_OSD)) {
         const hal_osd_ops_t *o = hal()->osd;
-        hal_osd_cfg_t c; int id = -1;
+        hal_osd_cfg_t c; int id = -1, id2 = -1;
+        hal_osd_caps_t caps;
         memset(&c, 0, sizeof(c));
         c.kind = HAL_OSD_TEXT; c.pos.x = 0.02f; c.pos.y = 0.9f; c.font_px = 24; c.color_argb = 0xFFFFFFFF;
         strncpy(c.text, "IPC", HAL_OSD_TEXT_MAX - 1);
@@ -269,6 +270,37 @@ static void test_osd_ivs(void)
         CHECK(o->set_enable(id, false) == HAL_OK, "osd disable");
         CHECK(o->destroy_region(id) == HAL_OK, "osd destroy");
         CHECK(o->destroy_region(id) == HAL_EINVAL, "osd double destroy -> EINVAL");
+        /* v1.4：右对齐 + 最小边距 + 闪烁（国标模式 OSD 与「显示效果」的需要） */
+        memset(&caps, 0, sizeof(caps));
+        CHECK(o->get_caps(&caps) == HAL_OK, "osd caps");
+        CHECK(caps.right_align && caps.flicker, "osd caps 上报右对齐与闪烁能力");
+        CHECK(caps.max_regions_per_channel >= 10, "区域上限容得下国标的 8 条字符 + 通道名 + 时间（实际 %u）",
+              caps.max_regions_per_channel);
+        c.kind = HAL_OSD_TEXT; c.font_px = 64; c.color_argb = 0xFFFF0000;
+        c.align = HAL_OSD_ALIGN_RIGHT; c.margin_chars = 2; c.flicker = true;
+        strncpy(c.text, "GATE-1", HAL_OSD_TEXT_MAX - 1);
+        CHECK(o->create_region(0, &c, &id2) == HAL_OK && id2 >= 0, "osd 右对齐 + 闪烁 + 64px 建区");
+        CHECK(o->destroy_region(id2) == HAL_OK, "osd 右对齐区域销毁");
+        /* v1.6：遮挡矩形（控制台「区域覆盖」）。四个字段都要有效——没有长宽的
+           “矩形”没意义，创建时就该被拒。 */
+        {
+            hal_osd_cfg_t cv;
+            int idc = -1;
+            memset(&cv, 0, sizeof(cv));
+            cv.kind = HAL_OSD_COVER;
+            cv.pos.x = 0.30f; cv.pos.y = 0.40f; cv.pos.w = 0.25f; cv.pos.h = 0.35f;
+            cv.color_argb = 0xFF000000u;
+            if (caps.cover) {
+                CHECK(o->create_region(0, &cv, &idc) == HAL_OK && idc >= 0, "遮挡区域 create");
+                CHECK(o->set_pos(idc, &cv.pos) == HAL_OK, "遮挡矩形改位置");
+                CHECK(o->set_enable(idc, false) == HAL_OK, "遮挡 disable");
+                CHECK(o->destroy_region(idc) == HAL_OK, "遮挡 destroy");
+                cv.pos.w = 0.0f;
+                CHECK(o->create_region(0, &cv, &idc) == HAL_EINVAL, "退化遮挡矩形（长=0）被拒");
+            } else {
+                printf("  cover skipped（caps.cover=false）\n");
+            }
+        }
     } else printf("  osd skipped\n");
 
     if (hal_has(HAL_MOD_IVS)) {

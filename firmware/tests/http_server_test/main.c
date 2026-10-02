@@ -783,6 +783,81 @@ static void test_ws_backpressure(void)
     http_ws_test_conn_free(c);
 }
 
+/* ------------------------------------------------------------------------ */
+/* WS 连接生命周期：在途发送与连接销毁不得重叠（2026-10-01 真机崩溃回归）        */
+/*                                                                            */
+/* 真实现场：console_preview 的推流线程正处在 http_ws_send 里（ws_ring_write  */
+/* 往环形缓冲写帧头）时，浏览器断开、事件循环走 conn_close →                  */
+/* http_ws_conn_cleanup 把 ws_state 直接 free 掉——推流线程随后用野指针         */
+/* memcpy（真机 lr=0x10、dst=0xb6e980fe）写坏内存，SIGSEGV 退出整个 ipc_app，   */
+/* 浏览器侧表现为“画面断连且永远重连不上”（ERR_CONNECTION_REFUSED）。         */
+/*                                                                            */
+/* 时序无法在单测里“碰运气复现”，所以改成直接钉住契约：                        */
+/*   1) 使用者持引用期间拆除连接 → 不得释放（destroy_count 不变）；            */
+/*   2) 拆除后新使用者拿不到引用（ws_acquire 返回 NULL）；                    */
+/*   3) 使用者归还后才能释放（destroy_count 恰好 +1）；                     */
+/*   4) 拆除后用老 conn 调 http_ws_send 返回 HAL_EINVAL 而不是踩野指针。      */
+/* ------------------------------------------------------------------------ */
+
+static void test_ws_lifetime_detach_vs_inflight_send(void)
+{
+    http_conn_t *c;
+    void *inflight;
+    unsigned before, after_teardown, after_release;
+
+    SECTION("ws 生命周期：在途发送期间拆除连接，不得释放 ws_state（真机 SIGSEGV 回归）");
+
+    c = http_ws_test_conn_new(4096);
+    CHECK(c != NULL, "创建测试连接");
+    if (!c) return;
+
+    /* 模拟“推流线程已进入 http_ws_send、正持着引用”——它手里已拿到了 ws_state */
+    inflight = http_ws_test_ref_take(c);
+    CHECK(inflight != NULL, "在途使用者应能取到引用");
+
+    before = http_ws_test_destroy_count();
+    http_ws_test_conn_teardown(c);   /* = conn_close 对 WS 部分做的事 */
+    after_teardown = http_ws_test_destroy_count();
+    CHECK(after_teardown == before,
+          "拆除连接时仍有在途使用者，ws_state 必须不释放（destroy %u→%u）",
+          before, after_teardown);
+
+    CHECK(http_ws_test_ref_take(c) == NULL,
+          "拆除后新的使用者不得再取到引用（ws_acquire 必须返回 NULL）");
+    CHECK(http_ws_send(c, "x", 1, true) == HAL_EINVAL,
+          "拆除后 http_ws_send 应返回 HAL_EINVAL，而不是写已释放内存");
+    CHECK(http_ws_queue_used(c) == 0, "拆除后队列查询应安全返回 0");
+
+    http_ws_test_ref_put(inflight);   /* 在途使用者收工 */
+    after_release = http_ws_test_destroy_count();
+    CHECK(after_release == before + 1,
+          "最后一个引用归还后才真正释放（destroy %u→%u）", after_teardown, after_release);
+
+    http_ws_test_conn_free(c);   /* 已拆除：只释放连接槽位，不得再动 ws_state */
+}
+
+static void test_ws_lifetime_no_user_releases_immediately(void)
+{
+    http_conn_t *c;
+    unsigned before, after;
+
+    SECTION("ws 生命周期：没有在途使用者时，拆除即释放（不泄漏）");
+
+    c = http_ws_test_conn_new(4096);
+    CHECK(c != NULL, "创建测试连接");
+    if (!c) return;
+
+    before = http_ws_test_destroy_count();
+    http_ws_test_conn_teardown(c);
+    after = http_ws_test_destroy_count();
+    CHECK(after == before + 1, "无在途使用者时拆除应立即释放（destroy %u→%u）", before, after);
+
+    /* 已拆除的连接再走一次释放路径：c->ws 已为 NULL，不得重复释放 ws_state */
+    http_ws_test_conn_free(c);
+    CHECK(http_ws_test_destroy_count() == after,
+          "已拆除的连接再 free 不得重复释放 ws_state（destroy 仍为 %u）", after);
+}
+
 int main(void)
 {
     test_parse_basic();
@@ -800,6 +875,8 @@ int main(void)
     test_ws_handshake_known_answer();
     test_ws_ring_wraparound();
     test_ws_backpressure();
+    test_ws_lifetime_detach_vs_inflight_send();
+    test_ws_lifetime_no_user_releases_immediately();
     printf("RESULT: http_server pass=%d fail=%d\n", g_pass, g_fail);
     return g_fail;
 }

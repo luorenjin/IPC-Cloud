@@ -67,7 +67,12 @@ var cfgRules = map[string]cfgRule{
 	// 以及实机 dayNightMode 的三项逐字一致（common=日夜通用 / timed=日夜定时切换 /
 	// auto=日夜自动切换）；wdr 走 ISP 的 DRC
 	"image.daynight": {t: cfgStr, enum: []string{"common", "timed", "auto"}},
-	"image.wdr":      {t: cfgBool},
+	// 定时切换的两个时刻：固定 "HH:MM"（固件侧 cfg 只卡字符集与长度，格式由控制台二次校验）
+	"image.daynight.day_start":   {t: cfgStr},
+	"image.daynight.night_start": {t: cfgStr},
+	"image.wdr":                  {t: cfgBool},
+	// 监控场景：normal/back_light/clear_licence，逐字对齐实机 image_scene_mode_common
+	"image.scene": {t: cfgStr, enum: []string{"normal", "back_light", "clear_licence"}},
 	// 区域补偿（背光补偿）：固件里落 hal_image_t.backlight_comp，Goke 侧是整幅 AE 策略
 	"image.blc": {t: cfgBool},
 	// 曝光组 / 白平衡 / 补光组：枚举取值与固件 register_common_rules 逐字一致
@@ -78,6 +83,19 @@ var cfgRules = map[string]cfgRule{
 	"image.ir.mode":        {t: cfgStr, enum: []string{"auto", "off", "on"}},
 	"image.ir.sensitivity": {t: cfgInt, min: 0, max: 7},
 	"image.ir.delay":       {t: cfgInt, min: 5, max: 60},
+	// 夜晚套（日夜两套配置，2026-09-29）：白天套 = 上面的 image.*；夜晚套键
+	// 没写过时固件侧回落白天套。取值/范围与固件 register_common_rules 逐字一致
+	//（分套范围对照实机 shedday/shednight 抓包，见平台 cfgKeys 同段注释）
+	"image.night.brightness":     {t: cfgInt, min: 0, max: 100},
+	"image.night.contrast":       {t: cfgInt, min: 0, max: 100},
+	"image.night.saturation":     {t: cfgInt, min: 0, max: 100},
+	"image.night.sharpness":      {t: cfgInt, min: 0, max: 100},
+	"image.night.wdr":            {t: cfgBool},
+	"image.night.blc":            {t: cfgBool},
+	"image.night.scene":          {t: cfgStr, enum: []string{"normal", "back_light", "clear_licence"}},
+	"image.night.awb":            {t: cfgStr, enum: []string{"auto", "indoor", "outdoor"}},
+	"image.night.exposure.mode":  {t: cfgStr, enum: []string{"auto", "manual"}},
+	"image.night.exposure.level": {t: cfgInt, min: -3, max: 3},
 
 	// 编码（主码流；w/h 在固件里 reboot_required）
 	"video.0.main.codec": {t: cfgStr, enum: []string{"h265", "h264", "mjpeg"}},
@@ -99,6 +117,25 @@ var cfgRules = map[string]cfgRule{
 	"osd.time.pos":        {t: cfgPos},
 	// 自定义文字叠加：变长列表，每条一个 OSD 区域（形状见 coerceOsdTexts）
 	"osd.text.regions": {t: cfgOsdTexts},
+	// OSD 模式与显示参数（对齐实机 OSD 模块，2026-09-29）：枚举与区间与固件
+	// register_common_rules 逐字一致。mode 取 normal 时 4 条自定义字符、位置可自由定位；
+	// 取 gb（国标）时 8 条、时间与通道名右对齐、位置固定，margin 只在 gb 下生效
+	"osd.mode":    {t: cfgStr, enum: []string{"normal", "gb"}},
+	"osd.flicker": {t: cfgBool},
+	// 时间串的分段开关（对齐实机 OSD 页的「日期」「星期」）：时间文本是
+	// `[日期] [星期] 时间`，星期由设备用中文渲染（`%a`）。
+	"osd.time.date":        {t: cfgBool},
+	"osd.time.week":        {t: cfgBool},
+	"osd.colorType":        {t: cfgStr, enum: []string{"auto", "user_defined"}},
+	"osd.color":            {t: cfgStr, enum: []string{"white", "black", "red", "green", "blue"}},
+	"osd.margin":           {t: cfgInt, min: 0, max: 2},
+	"osd.channelName.text": {t: cfgStr, min: 0, max: 32},
+	"osd.linkDeviceName":   {t: cfgBool},
+	// 区域覆盖（隐私遮挡）：开关 + 归一化矩形表 [[x,y,w,h], …]（0–1，最多 4 个）。
+	// 与固件 register_common_rules、平台 cfgKeys 三处逐字一致；元素形状与
+	// alarm.motion.regions 同族（无单独校验函数，按 cfgJSON 直接收）。
+	"osd.cover.enable":  {t: cfgBool},
+	"osd.cover.regions": {t: cfgJSON},
 
 	// 录像
 	"record.enabled":        {t: cfgBool},
@@ -144,22 +181,36 @@ var cfgRules = map[string]cfgRule{
 // 画面项取 0–100 的中点 50（中位观感，厂商面板的出厂值同为 50/50/50）。
 func cfgDefaults() map[string]any {
 	return map[string]any{
-		"image.brightness":     50,
-		"image.contrast":       50,
-		"image.saturation":     50,
-		"image.sharpness":      50,
-		"image.flip":           0,
-		"image.mirror":         0,
-		"image.daynight":       "auto",
-		"image.wdr":            false,
-		"image.blc":            false,
-		"image.exposure.mode":  "auto",
-		"image.exposure.level": 0,
-		"image.antiflicker":    "off",
-		"image.awb":            "auto",
-		"image.ir.mode":        "auto",
-		"image.ir.sensitivity": 4,
-		"image.ir.delay":       5,
+		"image.brightness":           50,
+		"image.contrast":             50,
+		"image.saturation":           50,
+		"image.sharpness":            50,
+		"image.flip":                 0,
+		"image.mirror":               0,
+		"image.daynight":             "auto",
+		"image.daynight.day_start":   "06:00",
+		"image.daynight.night_start": "18:00",
+		"image.wdr":                  false,
+		"image.blc":                  false,
+		"image.scene":                "normal",
+		"image.exposure.mode":        "auto",
+		"image.exposure.level":       0,
+		"image.antiflicker":          "off",
+		"image.awb":                  "auto",
+		"image.ir.mode":              "auto",
+		"image.ir.sensitivity":       4,
+		"image.ir.delay":             5,
+		// 夜晚套默认 = 与白天套同值（出厂两套都是默认参数）
+		"image.night.brightness":     50,
+		"image.night.contrast":       50,
+		"image.night.saturation":     50,
+		"image.night.sharpness":      50,
+		"image.night.wdr":            false,
+		"image.night.blc":            false,
+		"image.night.scene":          "normal",
+		"image.night.awb":            "auto",
+		"image.night.exposure.mode":  "auto",
+		"image.night.exposure.level": 0,
 
 		"video.0.main.codec": "h265",
 		"video.0.main.w":     1920,
@@ -182,6 +233,20 @@ func cfgDefaults() map[string]any {
 		// 自定义文字出厂为空数组：设备不该在用户没要求时往画面上写字
 		// （空数组而不是 null，与 alarm.motion.regions 一致，前端拿到即可直接当列表用）
 		"osd.text.regions": []any{},
+		// OSD 模式与显示参数：出厂与实机一致（普通模式 / 不闪烁 / 默认白 / 边距 1）
+		"osd.mode":    "normal",
+		"osd.flicker": false,
+		// 出厂与实机一致：日期开、星期关（时间串 = `YYYY-MM-DD HH:MM:SS`）
+		"osd.time.date":        true,
+		"osd.time.week":        false,
+		"osd.colorType":        "auto",
+		"osd.color":            "white",
+		"osd.margin":           1,
+		"osd.channelName.text": "",
+		"osd.linkDeviceName":   false,
+		// 区域覆盖：出厂关闭、无遮挡区域（实机出厂同样是没有配置过的状态）
+		"osd.cover.enable":  false,
+		"osd.cover.regions": []any{},
 
 		"record.enabled": true,
 		// 出厂默认「事件录像」：常态下不落盘，只在移动侦测/GPIO 事件前后录一段，
@@ -197,7 +262,11 @@ func cfgDefaults() map[string]any {
 
 		"time.ntp.enable": true,
 		"time.ntp.server": "pool.ntp.org",
-		"time.timezone":   "Asia/Shanghai",
+		// 时区必须是 POSIX 偏移串（CST-8 = 东八区），与固件 CONSOLE_TZ_DEFAULT 一致：
+		// 设备端没有 zoneinfo 数据库，`Asia/Shanghai` 这类区名「存得进去、不生效」
+		// （libc 退回 UTC）。原来这里写 Asia/Shanghai，会让平台面板显示的名字与设备
+		// 实际生效的时区对不上。
+		"time.timezone": "CST-8",
 
 		// net.* 全为占位内网地址，仅用于模拟配置读写，不代表真实网络环境。
 		// 注意：cfgDefaults 必须覆盖 cfgRules 的每一个键——平台侧的 supported 是
@@ -429,11 +498,11 @@ func coercePos(v any) (any, bool) {
 	return out, true
 }
 
-// cfgOsdTextMax 自定义文字条数上限。与 HAL 的区域上限同源：每个通道最多
-// max_regions_per_channel 个 OSD 区域（参考实现 mock_misc.c 为 4），通道名与时间各占 1 个，
-// 所以“固定叠加项 + 自定义文字”才是真正的约束；这里卡的是绝对上限，更紧的限制由平台界面按
-// 当前开了几个固定叠加项实时算（那层知道用户眼下开了哪些）。
-const cfgOsdTextMax = 4
+// cfgOsdTextMax 自定义文字条数上限。与 HAL 的区域上限同源：普通模式 4 条、
+// 国标模式 8 条（对齐实机；固件 console 按 osd.mode 取 4/8）。通道名与时间各占 1 个，
+// 所以“固定叠加项 + 自定义文字”才是真正的约束；这里卡的是绝对上限，更紧的限制由平台界面
+// 按当前模式与开了几个固定叠加项实时算（那层知道用户眼下选的是哪档）。
+const cfgOsdTextMax = 8
 
 // cfgFontPxMin/Max 字号（主码流分辨率下的像素高度）合法区间。
 // 下限取 12：再小的字在 1080p 上已经不可辨；上限取 72：一屏只有 1080 行，
@@ -443,12 +512,15 @@ const (
 	cfgFontPxMax = 72
 )
 
-// coerceOsdTexts 校验自定义文字列表：[{text, x, y, font_px}, …]，最多 cfgOsdTextMax 条。
+// coerceOsdTexts 校验自定义文字列表：[{enabled, text, x, y, font_px}, …]，最多 cfgOsdTextMax 条。
 // 与区域/位置同一套取舍：任一字段不合法就整个键拒绝，不存一份“部分生效”的列表——
 // 逐条过滤会让用户看到“我删掉的文字又回来了”，比直接报错更难理解。
 //
 // text 允许空串（用户刚点“添加文字”还没填），长度上限是 HAL_OSD_TEXT_MAX(64) 字节：
 // 按字节而不是字符卡，是因为设备端的 char[HAL_OSD_TEXT_MAX] 只装得下字节。
+// enabled / font_px 两者都是**可选**（平台「OSD 画面贴合」编辑器不写这两个字段）：
+// enabled 缺省 = 开（缺省当关的话，用户在平台加的文字永远不会上屏）；
+// font_px 缺省 = 0 = 跟随全局字号（固件 osd_font_px()）。
 func coerceOsdTexts(v any) (any, bool) {
 	arr, ok := v.([]any)
 	if !ok || len(arr) > cfgOsdTextMax {
@@ -465,21 +537,35 @@ func coerceOsdTexts(v any) (any, bool) {
 		if !ok || len(text) > 64 {
 			return nil, false
 		}
+		enabled := true
+		if raw, has := one["enabled"]; has {
+			b, ok := raw.(bool)
+			if !ok {
+				return nil, false
+			}
+			enabled = b
+		}
 		x, okX := one["x"].(float64)
 		y, okY := one["y"].(float64)
 		if !okX || !okY || x < 0 || x > 1 || y < 0 || y > 1 {
 			return nil, false
 		}
-		fontRaw, ok := one["font_px"].(float64)
-		if !ok || fontRaw != math.Trunc(fontRaw) {
-			return nil, false
-		}
-		if font := int(fontRaw); font < cfgFontPxMin || font > cfgFontPxMax {
-			return nil, false
+		font := 0
+		if raw, has := one["font_px"]; has {
+			f, ok := raw.(float64)
+			if !ok || f != math.Trunc(f) {
+				return nil, false
+			}
+			font = int(f)
+			if font != 0 && (font < cfgFontPxMin || font > cfgFontPxMax) {
+				return nil, false
+			}
 		}
 		// 坐标保留 3 位小数：与界面拖拽的精度一致，否则回读值与界面显示对不上
 		out = append(out, map[string]any{
-			"text": text, "x": math.Round(x*1000) / 1000, "y": math.Round(y*1000) / 1000, "font_px": int(fontRaw),
+			"enabled": enabled, "text": text,
+			"x": math.Round(x*1000) / 1000, "y": math.Round(y*1000) / 1000,
+			"font_px": font,
 		})
 	}
 	return out, true

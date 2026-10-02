@@ -490,16 +490,18 @@ input:focus, select:focus { outline: 2px solid #cfe0f5; border-color: var(--bran
 
 .snd-list label { display: flex !important; align-items: center; gap: 8px; grid-template-columns: none !important; }
 
-/* Switch 开关（对齐实机）— checkbox 直接伪装成滑块 */
+/* Switch 开关（对齐实机 2026-09-29 实测：switchBg 24×8 圆角 10，开＝蓝渐变
+   linear-gradient(#6289d7,#6599ff)、关＝灰渐变 linear-gradient(#a7a9ae,#b8bbc0)，
+   白球圆心在轨道两端（关态圆心压左端、开态压右端，半球出挑）） */
 .check input.sw {
   appearance: none;
   -webkit-appearance: none;
-  width: 36px;
-  height: 20px;
+  width: 24px;
+  height: 8px;
   border-radius: 10px;
-  background: #c5cdd6;
+  background: linear-gradient(#a7a9ae, #b8bbc0);
   position: relative;
-  flex: 0 0 36px;
+  flex: 0 0 24px;
   cursor: pointer;
   border: none;
   padding: 0;
@@ -510,26 +512,70 @@ input:focus, select:focus { outline: 2px solid #cfe0f5; border-color: var(--bran
 .check input.sw::after {
   content: "";
   position: absolute;
-  top: 2px;
-  left: 2px;
+  top: -4px;
+  left: -8px;
   width: 16px;
   height: 16px;
   border-radius: 50%;
   background: #fff;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.25);
   transition: left 0.15s;
 }
 .check input.sw:checked {
-  background: var(--brand);
+  background: linear-gradient(#6289d7, #6599ff);
 }
 .check input.sw:checked::after {
-  left: 18px;
+  left: 16px;
 }
 .check input.sw:focus-visible {
   outline: 2px solid #cfe0f5;
   outline-offset: 2px;
 }
 .sw-lab { color: var(--ink); font-size: 13px; min-width: 2.5em; }
+
+/* 日夜定时切换的 24h 时间轴。尺寸/色彩逐项对齐参照实机 172.16.1.180 的
+   #controlDayNight：轨道 4px、色带 2px、指针 11×20、时刻标签 12px #333 位于轨道
+   下方；**蓝 = 设备此刻所处的时段**（实机 DNSDaySelected/DNSNightSelected 同义）。
+   指针用 CSS 画（实机是 dragLinePtr.png），省掉一张位图、不占 gzip 预算。 */
+.dn-wrap { width: 720px; max-width: 100%; margin: -4px 0 14px; }
+.dn-tl { position: relative; height: 44px; }
+.dn-track { position: absolute; left: 0; right: 0; top: 8px; height: 4px; }
+.dn-seg { position: absolute; top: 1px; height: 2px; border-radius: 4px; background: #d3dde6; }
+.dn-tl[data-period="day"] .dn-seg.b-day,
+.dn-tl[data-period="night"] .dn-seg.b-night { background: #5a92ff; }
+.dn-ptr {
+  position: absolute; top: -8px; width: 11px; height: 20px; border-radius: 3px;
+  background: #fff; border: 1px solid #b7c1cf; box-shadow: 0 1px 2px rgba(0, 0, 0, .18);
+  cursor: ew-resize; touch-action: none;
+}
+.dn-ptr:hover, .dn-ptr:focus-visible { border-color: var(--brand); outline: none; }
+.dn-lab { position: absolute; top: 26px; font-size: 12px; line-height: 16px; color: #333; white-space: nowrap; }
+/* 日夜两套配置的月亮/太阳开关行：结构/配色照实机 li.line.lineB +
+   #dayNightBlockSwitch（行 720×40 居中、左右 1px #ced7e0 横线、中央 120×28
+   两段式各 60×28；选中 #578fff 蓝底白图标 + inset 阴影、未选中白底 #84909e
+   图标——2026-09-29 实测取色）。横线用 flex:1（实机固定 299px×2，720 下等长，
+   窄屏还能自适应）。 */
+.dn-sw-row {
+  display: flex; align-items: center; width: 720px; max-width: 100%;
+  height: 40px; margin: 0 0 6px;
+}
+.dn-sw-row[hidden] { display: none; }
+.dn-sw-line { flex: 1; height: 0; border-top: 1px solid #ced7e0; }
+.dn-sw {
+  display: flex; flex: 0 0 auto; width: 120px; height: 28px; margin: 0; padding: 0;
+  list-style: none;
+  border-top: 1px solid #c8cdd9; border-bottom: 1px solid #c8cdd9;
+}
+.dn-sw li {
+  display: flex; align-items: center; justify-content: center;
+  width: 60px; height: 28px; cursor: pointer; background: #fff;
+  color: #84909e;
+}
+.dn-sw li .ico { display: inline-flex; }
+.dn-sw li svg { width: 20px; height: 20px; }
+.dn-sw li:hover:not(.on) { background: #f5f8fd; }
+.dn-sw li.on { background: #578fff; color: #fff; box-shadow: inset 0 1px 2px rgba(0,0,0,.2); }
+.dn-sw li:focus-visible { outline: 2px solid #cfe0f5; outline-offset: -2px; }
 
 /* 智能检测顶栏：事件下拉 + 开关（对齐实机定制区） */
 .smart-top {
@@ -822,10 +868,20 @@ input:focus, select:focus { outline: 2px solid #cfe0f5; border-color: var(--bran
 .video-box video { width: 100%; height: 100%; object-fit: contain; display: block; background: #0d1116; }
 /* 画面比例（对齐实机 #widthHeightSel：1x 原始比例 / 4:3 / 16:9 / 100% 满屏）。
    盒子尺寸由 shell.js 按所选比例 contain 算好后 inline 写进 img/video，
-   这里只负责两件事：把盒子在 .video-box 里居中、用 cover 等比填充（变比例时裁边而非拉伸）。 */
+   这里只负责把盒子在 .video-box 里居中，并让画面在盒内按原比例完整装入。
+
+   ⚠️ 必须是 contain，**不能改回 cover**（2026-10-01 真机实测的问题）：
+   OSD 是设备**烧进码流**的（LC-OSD-11），源画面是 1920×1080，而所选比例的盒子
+   宽高比不等于源比例，cover 会在元素内部再裁一次——实测 4:3 档每侧裁掉 12.5%、
+   100% 档每侧裁 4.6%，而通道名默认在 x=2%：
+     · 4:3  → 通道名「中间」整块消失，时间串只剩「6-10-01 …」（前两个字符被切）
+     · 100% → 通道名只剩「间」，时间串从「2026」被切成「026」
+   另外 cover 会**静默丢掉视野**：4:3 档两侧合计少 25% 的画面，用户却无从得知。
+   contain 的代价是非原始比例档会留黑边（4:3 档画面比 1x 小一圈），这是「观感」
+   与「信息完整」的取舍，取后者；真正要“铺满”只能用 全屏(⛶)。 */
 .video-box[data-ratio] { display: flex; align-items: center; justify-content: center; }
 .video-box[data-ratio] > img,
-.video-box[data-ratio] > video { flex: none; object-fit: cover; }
+.video-box[data-ratio] > video { flex: none; object-fit: contain; }
 /* 断流提示：预览断开时盖一层，避免露出浏览器的"破损图像"图标。
    img 在断流时会被换成 1×1 透明图（见 core.js 的 BLANK_PIXEL），
    所以这里只需负责文案与遮罩。 */
@@ -919,6 +975,44 @@ input:focus, select:focus { outline: 2px solid #cfe0f5; border-color: var(--bran
 .frow input[type="number"] { width: 96px; max-width: 120px; min-width: 96px; height: 32px; text-align: left; }
 .grid2 { display: grid; grid-template-columns: 360px 320px; gap: 8px 40px; }
 @media (max-width: 980px) { .grid2 { grid-template-columns: 1fr; } .layout { grid-template-columns: 1fr; } }
+/* OSD 页左侧「通道名称 / 同步修改设备名称 / 自定义字符」：实机这几行**没有标签列**
+   （复选框自带文字），先前照抄行结构时留了个空的 .lab，白占 84px + 14px 间距，
+   结果 360px 的列里「通道名称」「自定义字符」被折成两行、输入框也被挤到 185px。 */
+.osd-items .frow { gap: 10px; }
+.osd-items .frow > .check { flex: none; white-space: nowrap; }
+.osd-items .frow > .check > input { flex: none; }
+.osd-items .frow > input[type="text"] { flex: 1; min-width: 0; max-width: 220px; }
+
+/* OSD 即时预览叠加层（只在**有未保存改动**时画）：盖在预览画面上，按设备同一套
+   归一化坐标 + 字号（主码流像素）折算，保存后隐藏——设备自己会把 OSD 烧进码流，
+   不隐藏就会和真正的 OSD 重叠成双份文字。 */
+.osd-live { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+.osd-live span {
+  position: absolute; white-space: pre; line-height: 1;
+  font-family: "Microsoft YaHei", "PingFang SC", -apple-system, sans-serif;
+  text-shadow: 0 0 2px rgba(0, 0, 0, .85);   /* 白字压在亮画面上也得看得清 */
+}
+/* 逐字一格：等宽铺开（宽度 = 设备端字符格宽），右对齐落点才和保存后的画面一致 */
+.osd-live i { display: inline-block; font-style: normal; line-height: 1; text-align: center; }
+/* 擦除块：把设备已烧进码流的 OSD 用“周围像素拉伸”盖掉（见 camera.js 的 wipeOne） */
+.osd-live canvas.osd-wipe { position: absolute; display: block; }
+/* OSD 块可**点选 + 拖动定位**（对齐实机：在预览画面上直接拖 OSD）。
+   叠加层整体 pointer-events:none（不挡画面上其它交互），只有这些块收事件；
+   选中/拖动用实机同款蓝色 #578fff 描边。 */
+.osd-live .osd-item { pointer-events: auto; cursor: grab; touch-action: none; }
+.osd-live .osd-item:hover { outline: 1px dashed rgba(87, 143, 255, .85); outline-offset: 3px; }
+.osd-live .osd-item.sel,
+.osd-live .osd-item.dragging { outline: 2px solid #578fff; outline-offset: 3px; }
+.osd-live .osd-item.dragging { cursor: grabbing; }
+.osd-drag-hint { margin-top: 6px; }
+/* 区域覆盖页的编辑画布：矩形直接画在预览画面上（对齐实机），蓝半透明填充 + 蓝边
+   （rgba(23,133,230,0.4) / #1785e6 / 2px，取自实机绘制板）。画布铺满 .video-box
+   （video 本来就是 100%×100%），画面区按 object-fit: contain 在 JS 里换算。
+   cursor 由 JS 按悬停位置切换（可拖框 / 可移动 / 可拉伸）。 */
+.cover-canvas {
+  position: absolute; left: 0; top: 0; width: 100%; height: 100%;
+  display: block; touch-action: none; cursor: crosshair;
+}
 .range-row { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; height: 32px; }
 .range-row .lab { width: 84px; text-align: left; color: var(--ink-2); flex: 0 0 84px; }
 .range-row input[type="range"] {
@@ -1263,6 +1357,29 @@ td[data-h].gated-off {
   background: #fff; color: var(--ink-2); cursor: pointer;
 }
 .snap-btn:hover { color: var(--brand); border-color: var(--brand); }
+
+/* OSD 页（对齐实机 ConfOSD.htm）：日期与星期在**同一行**（实机就是一个 ul 里的两个 li），
+   各自带实时示例；行内元素横向排列，不参与 .frow 的两列网格 */
+.osd-daterow { display: flex; align-items: center; gap: 8px; }
+.osd-daterow b { font-weight: normal; color: var(--ink-2); }
+/* 「星期」依附「日期」：没勾日期时置灰（见 camera.js 的 syncWeekGate） */
+.osd-daterow label.check.off { opacity: .45; }
+.osd-daterow label.check.off > input { cursor: not-allowed; }
+/* 「选择颜色」色板（实机 #color 的 .clorObj/.color）：20×20、圆角 4、1px #898989 边框，
+   选中时边框加粗到 2px（实机用 inline style 改 border 宽度，这里用 .on 类，等价且好维护）。
+   色值逐字取自实机：白 #fff / 黑 #000 / 红 #e70000 / 绿 #00ff18 / 蓝 #0000ff
+   （实机模板里还有黄色，但本机能力位把它裁掉了，我方同样不呈现）。 */
+.osd-colors { display: flex; align-items: center; gap: 6px; }
+.osd-colors i {
+  display: inline-block; width: 20px; height: 20px; border-radius: 4px;
+  border: 1px solid #898989; cursor: pointer; box-sizing: border-box;
+}
+.osd-colors i.on { border-width: 2px; }
+.osd-colors i[data-c=white] { background: #fff; }
+.osd-colors i[data-c=black] { background: #000; }
+.osd-colors i[data-c=red] { background: #e70000; }
+.osd-colors i[data-c=green] { background: #00ff18; }
+.osd-colors i[data-c=blue] { background: #0000ff; }
 
 .divider { height: 1px; background: var(--line-2); margin: 18px 0; }
 .kv { display: grid; grid-template-columns: 110px 1fr; gap: 8px 14px; font-size: 13px; max-width: 560px; }

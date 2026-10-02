@@ -18,6 +18,7 @@
  */
 (function (IPC) {
   const NAL_SPS = 7, NAL_PPS = 8;
+  const HEVC_VPS = 32, HEVC_SPS = 33, HEVC_PPS = 34;
   const TIMESCALE = 90000;                 /* 90kHz */
   const US_TO_TS = TIMESCALE / 1e6;        /* 微秒 → 时间基单位 */
   const FRAME_DUR = Math.round(TIMESCALE / 30);  /* 兜底帧间隔（30fps） */
@@ -47,7 +48,7 @@
     return box(type, u8(version, (flags >> 16) & 0xff, (flags >> 8) & 0xff, flags & 0xff), ...payloads);
   }
 
-  /* ---------------------------------------------------------------- NAS 拆分 */
+  /* ---------------------------------------------------------------- NAL 拆分 */
 
   /** 按 Annex-B 起始码拆出 NAL（返回的是原缓冲的视图，不拷贝） */
   function splitNals(buf) {
@@ -93,9 +94,30 @@
     return b;
   }
 
+  /** 转成 fMP4 里用的 HVCC 形式（4 字节长度前缀），并去掉 VPS/SPS/PPS/SEI */
+  function toHvcAvcc(nals) {
+    const keep = nals.filter((na) => {
+      const t = (na[0] >> 1) & 0x3f;
+      return t !== HEVC_VPS && t !== HEVC_SPS && t !== HEVC_PPS && t !== 39 && t !== 40;
+    });
+    let total = 0;
+    for (const na of keep) total += 4 + na.length;
+    const b = new Uint8Array(total);
+    let o = 0;
+    for (const na of keep) {
+      b[o] = (na.length >>> 24) & 0xff;
+      b[o + 1] = (na.length >>> 16) & 0xff;
+      b[o + 2] = (na.length >>> 8) & 0xff;
+      b[o + 3] = na.length & 0xff;
+      b.set(na, o + 4);
+      o += 4 + na.length;
+    }
+    return b;
+  }
+
   /* ---------------------------------------------------------------- init 段 */
 
-  /** ftyp + moov。w/h 只影响显示比例提示，用配置的分辨率即可 */
+  /** H.264: ftyp + moov */
   function buildInit(sps, pps, w, h) {
     const avcC = box('avcC',
       u8(1, sps[1], sps[2], sps[3]),  // version / profile / compat / level，直接从 SPS 抄
@@ -146,10 +168,6 @@
     const dinf = box('dinf', full('dref', 0, 0, u32(1), full('url ', 0, 1)));
     const minf = box('minf', full('vmhd', 0, 1, u16(0), u16(0), u16(0), u16(0)), dinf, stbl);
 
-    /* mvex/trex 是 fMP4 的“身份证”：告诉解析器这个文件的样本都在后面的 moof
-       分片里，而不是靠 stbl 的索引表。**没有它 MSE 会当成普通 MP4**，第一个
-       moof 就会被判非法并把 SourceBuffer 从 MediaSource 上摘掉（现象是
-       video.error=4 且再 append 任何东西都报 “removed from parent”）。 */
     const trex = full('trex', 0, 0,
       u32(1),          // track_ID（与 tkhd 一致）
       u32(1),          // default_sample_description_index
@@ -160,6 +178,92 @@
     const moov = box('moov', mvhd, box('trak', tkhd, box('mdia', mdhd, hdlr, minf)),
                      box('mvex', trex));
     const ftyp = box('ftyp', fourcc('isom'), u32(512), fourcc('isom'), fourcc('iso5'), fourcc('avc1'));
+    return bytes(ftyp, moov);
+  }
+
+  /** H.265 / HEVC: ftyp + moov (带 hvcC / hvc1) */
+  function buildHvcInit(vps, sps, pps, w, h) {
+    const profileSpace = (sps[3] >> 6) & 0x03;
+    const tierFlag = (sps[3] >> 5) & 0x01;
+    const profileIdc = sps[3] & 0x1f;
+    const compatFlags = sps.subarray(4, 8);
+    const constraintFlags = sps.subarray(8, 14);
+    const levelIdc = sps[14] || 93;
+
+    const array = (type, nal) => bytes(
+      u8(0xa0 | (type & 0x3f)),
+      u16(1),
+      u16(nal.length),
+      nal
+    );
+
+    const hvcC = box('hvcC',
+      u8(1),                                                  // configurationVersion = 1
+      u8((profileSpace << 6) | (tierFlag << 5) | profileIdc), // profile
+      compatFlags,                                            // 4 bytes
+      constraintFlags,                                        // 6 bytes
+      u8(levelIdc),                                           // level_idc
+      u16(0xf000),                                            // min_spatial_segmentation_idc (0)
+      u8(0xfc),                                               // parallelismType (0)
+      u8(0xfd),                                               // chroma_format_idc (1 = 4:2:0)
+      u8(0xf8),                                               // bit_depth_luma_minus8 (0)
+      u8(0xf8),                                               // bit_depth_chroma_minus8 (0)
+      u16(0),                                                 // avgFrameRate
+      u8(0x0f),                                               // constantFrameRate(0), numTemporalLayers(0), temporalIdNested(0), lengthSizeMinusOne(3)
+      u8(3),                                                  // numOfArrays = 3 (VPS, SPS, PPS)
+      array(HEVC_VPS, vps),
+      array(HEVC_SPS, sps),
+      array(HEVC_PPS, pps)
+    );
+
+    const hvc1 = box('hvc1',
+      new Uint8Array(6), u16(1),
+      new Uint8Array(16),
+      u16(w), u16(h),
+      u32(0x00480000), u32(0x00480000),
+      u32(0), u16(1),
+      new Uint8Array(32),
+      u16(0x0018), u16(0xffff),
+      hvcC);
+
+    const stbl = box('stbl',
+      full('stsd', 0, 0, u32(1), hvc1),
+      full('stts', 0, 0, u32(0)),
+      full('stsc', 0, 0, u32(0)),
+      full('stsz', 0, 0, u32(0), u32(0)),
+      full('stco', 0, 0, u32(0)));
+
+    const mvhd = full('mvhd', 0, 0,
+      u32(0), u32(0), u32(TIMESCALE), u32(0),
+      u32(0x00010000), u16(0x0100), u16(0),
+      u32(0), u32(0),
+      UNIT_MATRIX,
+      new Uint8Array(24),
+      u32(2));
+
+    const tkhd = full('tkhd', 0, 3,
+      u32(0), u32(0), u32(1), u32(0), u32(0),
+      new Uint8Array(8),
+      u16(0), u16(0), u16(0), u16(0),
+      UNIT_MATRIX,
+      u32(Math.round(w * 65536)), u32(Math.round(h * 65536)));
+
+    const mdhd = full('mdhd', 0, 0,
+      u32(0), u32(0), u32(TIMESCALE), u32(0),
+      u16(0x55c4), u16(0));
+
+    const hdlr = full('hdlr', 0, 0,
+      u32(0), fourcc('vide'), new Uint8Array(12), u8(0));
+
+    const dinf = box('dinf', full('dref', 0, 0, u32(1), full('url ', 0, 1)));
+    const minf = box('minf', full('vmhd', 0, 1, u16(0), u16(0), u16(0), u16(0)), dinf, stbl);
+
+    const trex = full('trex', 0, 0,
+      u32(1), u32(1), u32(FRAME_DUR), u32(0), u32(0));
+
+    const moov = box('moov', mvhd, box('trak', tkhd, box('mdia', mdhd, hdlr, minf)),
+                     box('mvex', trex));
+    const ftyp = box('ftyp', fourcc('isom'), u32(512), fourcc('isom'), fourcc('iso5'), fourcc('hvc1'));
     return bytes(ftyp, moov);
   }
 
@@ -217,7 +321,8 @@
    */
   IPC.attachH264 = function (video, wsUrl) {
     let ws = null, ms = null, sb = null, stopped = false, msCreated = false;
-    let sps = null, pps = null, inited = false;
+    let isH265 = false;
+    let vps = null, sps = null, pps = null, inited = false;
     let seq = 1, baseTime = 0, lastPts = 0, lastDur = FRAME_DUR;
     let retry = 0;
 
@@ -253,7 +358,7 @@
       pending.length = 0;
       try { if (ms && ms.readyState === 'open') ms.endOfStream(); } catch (e) { /* 已关闭 */ }
       sb = null; ms = null; msCreated = false;
-      sps = null; pps = null; inited = false;
+      vps = null; sps = null; pps = null; inited = false; isH265 = false;
       seq = 1; baseTime = 0; lastPts = 0; lastDur = FRAME_DUR;
       if (video.dataset.url) { URL.revokeObjectURL(video.dataset.url); delete video.dataset.url; }
       /* removeAttribute 而不是 src=''：后者会去请求当前页面地址，反而报错 */
@@ -274,27 +379,51 @@
         if (nals.length === 0) return;
 
         for (const na of nals) {
-          const t = na[0] & 0x1f;
-          if (t === NAL_SPS) sps = na;
-          else if (t === NAL_PPS) pps = na;
+          const tH264 = na[0] & 0x1f;
+          const tH265 = (na[0] >> 1) & 0x3f;
+          if (tH265 === HEVC_VPS) { isH265 = true; vps = na; }
+          else if (tH265 === HEVC_SPS && na.length >= 15) { isH265 = true; sps = na; }
+          else if (tH265 === HEVC_PPS && isH265) { pps = na; }
+          else if (!isH265 && tH264 === NAL_SPS) { sps = na; }
+          else if (!isH265 && tH264 === NAL_PPS) { pps = na; }
         }
 
-        /* init 段要等 SPS/PPS 齐了才能建（avcC 必须有它俩）。
-           msCreated 是必要的：sourceopen 是异步的，在它触发前 inited 还是 false，
-           这期间每来一帧都会再建一个 MediaSource 并覆盖 video.src，结果就是
-           播放器拿到一个已被换掉的 blob → MEDIA_ERR_SRC_NOT_SUPPORTED(4)。 */
+        /* init 段要等参数集齐了才能建 */
         if (!inited) {
-          if (!sps || !pps || msCreated) return;
+          const ready = isH265 ? (vps && sps && pps) : (sps && pps);
+          if (!ready || msCreated) return;
           msCreated = true;
           ms = new MediaSource();
           video.dataset.url = URL.createObjectURL(ms);
           video.src = video.dataset.url;
           ms.addEventListener('sourceopen', () => {
             if (stopped) return;
+            let mimeType = '';
+            if (isH265) {
+              const pIdc = sps[3] & 0x1f;
+              const lvl = sps[14] || 93;
+              const cands = [
+                `video/mp4; codecs="hvc1.${pIdc}.6.L${lvl}.B0"`,
+                `video/mp4; codecs="hev1.${pIdc}.6.L${lvl}.B0"`,
+                'video/mp4; codecs="hvc1.1.6.L93.B0"',
+                'video/mp4; codecs="hev1.1.6.L93.B0"'
+              ];
+              for (const c of cands) {
+                if (MediaSource.isTypeSupported(c)) { mimeType = c; break; }
+              }
+              if (!mimeType) {
+                IPC.toast('当前浏览器不支持 H.265 MSE 硬件解码，建议使用 Chrome/Edge 最新版');
+                stop();
+                return;
+              }
+            } else {
+              mimeType = 'video/mp4; codecs="' + codecOf(sps) + '"';
+            }
+
             try {
-              sb = ms.addSourceBuffer('video/mp4; codecs="' + codecOf(sps) + '"');
+              sb = ms.addSourceBuffer(mimeType);
             } catch (e) {
-              IPC.toast('主码流解码不受支持：' + codecOf(sps));
+              IPC.toast('主码流解码不受支持：' + mimeType);
               stop();
               return;
             }
@@ -304,14 +433,10 @@
               IPC.toast('主码流播放失败（媒体格式不被接受）');
               stop();
             });
-            sb.appendBuffer(buildInit(sps, pps, 1920, 1080));
+            sb.appendBuffer(isH265 ? buildHvcInit(vps, sps, pps, 1920, 1080) : buildInit(sps, pps, 1920, 1080));
             inited = true;
-            /* muted 的 video 才能自动播放（浏览器 autoplay 策略），
-               不开播放的话画面会停在第一帧 */
             video.play().catch(() => { /* 用户手动点播放也行 */ });
-            /* 真正出画了再撤掉“已断开”提示 */
             video.addEventListener('playing', () => IPC.setStreamHint(video, false));
-            /* MSE 要求先有 init 段才能追加分片：把已到的这一帧排进队列 */
             feedFrame(raw, isKey, nals);
           });
           return;
@@ -320,22 +445,11 @@
       };
 
       ws.onclose = () => {
-        /* 主码流断流：MSE 会停在最后一帧，看着像“卡死”，所以盖上提示；
-           重连成功后由 playing 事件撤掉。 */
         if (stopped) return;
-        /* 必须先推倒 MSE：板端编码器重开后时间戳从 0 开始、会重发 SPS/PPS/
-           IDR，而且长时间无数据后旧 SourceBuffer 可能已经报废，继续追加
-           只会静默失败、提示永远挂着。 */
         resetMse();
-        /* 不设次数上限：服务重启要十几秒，设上限会让画面永远黑在那里。
-           但会话不持久化，服务重启后 WS 握手会永远 401，所以每 6 次探一次
-           活，由 IPC.api → onUnauth 把用户送回登录页。 */
         retry++;
         IPC.setStreamHint(video, true, '画面已断开，正在重连…');
         setTimeout(connect, Math.min(250 * retry, 2000));
-        /* 会话不持久化：服务重启后 WS 握手会永远 401，纯重连回不来。
-           用需要鉴权的端点探活（/auth/state 免鉴权测不出来），401 由
-           IPC.api → onUnauth 把用户送回登录页。 */
         if (retry % 6 === 0) {
           IPC.loadFeatures().catch(() => { /* 401 已由 onUnauth 处理 */ });
         }
@@ -344,10 +458,8 @@
     };
 
     const feedFrame = (raw, isKey, nals) => {
-      const avcc = toAvcc(nals);
+      const avcc = isH265 ? toHvcAvcc(nals) : toAvcc(nals);
       if (avcc.length === 0) return;
-      /* 设备端只推「关键帧标记 + 访问单元」，没带 pts，所以按名义帧率递增时间戳。
-         主码流固定 30fps，累积误差由下面的追帧逻辑纠正。 */
       baseTime += lastDur;
       feed(buildFragment(seq++, baseTime, lastDur, avcc, isKey));
     };
@@ -372,5 +484,6 @@
 
   /* 暴露 muxer 供调试：MSE 对分片格式要求很严，被拒时只有 SourceBuffer.error
      说得清，留个入口省得每次都在控制台重写一遍构造逻辑。 */
-  IPC.fmp4 = { buildInit, buildFragment, splitNals, toAvcc };
+  IPC.fmp4 = { buildInit, buildHvcInit, buildFragment, splitNals, toAvcc, toHvcAvcc };
+  IPC.attachLiveStream = IPC.attachH264;
 })(window.IPC);

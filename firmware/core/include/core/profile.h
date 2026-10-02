@@ -28,6 +28,7 @@ typedef struct {
     uint32_t codecs_mask;          /**< bit(HAL_CODEC_x) */
     uint32_t max_w, max_h, max_fps;
     hal_codec_t def_codec;
+    bool        def_smart_enc;        /**< 默认是否开启智能编码 (H.264+/H.265+) */
     uint32_t def_w, def_h, def_fps, def_kbps, def_gop;
     hal_rc_mode_t def_rc;
 } profile_channel_t;

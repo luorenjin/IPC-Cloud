@@ -9,16 +9,45 @@ APP=/usr/bin/ipc_app
 PROFILE=/etc/ipc/SP-R1-02.json
 LOG=/var/log/ipc_app.log
 
-[ -x "$APP" ] || exit 0
-[ -f "$PROFILE" ] || exit 0
+start() {
+    [ -x "$APP" ] || return 0
+    [ -f "$PROFILE" ] || return 0
 
-mkdir -p /var/log /etc/ipc/sec
-chmod 700 /etc/ipc/sec 2>/dev/null
+    mkdir -p /var/log /etc/ipc/sec
+    chmod 700 /etc/ipc/sec 2>/dev/null
 
-# 不传 --port：监听端口由 app 自己决定——读 cfg 的 port.http（控制台
-# 「网络设置→端口」保存的值），缺省 8080。原先这里写死 --port 8080，会在
-# 重启时把保存的端口盖回去，造成 cfg 与实际监听不一致（PRD LC-NET-02）。
-echo "[S90ipcapp] starting console (port from config, default 8080)"
-"$APP" --profile "$PROFILE" --persist /etc/ipc/config.json >> "$LOG" 2>&1 &
+    # 不传 --port：监听端口由 app 自己决定——读 cfg 的 port.http（控制台
+    # 「网络设置→端口」保存的值），缺省 8080。原先这里写死 --port 8080，会在
+    # 重启时把保存的端口盖回去，造成 cfg 与实际监听不一致（PRD LC-NET-02）。
+    echo "[S90ipcapp] starting console (port from config, default 8080)"
+    "$APP" --profile "$PROFILE" --persist /etc/ipc/config.json >> "$LOG" 2>&1 &
+    return 0
+}
+
+# stop/restart 是 2026-10-01 补的：**原先没有这两个分支**，于是
+# `/etc/init.d/S90ipcapp restart` 只是“再起一个实例”——旧进程仍占着 8080，
+# 新实例绑定失败后退出，看起来像“重启了但没生效”（排查预览黑屏时就被它误导过）。
+# SIGTERM 之后 app 要拆掉 VI/VPSS/VENC 再把资源交还 MPP，所以给它最多 3 秒。
+stop() {
+    pids="$(pidof ipc_app 2>/dev/null)"
+    [ -n "$pids" ] || return 0
+
+    echo "[S90ipcapp] stopping console"
+    kill $pids 2>/dev/null
+    i=0
+    while [ $i -lt 3 ]; do
+        kill -0 $pids 2>/dev/null || break
+        sleep 1
+        i=$((i + 1))
+    done
+    kill -0 $pids 2>/dev/null && kill -9 $pids 2>/dev/null
+    return 0
+}
+
+case "$1" in
+    stop)    stop ;;
+    restart) stop; start ;;
+    *)       start ;;
+esac
 
 exit 0

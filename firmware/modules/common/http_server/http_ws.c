@@ -33,11 +33,26 @@
  *   1. 不支持分片消息（continuation frame，opcode 0x0/FIN=0 的延续帧）：
  *      控制指令与状态文本都很短，实践中不需要跨帧重组；非 FIN 帧会被正确
  *      跳过字节数但不做任何语义处理。
- *   2. 跨线程的连接生命周期竞争：若 http_ws_send 正在执行时，事件循环线程
- *      恰好因为其他原因（心跳超时/收到 close 帧/send 硬错误）关闭了同一条
- *      连接，struct http_ws_state 有被并发释放的理论风险。当前 brief 与
- *      集成说明均未要求引入引用计数/世代号机制，本实现暂不处理，留给后续
- *      任务（真正接入采集/编码线程时）解决。
+ *   2. ~~跨线程的连接生命周期竞争~~ 已解决（2026-10-01，真机崩溃复盘）：
+ *      struct http_ws_state 改为**引用计数**（见下节"生命周期"）。此前事件
+ *      循环线程在 conn_close → http_ws_conn_cleanup 里直接
+ *      ws_state_destroy，而生产者（console_preview 的推流线程）可以正处在
+ *      http_ws_send 中——它在 s_mu 保护下拿到 conn 也对不上：销毁路径根本
+ *      不参与 s_mu，只短暂地取了一次 ws->mu 就 unlock 并 free。真机实测后果
+ *      是预览推流线程在 ws_ring_write 的 memcpy 上以野地址（0xb6e980fe）
+ *      写坏内存后 SIGSEGV 退出整个 ipc_app，浏览器侧表现为"画面断连且永远
+ *      重连不上"（ERR_CONNECTION_REFUSED）。
+ *
+ * 生命周期（引用计数）：
+ *   · 连接自己持 1 份引用（ws_state_create 时 refs=1，upgrade 期间建立）；
+ *   · 每个**跨线程使用者**在用 ws 之前必须 ws_acquire(c) 取一份、用完
+ *     ws_release()；事件循环线程内的自有路径（flush/on_readable/tick）
+ *     与 cleanup 同线程，天然互斥，不需要引用。
+ *   · 事件循环销毁连接时只做 ws_conn_detach：c->ws 置 NULL、dead 置位、
+ *     归还连接那份引用。**只有引用归零才真正 free**——若此刻生产者正在用，
+ *     释放被推迟到它 ws_release 的那一刻。
+ *   · 因此"在途的 http_ws_send 撞上连接销毁"是安全的：要么取不到引用
+ *     （返回 NULL → HAL_EINVAL），要么已持引用（销毁被推迟）。
  */
 #include "http_server_internal.h"
 
@@ -106,6 +121,12 @@ struct http_ws_state {
      * 安全清引用的时机，见 http_server.h 的声明注释。 */
     http_ws_close_fn close_fn;
     void            *close_user;
+
+    /* 生命周期（见文件头"生命周期"一节，由 s_life_mu 保护）:
+     *   refs = 连接自己那份（创建时 1）+ 每个在途使用者的那份。归零 = 可释放；
+     *   dead = 已摘引用（连接正在销毁），此后 ws_acquire 一律返回 NULL。 */
+    int  refs;
+    bool dead;
 };
 
 /** 已升级 WS 的连接登记表。add/remove/遍历三处都只在事件循环线程发生
@@ -419,15 +440,102 @@ static struct http_ws_state *ws_state_create(size_t queue_cap)
         free(ws);
         return NULL;
     }
+    ws->refs = 1;   /* 连接自己那份引用，由 ws_conn_detach 归还 */
     return ws;
 }
+
+#ifdef IPC_TESTING
+/** 测试可见的销毁计数：用来断言"摘引用时若仍有在途使用者，则不得释放" */
+static unsigned s_destroy_count;
+unsigned http_ws_test_destroy_count(void) { return s_destroy_count; }
+#endif
 
 static void ws_state_destroy(struct http_ws_state *ws)
 {
     if (!ws) return;
+#ifdef IPC_TESTING
+    s_destroy_count++;
+#endif
     os_mutex_destroy(ws->mu);
     free(ws->buf);
     free(ws);
+}
+
+/* ----------------------------------------------------------------------------
+ * 生命周期：引用计数
+ *
+ * 解决的是"生产者在 http_ws_send 中、事件循环同时销毁同一条连接"的
+ * use-after-free（真机崩溃复盘，见文件头）。要点：
+ *   · 跨线程入口**只能**通过 ws_acquire 取用；取到的引用保证 ws_state
+ *     在 ws_release 之前不会被释放。
+ *   · 锁序固定 s_life_mu → ws->mu；销毁路径只持 s_life_mu 且不调用任何
+ *     回调，不存在反向锁序。
+ *   · s_life_mu 在首次 http_ws_upgrade 时创建（该函数只由事件循环线程在
+ *     路由 handler 内同步调用，不存在并发创建），与进程同寿。
+ * -------------------------------------------------------------------------- */
+
+static os_mutex_t *s_life_mu;
+
+/** 惰性创建生命周期锁；返回 false = 创建失败（内存不足） */
+static bool ws_life_init(void)
+{
+    if (!s_life_mu) s_life_mu = os_mutex_create();
+    return s_life_mu != NULL;
+}
+
+/** 取一份"使用中"引用。返回 NULL 表示 c 不是 WS 连接、或它已被摘引用
+ *  （连接正在销毁），调用方不得再访问该连接的任何 WS 状态。 */
+static struct http_ws_state *ws_acquire(http_conn_t *c)
+{
+    struct http_ws_state *ws;
+    if (!c || !s_life_mu) return NULL;
+    os_mutex_lock(s_life_mu);
+    ws = c->ws;
+    if (ws) {
+        if (ws->dead) ws = NULL;   /* 已摘引用：不再交给新的使用者 */
+        else ws->refs++;
+    }
+    os_mutex_unlock(s_life_mu);
+    return ws;
+}
+
+/** 归还一份引用；归零时才是真正释放的那一刻（且只会发生在本状态已被
+ *  ws_conn_detach 之后——连接那份引用在 detach 里才归还，所以引用数不可能
+ *  在"仍挂在连接上"时降到 0）。 */
+static void ws_release(struct http_ws_state *ws)
+{
+    bool last;
+    if (!ws) return;
+    os_mutex_lock(s_life_mu);
+    last = (--ws->refs == 0);
+    os_mutex_unlock(s_life_mu);
+    if (last) ws_state_destroy(ws);
+}
+
+/** 摘掉"连接自己那份引用"并禁止新引用（c->ws 随即为 NULL）。
+ *  返回值 = 需要由调用方释放的 ws_state（NULL = 还有在途使用者，销毁被
+ *  推迟到它 ws_release 的那一刻）。
+ *  调用后任何 ws_acquire(c) 必返回 NULL，而在途使用者继续安全访问到各自
+ *  归还引用为止——这正是"销毁不能与在途 http_ws_send 重叠"的保证。 */
+static struct http_ws_state *ws_conn_detach(http_conn_t *c)
+{
+    struct http_ws_state *ws;
+    bool last = false;
+    if (!s_life_mu) {
+        /* 防御：未初始化（无 WS 连接时才会发生）→ 退化为直接释放 */
+        ws = c->ws;
+        c->ws = NULL;
+        return ws;
+    }
+    os_mutex_lock(s_life_mu);
+    ws = c->ws;
+    if (ws) {
+        c->ws = NULL;
+        ws->dead = true;
+        last = (--ws->refs == 0);
+    }
+    os_mutex_unlock(s_life_mu);
+    return last ? ws : NULL;
 }
 
 /* ============================================================================
@@ -463,10 +571,12 @@ static bool ws_send_control_frame(http_conn_t *c, int opcode, const uint8_t *pay
 /** 业务帧（文本/二进制）入队：先判断当前空间是否足够放下这一帧——不够就
  *  无条件丢弃并计数（不管是不是关键帧，物理上放不下就是放不下）；空间足够
  *  时才看背压状态：正在丢弃且不是关键帧→继续丢；正在丢弃且是关键帧→
- *  从这一帧起恢复正常；未在丢弃→直接入队。 */
-static hal_err_t ws_enqueue_frame(http_conn_t *c, int opcode, const void *payload, size_t len, bool is_key)
+ *  从这一帧起恢复正常；未在丢弃→直接入队。
+ *  ws 由调用方（http_ws_send/http_ws_send_text）持引用后传入，本函数
+ *  **不再自行读 c->ws**——那是跨线程读一个可能正在被销毁的字段。 */
+static hal_err_t ws_enqueue_frame(http_conn_t *c, struct http_ws_state *ws,
+                                  int opcode, const void *payload, size_t len, bool is_key)
 {
-    struct http_ws_state *ws = c->ws;
     uint8_t hdr[10];
     size_t hdr_len = ws_encode_header(hdr, opcode, len);
     size_t needed = hdr_len + len;
@@ -669,6 +779,10 @@ hal_err_t http_ws_upgrade(http_req_t *req, size_t queue_cap)
     c = req->conn;
     if (c->is_ws) return HAL_ESTATE;
 
+    /* 生命周期锁必须先就绪：此后 c->ws 一旦赋值，任意线程的 ws_acquire
+       都会经它同步（本函数只在事件循环线程内同步执行，无并发创建）。 */
+    if (!ws_life_init()) return HAL_ENOMEM;
+
     upg = http_header(req, "Upgrade");
     conn_hdr = http_header(req, "Connection");
     ver = http_header(req, "Sec-WebSocket-Version");
@@ -712,67 +826,87 @@ hal_err_t http_ws_upgrade(http_req_t *req, size_t queue_cap)
 
 hal_err_t http_ws_send(http_conn_t *c, const void *data, size_t len, bool is_key)
 {
-    if (!c || !c->ws || (!data && len)) return HAL_EINVAL;
-    return ws_enqueue_frame(c, 0x2, data, len, is_key);
+    struct http_ws_state *ws = ws_acquire(c);
+    hal_err_t rc;
+    if (!ws) return HAL_EINVAL;   /* 非 WS 连接 / 已被摘引用（正在销毁） */
+    rc = ws_enqueue_frame(c, ws, 0x2, data, len, is_key);
+    ws_release(ws);
+    return rc;
 }
 
 hal_err_t http_ws_send_text(http_conn_t *c, const char *text)
 {
-    if (!c || !c->ws || !text) return HAL_EINVAL;
+    struct http_ws_state *ws;
+    hal_err_t rc;
+    if (!text) return HAL_EINVAL;
+    ws = ws_acquire(c);
+    if (!ws) return HAL_EINVAL;
     /* 文本消息（状态推送）按"关键帧"对待：只要队列物理空间足够就必定入队，
      * 不受视频帧背压状态机的丢弃状态拖累；真放不下时与视频帧共用同一条
      * "空间不足"判定，同样计入 dropped（见 ws_enqueue_frame）。 */
-    return ws_enqueue_frame(c, 0x1, text, strlen(text), true);
+    rc = ws_enqueue_frame(c, ws, 0x1, text, strlen(text), true);
+    ws_release(ws);
+    return rc;
 }
 
 hal_err_t http_ws_on_text(http_conn_t *c, http_ws_text_fn fn, void *user)
 {
-    if (!c || !c->ws) return HAL_EINVAL;
-    os_mutex_lock(c->ws->mu);
-    c->ws->text_fn = fn;
-    c->ws->text_user = user;
-    os_mutex_unlock(c->ws->mu);
+    struct http_ws_state *ws = ws_acquire(c);
+    if (!ws) return HAL_EINVAL;
+    os_mutex_lock(ws->mu);
+    ws->text_fn = fn;
+    ws->text_user = user;
+    os_mutex_unlock(ws->mu);
+    ws_release(ws);
     return HAL_OK;
 }
 
 hal_err_t http_ws_on_close(http_conn_t *c, http_ws_close_fn fn, void *user)
 {
-    if (!c || !c->ws) return HAL_EINVAL;
-    os_mutex_lock(c->ws->mu);
-    c->ws->close_fn = fn;
-    c->ws->close_user = user;
-    os_mutex_unlock(c->ws->mu);
+    struct http_ws_state *ws = ws_acquire(c);
+    if (!ws) return HAL_EINVAL;
+    os_mutex_lock(ws->mu);
+    ws->close_fn = fn;
+    ws->close_user = user;
+    os_mutex_unlock(ws->mu);
+    ws_release(ws);
     return HAL_OK;
 }
 
 hal_err_t http_ws_close(http_conn_t *c)
 {
-    if (!c || !c->ws) return HAL_EINVAL;
+    struct http_ws_state *ws = ws_acquire(c);
+    if (!ws) return HAL_EINVAL;
     /* 只置位，真正的 conn_close 留给 http_ws_tick 在事件循环线程里代为执行
      * ——本函数须可从任意线程调用，但 conn_close 不是线程安全的。 */
-    os_mutex_lock(c->ws->mu);
-    c->ws->close_requested = true;
-    os_mutex_unlock(c->ws->mu);
+    os_mutex_lock(ws->mu);
+    ws->close_requested = true;
+    os_mutex_unlock(ws->mu);
+    ws_release(ws);
     return HAL_OK;
 }
 
 size_t http_ws_queue_used(http_conn_t *c)
 {
+    struct http_ws_state *ws = ws_acquire(c);
     size_t used;
-    if (!c || !c->ws) return 0;
-    os_mutex_lock(c->ws->mu);
-    used = c->ws->used;
-    os_mutex_unlock(c->ws->mu);
+    if (!ws) return 0;
+    os_mutex_lock(ws->mu);
+    used = ws->used;
+    os_mutex_unlock(ws->mu);
+    ws_release(ws);
     return used;
 }
 
 uint64_t http_ws_dropped(http_conn_t *c)
 {
+    struct http_ws_state *ws = ws_acquire(c);
     uint64_t d;
-    if (!c || !c->ws) return 0;
-    os_mutex_lock(c->ws->mu);
-    d = c->ws->dropped;
-    os_mutex_unlock(c->ws->mu);
+    if (!ws) return 0;
+    os_mutex_lock(ws->mu);
+    d = ws->dropped;
+    os_mutex_unlock(ws->mu);
+    ws_release(ws);
     return d;
 }
 
@@ -834,6 +968,7 @@ void http_ws_conn_cleanup(http_conn_t *c)
 {
     http_ws_close_fn fn = NULL;
     void *user = NULL;
+    struct http_ws_state *zombie;
 
     /* #11：remove 提到判空之前——之前 "if (!c->ws) return;" 一旦命中会连带
      * 跳过 ws_registry_remove，把该连接指针错误地留在登记表里。当前不变量下
@@ -843,21 +978,28 @@ void http_ws_conn_cleanup(http_conn_t *c)
     ws_registry_remove(c);
     if (!c->ws) return;
 
-    /* 先把回调取出来（取时必须持 ws->mu，取完立刻释放），再销毁 ws，最后才
-     * 调用它：销毁之后 ws 那块内存已经没了。**回调里不能持着 ws->mu**——
-     * 调用方（推送线程）的锁序是“自己的锁 → ws->mu”（它要持着自己的锁调
-     * http_ws_send），若这里持着 ws->mu 去拿它的锁，就会形成反向锁序死锁。
-     * 这正是本文件顶部“临界区绝不调用调用方回调”那条约束的例外，也是它唯一
-     * 合法的例外：这里早已不在临界区内。 */
+    /* 先把回调取出来（取时必须持 ws->mu，取完立刻释放）。**回调里不能持着
+     * ws->mu**——调用方（推送线程）的锁序是“自己的锁 → ws->mu”（它要持着
+     * 自己的锁调 http_ws_send），若这里持着 ws->mu 去拿它的锁，就会形成反向
+     * 锁序死锁。这正是本文件顶部“临界区绝不调用调用方回调”那条约束的例外，
+     * 也是它唯一合法的例外：这里早已不在临界区内。 */
     os_mutex_lock(c->ws->mu);
     fn = c->ws->close_fn;
     user = c->ws->close_user;
     os_mutex_unlock(c->ws->mu);
 
-    ws_state_destroy(c->ws);
-    c->ws = NULL;
+    /* 先摘引用再回调：回调期间（以及之后）任何线程的 ws_acquire 都拿不到这个
+     * 状态，因此回调里清引用/唤醒生产者是安全的；而**在途的 http_ws_send
+     * 持有的引用会把真正的 free 推迟到它 ws_release 的那一刻**——这正是
+     * 2026-10-01 真机崩溃（预览推流线程在 ws_ring_write 里以野地址 memcpy）
+     * 的根因修复点：销毁不再可能与在途发送重叠。
+     * c->ws 在回调之前就置 NULL，因此回调内调 http_ws_* 依旧一律 HAL_EINVAL，
+     * 与历史语义一致（见 http_server.h 的 http_ws_on_close 契约）。 */
+    zombie = ws_conn_detach(c);
 
     if (fn) fn(c, user);
+
+    if (zombie) ws_state_destroy(zombie);   /* 引用归零：现在才能真正释放 */
 }
 
 void http_ws_tick(void)
@@ -955,6 +1097,12 @@ http_conn_t *http_ws_test_conn_new(size_t queue_cap)
 {
     http_conn_t *c = (http_conn_t *)calloc(1, sizeof(*c));
     if (!c) return NULL;
+    /* 与真实路径一致：生命周期锁必须先就绪，否则 ws_acquire 恒返回 NULL、
+       http_ws_test_conn_teardown 会退化到"直接释放"分支 */
+    if (!ws_life_init()) {
+        free(c);
+        return NULL;
+    }
     c->fd = SOCK_INVALID;
     c->used = 1;
     c->ws = ws_state_create(queue_cap);
@@ -970,9 +1118,43 @@ http_conn_t *http_ws_test_conn_new(size_t queue_cap)
 
 void http_ws_test_conn_free(http_conn_t *c)
 {
+    struct http_ws_state *zombie;
     if (!c) return;
-    ws_state_destroy(c->ws);
+    /* 走与真实路径同一套生命周期：先摘引用，引用归零才释放 */
+    zombie = ws_conn_detach(c);
+    if (zombie) ws_state_destroy(zombie);
     free(c);
+}
+
+/** 测试桩：模拟"生产者已进入 http_ws_send 并持着引用"的状态。
+ *  返回的句柄需用 http_ws_test_ref_put 归还；返回 NULL = 取不到（已摘引用）。
+ *  用途：在测试里构造"使用者在途 + 连接被拆除"这一顺序，断言销毁被推迟。 */
+void *http_ws_test_ref_take(http_conn_t *c)
+{
+    return (void *)ws_acquire(c);
+}
+
+void http_ws_test_ref_put(void *ref)
+{
+    ws_release((struct http_ws_state *)ref);
+}
+
+/** 测试桩：模拟 conn_close 对 WS 连接做的事（未登记表，故无需 ws_registry_remove） */
+void http_ws_test_conn_teardown(http_conn_t *c)
+{
+    http_ws_close_fn fn = NULL;
+    void *user = NULL;
+    struct http_ws_state *zombie;
+
+    if (!c || !c->ws) return;
+    os_mutex_lock(c->ws->mu);
+    fn = c->ws->close_fn;
+    user = c->ws->close_user;
+    os_mutex_unlock(c->ws->mu);
+
+    zombie = ws_conn_detach(c);
+    if (fn) fn(c, user);
+    if (zombie) ws_state_destroy(zombie);
 }
 
 void http_ws_test_drain(http_conn_t *c)

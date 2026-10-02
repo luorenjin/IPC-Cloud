@@ -37,7 +37,23 @@ python firmware/tools/console_e2e.py                  # 默认 http://172.16.1.1
 python firmware/tools/console_e2e.py --skip-reboot --skip-reset   # 快速回归，不重启不出厂
 ```
 
-覆盖 13 个用例：激活、错误口令被拒、只显示可用菜单、设备信息真实值、设备名持久化、与计算机时间同步、系统日志导出、修改密码、会话失效回登录页、连续错误口令锁定、重启、恢复出厂（结束后自动用同一口令重新激活）。退出码 0 = 全过；截图在 `firmware/tools/logs/e2e-<时间>/`。
+覆盖 15 个用例：激活、错误口令被拒、只显示可用菜单、设备信息真实值、设备名持久化、与计算机时间同步、系统日志导出、修改密码、会话失效回登录页、连续错误口令锁定、重启、恢复出厂（结束后自动用同一口令重新激活）、日夜时间轴与两套开关、OSD 叠加层拖动定位。退出码 0 = 全过；截图在 `firmware/tools/logs/e2e-<时间>/`。
+
+> **E13「恢复出厂」会清掉用户在设备上的全部配置（含 OSD）**，跑完验收请用下面的 `board_osd.py` 把用户设置写回去。
+
+## board_osd.py：无头读写 OSD 配置
+
+纯标准库（`urllib` + `http.cookiejar`），不需要浏览器/playwright。登录走控制台同一条 challenge→proof（PBKDF2）链路，会话 `token` 存 HttpOnly Cookie。
+
+```bash
+python firmware/tools/board_osd.py show
+python firmware/tools/board_osd.py set --name 中间 --name-enable --time-enable --date --week \
+    --font-px 64 --name-pos 2,2 --time-pos 2,90
+```
+
+- `--font-px` 只是写回同一个全局字号（设备上 `osd.time.fontPx` 与 `osd.channelName.fontPx` 是两项但同值）；`64` 对应界面的「自适应」。
+- **POST 与 GET 的字段名不对称**（`console_api.c` 的 `osd_set`/`osd_get`）：通道名 POST 用 `channel_name`、GET 回 `name`；字号 POST 用 `time_font_px`/`name_font_px`、GET 回 `font_px`；位置必须成对给。**键名写错不会报错**，接口只当没这个字段，所以脚本写完一律回读核对，对不上会以退出码 1 报出来。
+- 来源 IP 被锁定（连续错误口令）时登录返回 409，等锁定解除再跑即可，不要连续重试。
 
 ## gen_sn.py / burn_sn.py：序列号生成与工厂烧录
 

@@ -222,26 +222,8 @@ static int run_cmd(const char *cmd, char *out, size_t cap)
  * 二、定时重启：按设备本地时间（time.timezone）检查到点即重启
  * ========================================================================== */
 
-/**
- * POSIX TZ 串 → 本地相对 UTC 的偏移秒数。POSIX 定义 `local = utc - offset`，
- * 故这里返回 `-offset`：
- *   "CST-8" → offset = -8h → 返回 +28800（东八区）  "EST5" → -18000  "UTC0" → 0
- * 解析不了返回 0（按 UTC 处理，不猜时区）。
- */
-static int tz_offset_seconds(const char *tz)
-{
-    const char *p = tz;
-    int sign = 1, h = 0, m = 0;
-
-    if (!p || !p[0]) return 0;
-    while (*p && *p != '+' && *p != '-' && (*p < '0' || *p > '9')) p++;
-    if (!*p) return 0;
-    if (*p == '+') p++;
-    else if (*p == '-') { sign = -1; p++; }
-    if (sscanf(p, "%d:%d", &h, &m) < 1) return 0;
-    if (h > 24 || m > 59) return 0;
-    return -(sign * (h * 3600 + m * 60));
-}
+/* 设备本地时间换算用的偏移（秒，东正西负）在 console_apply.c：与 `ep_time_get`
+ * 回给前端的时区、`console_tz_ok` 的校验同一份实现，避免三处符号/缺省各写一份。 */
 
 /** 星期表 "0,1,..6"（0=周日）里是否包含 wd；空串视为每天都执行 */
 static bool day_in(const char *days, int wd)
@@ -281,7 +263,7 @@ static void tick_reboot_plan(void)
     tz[0] = '\0';
     if (cfg_get_str("time.timezone", tz, sizeof(tz)) != HAL_OK || !tz[0])
         snprintf(tz, sizeof(tz), CONSOLE_TZ_DEFAULT);   /* 与 ep_time_get 同一缺省，否则差 8 小时 */
-    local = utc + tz_offset_seconds(tz);
+    local = utc + console_tz_offset_seconds(tz);
 
     day  = local / 86400;
     hh   = (int)((local % 86400) / 3600);
@@ -297,7 +279,118 @@ static void tick_reboot_plan(void)
 }
 
 /* ==========================================================================
- * 三、NTP 重试：开机时网络/DNS 常常还没就绪，busybox ntpd 解析失败即退出
+ * 三、日夜定时切换：按设备本地时间在白天 / 夜晚之间切
+ *
+ * 图像页「日夜配置 = 日夜定时切换」（cfg `image.daynight=timed`）落的就是这里：
+ * 用户给出白天开始与夜晚开始两个时刻（`image.daynight.day_start` /
+ * `night_start`，"HH:MM"），到点把 HAL 的日夜档切过去。时间口径与定时重启
+ * **必须同源**（`time.timezone`），否则会出现「重启按东八区、日夜按 UTC」的错位。
+ *
+ * 两个时刻的窗口语义（等价于实机那条 24h 时间轴，这里退化成两个刻度）：
+ *   day <  night：白天 = [day, night)，其余为夜晚；
+ *   day >  night：窗口跨零点，白天 = [day, 24:00) ∪ [00:00, night)；
+ *   day == night：区间退化为 0 长度，无法表达「只在某一刻切」→ 按全天白天处理
+ *                 （明确取一边，而不是沉默地跟着当前时刻随机切）。
+ *
+ * 设备**没有 RTC**：开机墙钟从纪元（1970-01-01）起算，校时之前按它算只会得到
+ * 「午夜」这个假结论，所以未校时（< CONSOLE_CLOCK_UNSET_S）时**不下发**，保持
+ * 当前档位并限流记日志；NTP 校时成功后本函数自会接手。
+ * ========================================================================== */
+
+#define DN_TIME_LEN        6     /* "HH:MM" + '\0' */
+#define DN_LOG_MS     300000u    /* 未校时提示的限流：最多 5 分钟一条 */
+/* 出厂默认时段：对齐参照实机时间轴的两个默认指针（06:00 / 18:00） */
+#define DN_DAY_DEFAULT   "06:00"
+#define DN_NIGHT_DEFAULT "18:00"
+
+/** "HH:MM" → 0..1439 分钟；非法（长度、冒号位置、时分越界）返回 -1。
+ *  与 system.reboot.plan.time 同一套格式口径（cfg 规则只卡字符集与长度）。 */
+static int hhmm_min(const char *s)
+{
+    int h, m;
+    if (!s || strlen(s) != 5 || s[2] != ':') return -1;
+    if (sscanf(s, "%2d:%2d", &h, &m) != 2) return -1;
+    if (h < 0 || h > 23 || m < 0 || m > 59) return -1;
+    return h * 60 + m;
+}
+
+/** 「现在」（本地时间的分钟数）是否落在夜晚窗口；窗口定义见本节文件头注释 */
+static bool timed_is_night(int day_min, int night_min, int now_min)
+{
+    bool in_day;
+
+    if (day_min == night_min) return false;                 /* 退化：全天白天 */
+    in_day = (day_min < night_min)
+           ? (now_min >= day_min && now_min < night_min)    /* 同一昼夜内 */
+           : (now_min >= day_min || now_min < night_min);   /* 跨零点 */
+    return !in_day;
+}
+
+void console_maint_daynight_sync(void)
+{
+    static int s_applied = -1;          /* 已下发的档（-1 = 未下发或已让位给其它档） */
+    static uint64_t s_last_log_us;
+    char mode[16], ds[DN_TIME_LEN], ns[DN_TIME_LEN], tz[48];
+    int day_min, night_min, now_min;
+    int64_t utc = 0, local;
+    hal_daynight_t want;
+    uint64_t now_us;
+
+    if (!hal_has(HAL_MOD_VIDEO) || !hal()->video || !hal()->video->set_daynight) return;
+    mode[0] = '\0';
+    if (cfg_get_str("image.daynight", mode, sizeof(mode)) != HAL_OK ||
+        strcmp(mode, "timed") != 0) {
+        s_applied = -1;   /* 离开定时档：清缓存，下次回到 timed 时重新判一次 */
+        return;
+    }
+    if (!hal_has(HAL_MOD_SYS) || !hal()->sys->get_wallclock) return;
+
+    /* 两个时刻取不到（键没写过）就用出厂默认；解析不了（键被外部改成非法串）
+       也退回默认——不让一个坏值把整套日夜切换停掉。 */
+    ds[0] = ns[0] = '\0';
+    if (cfg_get_str("image.daynight.day_start", ds, sizeof(ds)) != HAL_OK)
+        snprintf(ds, sizeof(ds), DN_DAY_DEFAULT);
+    if (cfg_get_str("image.daynight.night_start", ns, sizeof(ns)) != HAL_OK)
+        snprintf(ns, sizeof(ns), DN_NIGHT_DEFAULT);
+    day_min = hhmm_min(ds);
+    night_min = hhmm_min(ns);
+    if (day_min < 0) day_min = hhmm_min(DN_DAY_DEFAULT);
+    if (night_min < 0) night_min = hhmm_min(DN_NIGHT_DEFAULT);
+
+    if (hal()->sys->get_wallclock(&utc) != HAL_OK) return;
+    if (utc < CONSOLE_CLOCK_UNSET_S) {
+        now_us = os_monotonic_us();
+        if (now_us - s_last_log_us > DN_LOG_MS) {
+            s_last_log_us = now_us;
+            LOGI(MOD, "日夜定时切换待校时：墙钟未同步，暂不切换（时段 %s/%s）", ds, ns);
+        }
+        return;
+    }
+
+    tz[0] = '\0';
+    if (cfg_get_str("time.timezone", tz, sizeof(tz)) != HAL_OK || !tz[0])
+        snprintf(tz, sizeof(tz), CONSOLE_TZ_DEFAULT);   /* 与 ep_time_get 同一缺省 */
+    local = utc + console_tz_offset_seconds(tz);
+    now_min = (int)((local % 86400) / 60);
+
+    want = timed_is_night(day_min, night_min, now_min) ? HAL_DAYNIGHT_NIGHT : HAL_DAYNIGHT_DAY;
+    if ((int)want == s_applied) return;
+    if (hal()->video->set_daynight(want) != HAL_OK) {
+        LOGW(MOD, "日夜定时切换下发失败（%s），下一拍重试",
+             want == HAL_DAYNIGHT_NIGHT ? "夜晚" : "白天");
+        return;      /* 不记 s_applied：保持"未落实"，下一拍重试 */
+    }
+    s_applied = (int)want;
+    LOGI(MOD, "日夜定时切换：本地 %02d:%02d 进入%s（时段 %s/%s）",
+         now_min / 60, now_min % 60, want == HAL_DAYNIGHT_NIGHT ? "夜晚" : "白天", ds, ns);
+    /* 日夜是两套配置（image.* / image.night.*）：切到哪个时段就把那套参数一并
+       落到 HAL，否则切了 IRCUT/夜视却还在跑上一时段的画质参数（console_api.c
+       的 console_image_apply_period 实现，键未写过时回落白天套）。 */
+    console_image_apply_period(want == HAL_DAYNIGHT_NIGHT);
+}
+
+/* ==========================================================================
+ * 四、NTP 重试：开机时网络/DNS 常常还没就绪，busybox ntpd 解析失败即退出
  * ========================================================================== */
 
 #define NTP_RETRY_MIN_MS   10000u     /* 首次重拉：开机 10 秒后（DHCP/DNS 通常已就绪） */
@@ -355,7 +448,7 @@ static void tick_ntp_retry(void)
 }
 
 /* ==========================================================================
- * 四、工作线程
+ * 五、工作线程
  * ========================================================================== */
 
 static void run_diag(const diag_req_t *r)
@@ -430,6 +523,9 @@ static void maint_thread(void *arg)
         if (port_new > 0) run_port_rebind(port_new, port_old);
         tick_reboot_plan();
         tick_ntp_retry();
+        /* 日夜定时切换：到点误差 ≤ 工作节拍（DIAG_TICK_MS）。非 timed 档时
+           本调用只清内部缓存，代价几乎为零。 */
+        console_maint_daynight_sync();
     }
 }
 
@@ -454,7 +550,7 @@ hal_err_t console_maint_post_port(int new_port, int old_port)
 }
 
 /* ==========================================================================
- * 五、端点（由 console_api.c 分发进来）
+ * 六、端点（由 console_api.c 分发进来）
  * ========================================================================== */
 
 static hal_err_t maint_json(char *out, size_t cap, const char *code_msg, int code)
@@ -553,7 +649,7 @@ hal_err_t console_maint_diag_state(char *out, size_t cap)
 }
 
 /* ==========================================================================
- * 六、生命周期（module.h：init 不起线程，start 才起）
+ * 七、生命周期（module.h：init 不起线程，start 才起）
  * ========================================================================== */
 
 hal_err_t console_maint_init(void)
@@ -590,7 +686,12 @@ hal_err_t console_maint_stop(void)
 /* 测试桩：定时重启的时区换算、星期表判定、NTP 重试判据都是纯函数，单独
    暴露给 console_test，防止「按 UTC 走、页面按东八区显示」与「默认不校时」
    这类整点/整年错位回归。 */
-int  console_maint_test_tz_offset(const char *tz) { return tz_offset_seconds(tz); }
+int  console_maint_test_tz_offset(const char *tz) { return console_tz_offset_seconds(tz); }
 bool console_maint_test_day_in(const char *days, int wd) { return day_in(days, wd); }
 bool console_maint_test_ntp_needed(bool enabled, int64_t utc) { return ntp_retry_needed(enabled, utc); }
+int  console_maint_test_hhmm_min(const char *s) { return hhmm_min(s); }
+bool console_maint_test_timed_is_night(int day_min, int night_min, int now_min)
+{
+    return timed_is_night(day_min, night_min, now_min);
+}
 #endif

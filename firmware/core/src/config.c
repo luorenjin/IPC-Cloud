@@ -282,6 +282,7 @@ static void seed_channel(const profile_channel_t *c)
 #define KEY(fmt, name) snprintf(pat, sizeof(pat), fmt, c->ch, (name))
     /* cfg_register_rules 会复制字符串，pat/codecs/rcs 可为栈缓冲 */
     KEY("video.%d.%s.codec", c->name); RULE(pat, CFG_T_STR, 0, 0, codecs, false);
+    KEY("video.%d.%s.smart_enc", c->name); RULE(pat, CFG_T_BOOL, 0, 0, NULL, false);
     KEY("video.%d.%s.w", c->name);     RULE(pat, CFG_T_INT, 64, (int64_t)c->max_w, NULL, true);
     KEY("video.%d.%s.h", c->name);     RULE(pat, CFG_T_INT, 64, (int64_t)c->max_h, NULL, true);
     KEY("video.%d.%s.fps", c->name);   RULE(pat, CFG_T_INT, 1, (int64_t)c->max_fps, NULL, false);
@@ -294,6 +295,7 @@ static void seed_channel(const profile_channel_t *c)
         const char *codec = (c->def_codec == HAL_CODEC_H265) ? "h265"
                           : (c->def_codec == HAL_CODEC_MJPEG) ? "mjpeg" : "h264";
         KEY("video.%d.%s.codec", c->name); set_value(pat, CFG_T_STR, 0, codec, false, &why);
+        KEY("video.%d.%s.smart_enc", c->name); set_value(pat, CFG_T_BOOL, c->def_smart_enc ? 1 : 0, NULL, false, &why);
         KEY("video.%d.%s.w", c->name);     set_value(pat, CFG_T_INT, (int64_t)c->def_w, NULL, false, &why);
         KEY("video.%d.%s.h", c->name);     set_value(pat, CFG_T_INT, (int64_t)c->def_h, NULL, false, &why);
         KEY("video.%d.%s.fps", c->name);   set_value(pat, CFG_T_INT, (int64_t)c->def_fps, NULL, false, &why);
@@ -335,13 +337,30 @@ static void register_common_rules(void)
          * daynight 三态**逐字对齐实机 dayNightMode**（2026-09-29 从参照实机
          * 172.16.1.180 直接抓取选项：日夜通用 / 日夜定时切换 / 日夜自动切换）：
          *   · common = 日夜通用     不分昼夜、不切夜视（保持彩色，IRCUT 停白天位）；
-         *   · timed  = 日夜定时切换 按用户时段切 —— **时段表尚未实现**，只落 cfg，
-         *                          HAL 不动，见 Docs/遗留问题清单.md LEG-UI-13；
+         *   · timed  = 日夜定时切换 按 image.daynight.day_start/night_start 两个时刻
+         *                          在白天/夜晚之间切，由 console_maint 的工作线程按
+         *                          设备本地时间判定（见 tick_daynight_timed）；
          *   · auto   = 日夜自动切换 按 ISP 的 AE 亮度自动切（判据见 image.ir.*）。
          * 旧值 day/night 已废弃：那是把「白天 / 夜晚」当用户档位（PRD LC-IMG-03
          * 的写法），与实机这三项不是同一个语义。HAL 的 HAL_DAYNIGHT_DAY/NIGHT
          * 仍保留（HAL 能力，conformance 与以后的手动档还会用）。 */
         { "image.daynight",          CFG_T_STR,  0, 0, "common,timed,auto", false },
+        /* 日夜定时切换的两个时刻，固定 "HH:MM"（5 字节，字符集只放数字与冒号，
+         * 与 system.reboot.plan.time 同一套规则与二次校验口径——cfg 规则只能卡
+         * 字符集/长度，卡不了冒号位置，格式合法性由控制台在读写时二次校验）。
+         * 键不存在时控制台用出厂默认 06:00（白天开始）/ 18:00（夜晚开始），
+         * 与参照实机时间轴的两个默认指针一致。 */
+        { "image.daynight.day_start",   CFG_T_STR, 5, 5, NULL, false, false, CFG_CHARSET_HHMM },
+        { "image.daynight.night_start", CFG_T_STR, 5, 5, NULL, false, false, CFG_CHARSET_HHMM },
+        /* 监控场景（图像页）：取值**逐字对齐实机** image_scene_mode_common ——
+         * 2026-09-29 从参照实机 172.16.1.180 逐个切换抓包得到三个值：
+         * 普通模式 = normal / 逆光模式 = back_light / 车牌模式 = clear_licence。
+         * 实机每个场景各自一套区域补偿与白平衡区域表（切档时 get/set
+         * common[_back_light|_clear_licence]_{area_compensation,white_balance}_region_info）；
+         * 我方没有分区域测光表，落地是**整幅策略组合**（DRC + AE 曝光策略），
+         * 近似映射与其代价见 console_api.c 的 scene_effective() 注释与
+         * Docs/遗留问题清单.md（LEG-FW-13 同源）。 */
+        { "image.scene",             CFG_T_STR,  0, 0, "normal,back_light,clear_licence", false },
         { "image.wdr",               CFG_T_BOOL, 0, 1, NULL, false },
         /* 区域补偿（背光补偿）：0/1，对应 hal_image_t.backlight_comp。Goke SDK 没有
          * 分区域测光权重表，落地是整幅 AE 曝光策略（见 gk_video.c image_apply），
@@ -360,6 +379,26 @@ static void register_common_rules(void)
         { "image.ir.mode",           CFG_T_STR,  0, 0, "auto,off,on", false },
         { "image.ir.sensitivity",    CFG_T_INT,  0, 7, NULL, false },
         { "image.ir.delay",          CFG_T_INT,  5, 60, NULL, false },
+        /* 日夜两套图像参数的「夜晚套」（2026-09-29 用户裁定：日夜是两套不同的
+         * 配置）。白天套复用上面的 image.*（存量设备零迁移）；夜晚套键未写过时
+         * **回落到白天套的值**（见 console_api.c 的 night 段）——升级前的单套
+         * 设备行为不变，用户显式改过夜晚套后才真正独立。
+         * 分套范围对照实机 shedday/shednight（2026-09-29 抓包实测：luma/
+         * contrast/saturation/sharpness/wide_dynamic/area_compensation/wb_type/
+         * exp_type 全部下发在 shedday 命名空间，场景有 image_scene_mode_shedday/
+         * shednight 字段）：亮度/对比度/饱和度/锐度/宽动态/区域补偿/白平衡/
+         * 监控场景/曝光模式/曝光等级 分两套；镜像、防闪烁、补光组、日夜模式与
+         * 时刻为全局（不分昼夜）。 */
+        { "image.night.brightness",    CFG_T_INT,  0, 100, NULL, false },
+        { "image.night.contrast",      CFG_T_INT,  0, 100, NULL, false },
+        { "image.night.saturation",    CFG_T_INT,  0, 100, NULL, false },
+        { "image.night.sharpness",     CFG_T_INT,  0, 100, NULL, false },
+        { "image.night.wdr",           CFG_T_BOOL, 0, 1, NULL, false },
+        { "image.night.blc",           CFG_T_BOOL, 0, 1, NULL, false },
+        { "image.night.scene",         CFG_T_STR,  0, 0, "normal,back_light,clear_licence", false },
+        { "image.night.awb",           CFG_T_STR,  0, 0, "auto,indoor,outdoor", false },
+        { "image.night.exposure.mode", CFG_T_STR,  0, 0, "auto,manual", false },
+        { "image.night.exposure.level", CFG_T_INT, -3, 3, NULL, false },
         /* 时区与 NTP 服务器会拼进平台命令/配置：限定字符集，长度与 console 缓冲一致 */
         { "time.timezone",           CFG_T_STR,  1, 63, NULL, false, false, CFG_CHARSET_TZ },
         { "time.ntp.enable",         CFG_T_BOOL, 0, 1, NULL, false },
@@ -393,6 +432,13 @@ static void register_common_rules(void)
         { "localUser.password",      CFG_T_STR,  8, 63, NULL, false, true },
         { "osd.channelName.enable",  CFG_T_BOOL, 0, 1, NULL, false },
         { "osd.time.enable",         CFG_T_BOOL, 0, 1, NULL, false },
+        /* 时间串的分段开关（对齐实机 OSD 页的「日期」「星期」两个勾选）：
+         * 时间项的文本是 `[日期] [星期] 时间`，日期段看 osd.time.date、星期段看
+         * osd.time.week（实机勾了星期就是 `2026-09-29 星期二 22:50:56`）。
+         * 缺省 date=true / week=false，与升级前的时间串（`YYYY-MM-DD HH:MM:SS`）
+         * 逐字一致——老配置回读不会变样。区域总开关仍是 osd.time.enable。*/
+        { "osd.time.date",           CFG_T_BOOL, 0, 1, NULL, false },
+        { "osd.time.week",           CFG_T_BOOL, 0, 1, NULL, false },
         /* 固定叠加项（通道名/时间）的字号：像普通整型键那样卡区间，不必靠平台与模拟器兜底。
          * 12–72 与自定义文字 font_px、平台界面的滑块三处同值；单位是主码流分辨率下的像素高度。*/
         { "osd.channelName.fontPx",  CFG_T_INT,  12, 72, NULL, false },
@@ -406,13 +452,48 @@ static void register_common_rules(void)
         { "osd.time.pos",            CFG_T_JSON, 0, 0, NULL, false },
         /* 自定义文字叠加：**变长列表**——每条一个 OSD 区域，故用一个 JSON 数组而不是
          * 若干扁平键（同 alarm.motion.regions 的取舍）。元素形状：
-         *   {"text": "东门仓库", "x": 0.02, "y": 0.5, "font_px": 32}
-         * x/y 是文字区域左上角的归一化坐标（0–1）；font_px 是**主码流分辨率**下的像素高度，
-         * 与 hal_osd_cfg_t.font_px 同名同义。text 上限 HAL_OSD_TEXT_MAX(64 字节)。
-         * 条数受 HAL 的 hal_osd_caps_t.max_regions_per_channel 约束（参考实现为 4/通道，
-         * 通道名与时间各占 1 个区域）——固件此处只校验“是合法 JSON”，
-         * 条数与各字段范围由平台界面与模拟器把关，设备侧渲染时按区域上限截断。*/
+         *   {"enabled": true, "text": "东门仓库", "x": 0.02, "y": 0.5, "font_px": 32}
+         * x/y 是文字区域左上角的归一化坐标（0–1，国标模式下位置固定、这两个值被忽略）；
+         * font_px 是**主码流分辨率**下的像素高度（12–72，可选，0/缺省 = 跟随全局字号）；
+         * enabled 缺省视为**开**（平台「OSD 画面贴合」编辑器写的条目没有这个字段）；
+         * text 上限 HAL_OSD_TEXT_MAX(64 字节)。
+         * 条数受 HAL 的 hal_osd_caps_t.max_regions_per_channel 约束：普通模式 4 条、
+         * 国标模式 8 条（对齐实机），通道名与时间另各占 1 个区域——固件此处只校验
+         * “是合法 JSON”，条数与各字段范围由控制台端点、平台界面与模拟器把关，
+         * 设备侧渲染时按区域上限截断。*/
         { "osd.text.regions",        CFG_T_JSON, 0, 0, NULL, false },
+        /* ---- OSD 页对齐实机（2026-09-29，实机 ConfOSD.htm / OSD uci 文件） ----
+         * 实机的 OSD 有两套排布，切档只落 cfg、由 console 重建区域：
+         *   · normal = 普通模式：4 条自定义字符，所有 OSD 可自由定位；
+         *   · gb     = 国标模式：8 条自定义字符，时间与通道名称**右对齐**、
+         *              自定义字符固定位置。
+         * 默认 normal（实机出厂值）。*/
+        { "osd.mode",                CFG_T_STR,  0, 0, "normal,gb", false },
+        /* 显示效果：true = 闪烁（实机 OSD.font.display 的 ntnb/ntb 两档）。*/
+        { "osd.flicker",             CFG_T_BOOL, 0, 1, NULL, false },
+        /* 字体颜色：auto = 默认（白）；user_defined = 用 osd.color 指定的颜色。
+         * 颜色集按实机本机上报的能力位（5 色，无黄）。*/
+        { "osd.colorType",           CFG_T_STR,  0, 0, "auto,user_defined", false },
+        { "osd.color",               CFG_T_STR,  0, 0, "white,black,red,green,blue", false },
+        /* 国标模式的「最小边距」：右对齐时文字距右边框的字符格数（实机 0/1/2，默认 1）。
+         * 只在国标模式生效——普通模式是自由定位，没有“边距”概念。*/
+        { "osd.margin",              CFG_T_INT,  0, 2, NULL, false },
+        /* 通道名称文本（实机 label_info[0].text / gb_channel_name.text）。
+         * 未写入时回落 device.name（历史行为，升级零迁移），再空则渲染兜底串 "IPC"。*/
+        { "osd.channelName.text",    CFG_T_STR,  0, 32, NULL, false },
+        /* 「同步修改设备名称」（实机 label_info[0].link_chn_to_dev，默认关）：
+         * 开启后保存通道名会一并写 device.name，让平台侧的设备名跟着变。*/
+        { "osd.linkDeviceName",      CFG_T_BOOL, 0, 1, NULL, false },
+        /* ---- 区域覆盖（隐私遮挡，对齐实机「设置→摄像头→区域覆盖」）----
+         * 一条开关 + 一组归一化矩形：`[[x, y, w, h], …]`，各值 0–1 的画面比例，
+         * 最多 4 个（实机同页 graphLimit / cover_reg_num 都是 4）。
+         * 元素形状与 alarm.motion.regions 同族（元组数组），平台侧将来可直接
+         * 复用现有的区域框选组件。
+         * 固件只校验“是合法 JSON”，条数与各字段范围由控制台端点、平台界面与
+         * 模拟器把关（与 osd.text.regions / alarm.motion.regions 同一取舍）；
+         * 设备端渲染时把越界矩形夹到画面内（HAL_OSD_COVER，见 hal_osd.h v1.6）。 */
+        { "osd.cover.enable",        CFG_T_BOOL, 0, 1, NULL, false },
+        { "osd.cover.regions",       CFG_T_JSON, 0, 0, NULL, false },
         { "alarm.motion.enable",     CFG_T_BOOL, 0, 1, NULL, false },
         { "alarm.motion.sensitivity",CFG_T_INT,  0, 100, NULL, false },
         { "alarm.motion.regions",    CFG_T_JSON, 0, 0, NULL, false },

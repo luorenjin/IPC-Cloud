@@ -53,7 +53,10 @@
     时间校对: 'system.time',
     系统日志: 'system.log',
     配置管理: 'system.cfgfile',
-    诊断工具: 'system.diag'
+    诊断工具: 'system.diag',
+    /* 区域覆盖：需要 HAL 的遮挡矩形能力（`hal_osd_caps_t.cover`，固件合成成
+       `osd.cover`）。上报 false 就整页签隐藏——能力驱动，不写死机型。 */
+    区域覆盖: 'osd.cover'
   };
 
   /** 顶部区：无对应能力时隐藏整区入口 */
@@ -342,6 +345,17 @@
 
   function authFail(msg) { authErr(msg); toast(msg); }
 
+  /** 登录链路的错误文案：设备端返回的 msg 已是中文（如「用户名或密码错误」
+   *  「尝试次数过多」）原样显示；没有 code 的原生异常（JS 自己抛的、或被
+   *  IPC.api 漏掉的英文消息）不直接上屏——否则登录页会弹一条英文 toast。
+   *  原文保留在控制台便于排查。 */
+  function loginErrMsg(err) {
+    if (err && err.code != null && err.message) return err.message;
+    if (err && err.message && /[\u4e00-\u9fa5]/.test(err.message)) return err.message;
+    console.warn('[ipc] 登录链路异常', err);
+    return '进入控制台失败，请刷新页面重试';
+  }
+
   function showAuth(mode) {
     $('#auth').hidden = false;
     $('#shell').hidden = true;
@@ -409,7 +423,7 @@
       IPC.auth.activate(p1)
         .then(() => IPC.auth.login('admin', p1))
         .then(() => { toast('激活成功'); form.reset(); return enterShell(); })
-        .catch((err) => authFail(err.message))
+        .catch((err) => authFail(loginErrMsg(err)))
         .finally(() => busy(form, false));
     };
     $('#f-login').onsubmit = (e) => {
@@ -429,8 +443,24 @@
         })
         /* -100/-101：设备端已在 /auth/{login,password} 把 HAL_EPERM_ 的文案改成
            「用户名或密码错误」（原先复用强制改密的「无权限：请先修改初始密码」，
-           会误导）。此处仍按 code 兜底，兼容未升级的固件；-3 为按 IP 的失败锁定。 */
-        .catch((err) => authFail(err.code === -100 || err.code === -101 ? '用户名或密码错误' : err.message))
+           会误导）。此处仍按 code 兜底，兼容未升级的固件；-3 为按 IP 的失败锁定。
+
+           ⚠️ 但**失败不等于没登录成功**：一次提交若被重复发出（浏览器/代理重试、
+           双击、网络抖动都会这样），第一条已经把 nonce 用掉并建好会话，第二条带
+           同一个 nonce 会因**防重放**被判校验失败——界面却只看到第二条，于是
+           “口令明明是对的却提示用户名或密码错误”，人还被挡在登录页外（2026-09-29
+           真机实测到：packet 抓下来是 challenge×2 + login(200)+login(403)）。
+           所以这里先探一次**需要鉴权**的端点：若会话其实已经有效就直接进控制台。
+           探测只携带既有会话 Cookie，没登录时必然 401（且不参与按 IP 计数），
+           不会把口令错误的人放进去。 */
+        .catch((err) => {
+          if (err.code !== -100 && err.code !== -101) return authFail(loginErrMsg(err));
+          return IPC.api('GET', '/api/v1/system/info')
+            .then(() => enterShell(),
+                  /* 探测也是 401：会话确实不存在 → 就是口令不对 */
+                  () => authFail('用户名或密码错误'))
+            .catch(() => authFail('进入控制台失败，请刷新页面重试'));
+        })
         .finally(() => busy(form, false));
     };
     /* 启动：未激活 → 激活页；已激活且会话有效（刷新页面）→ 直接进入；否则登录页 */

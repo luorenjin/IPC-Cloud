@@ -11,18 +11,30 @@ window.IPC = {
     mod: '画面显示',
     tab: '图像',
     mirror: '关闭', daynight: '日夜自动切换', scene: '普通模式',
+    /* 日夜定时切换（image.daynight=timed）的两个时刻，出厂默认对齐实机时间轴 */
+    dnDay: '06:00', dnNight: '18:00',
     bright: 50, contrast: 50, sat: 50, sharp: 50,
     expo: '自动', expoLv: 1, flicker: '关闭',   /* 曝光等级默认 1 = 对齐实机 expLevelSel */
     ir: '自动', sens: 4, delay: 5, wdr: '关闭',
     /* blc = 区域补偿，真键 image.blc（布尔），与 wdr 的文案型状态不同 */
     blc: false, awb: '自动',
     ledMode: '白光照明', ledStr: '自动', humanExp: true,
-    osdMode: '普通模式', osdName: '门口摄像机', osdSync: true,
+    osdMode: '普通模式', osdName: '门口摄像机', osdSync: false,
+    /* 日期与星期是两个独立勾选（设备端 osd.time.date / osd.time.week），出厂
+       两个都开——参照实机 172.16.1.180 的 OSD 页就是两个都勾着（时间串
+       `2026-09-29 星期二 22:50:56`）；任一为开即显示整个时间区域。
+       GET /api/v1/osd 回来会覆盖这两项（设备端缺省仍是日期开、星期关，
+       免得升级后没动过配置的设备凭空多出一段星期）。 */
     osdDateShow: true, osdWeekShow: true, osdNameShow: false,
-    osdC1: '', osdC2: '', osdC3: '', osdC4: '',
-    osdC1Show: false, osdC2Show: false, osdC3Show: false, osdC4Show: false,
+    /* 自定义字符（= cfg `osd.text.regions`）：每项 {enabled, text, x, y, font_px}，
+       普通模式渲染前 4 条、国标模式 8 条；回读时由 GET /api/v1/osd 覆盖 */
+    osdTexts: [],
     osdFlicker: '不闪烁', osdSize: '自适应', osdColor: '默认',
-    /* 最小边距对齐实机 0/1/2（默认 1），OSD 距画面边缘的格数 */
+    /* 字体颜色=「自定义」时生效的颜色名（实机本机 5 色：白/黑/红/绿/蓝） */
+    osdColorName: 'white',
+    /* 时间/通道名的实际坐标（归一化，普通模式自由定位）：叠加预览与 GET 回读共用 */
+    osdTimePos: [0.02, 0.9], osdNamePos: [0.02, 0.02],
+    /* 最小边距对齐实机 0/1/2（默认 1）——**仅国标模式**显示（实机该行 id 就叫 gbMargin） */
     osdMargin: '1',
     privacy: '关闭',
     sp: '均衡配置', st: '主码流', codec: 'H265', res: '2560*1440', fps: 25, rc: '变码率',
@@ -114,6 +126,13 @@ window.IPC = {
   $: (s, r = document) => r.querySelector(s),
   $$: (s, r = document) => [...r.querySelectorAll(s)],
 
+  /* 监控场景：UI 中文 ↔ REST / cfg 取值（真键 image.scene）。取值**逐字对齐实机**
+     image_scene_mode_common —— 2026-09-29 在参照实机 172.16.1.180 上逐个切换抓包
+     得到：普通模式 = normal / 逆光模式 = back_light / 车牌模式 = clear_licence。
+     图像页与预览页顶栏共用这一份映射，别各写一套。 */
+  SCENE_MAP: { '普通模式': 'normal', '逆光模式': 'back_light', '车牌模式': 'clear_licence' },
+  SCENE_BACK: { normal: '普通模式', back_light: '逆光模式', clear_licence: '车牌模式' },
+
   h(html) {
     const t = document.createElement('template');
     t.innerHTML = html.trim();
@@ -132,6 +151,10 @@ window.IPC = {
   toast(msg) {
     const t = document.getElementById('toast');
     if (!t) return;
+    /* 只上屏字符串：直接把 undefined/对象塞给 textContent 会在顶部弹出
+       "undefined" / "[object Object]" 这类英文提示，用户看着像报错。 */
+    if (typeof msg !== 'string') msg = (msg && (msg.message || msg.msg)) || '';
+    if (!msg) return;
     t.hidden = false; t.textContent = msg;
     clearTimeout(IPC.toast._h);
     IPC.toast._h = setTimeout(() => { t.hidden = true; }, 1800);
@@ -164,7 +187,13 @@ window.IPC = {
       this.S.tfPresent = data.caps.tf;
     }
     if (data.model) this.S.devName = data.model;
-    if (this.render) this.render();
+    /* 控制台外壳还没显示（登录页）时**不渲染**：enterShell 拿到能力清单后会
+       统一渲染一次，这里先画一遍就变成连着 render 两次——第二次会把刚接上
+       的预览连接拆掉重建（真机实测：登录瞬间产生两条 WS，第一条握手都没
+       完成就被关，控制台留一条 "WebSocket ... closed before the connection
+       is established" 警告，设备侧也多一条预览断开/重连日志）。 */
+    const shellEl = document.getElementById('shell');
+    if (this.render && shellEl && !shellEl.hidden) this.render();
   },
 
   /**
@@ -185,18 +214,26 @@ window.IPC = {
   api(method, path, body) {
     const opt = { method, credentials: 'include', headers: { 'Content-Type': 'application/json' } };
     if (body != null) opt.body = JSON.stringify(body);
+    /* 状态码在 fetch 失败时不存在，统一用可选形参 */
+    const fail = (msg, c, status) => { const e = new Error(msg); e.code = c; e.status = status; return e; };
     return fetch(path, opt).then(async (r) => {
       let j = null;
       try { j = await r.json(); } catch (e) { j = null; }
       const code = j && j.code != null ? j.code : (r.ok ? 0 : -1);
-      const fail = (msg, c) => { const e = new Error(msg); e.code = c; e.status = r.status; return e; };
       if (r.status === 401 || code === -101) {
         this.onUnauth();
-        throw fail('登录已失效，请重新登录', -101);
+        throw fail('登录已失效，请重新登录', -101, r.status);
       }
-      if (code === -3) throw fail('尝试次数过多，请稍后再试', code);
-      if (!r.ok || code !== 0) throw fail((j && j.msg) || '请求失败（' + r.status + '）', code);
+      if (code === -3) throw fail('尝试次数过多，请稍后再试', code, r.status);
+      if (!r.ok || code !== 0) throw fail((j && j.msg) || '请求失败（' + r.status + '）', code, r.status);
       return j && j.data !== undefined ? j.data : j;
+    }, (err) => {
+      /* fetch 本身没送出去（设备重启中 / 断网 / 连接被重置）时是浏览器原生
+         英文异常（"Failed to fetch" 之类），直接透传会在登录页 authFail 与
+         各页 .catch(e => toast(e.message)) 里弹成英文提示——用户在真机上
+         实测到过英文的报错 toast。这里统一换成中文，原始异常只进控制台。 */
+      console.warn('[ipc] 请求未送达 ' + path, err);
+      throw fail('无法连接设备，请检查网络后重试（设备可能正在重启）', -2);
     });
   },
 
@@ -224,9 +261,18 @@ window.IPC = {
 
   /** 写配置：设备逐键校验，有被拒的键即视为失败并列出键名 */
   saveCfg(obj) {
+    /* 设备端 cfg 校验给出的原因码是英文短码（core/config.c 的 validate()：
+       type/range/length/invalid/enum/unknown_key），直接拼进提示就成了
+       "以下设置未生效：xxx（range）" 这种中英混排的参数错误。此处翻译，
+       未登记的新原因码原样透传（宁可露英文也别把意思改错）。 */
+    const REASON = {
+      type: '类型不符', range: '超出取值范围', length: '长度超限',
+      invalid: '含不允许的字符', enum: '取值不在允许列表', unknown_key: '未知配置项'
+    };
     return this.api('PUT', '/api/v1/config', obj).then((r) => {
       if (r && r.rejected_total > 0) {
-        const keys = (r.rejected || []).map((x) => x.key + '（' + x.reason + '）').join('、');
+        const keys = (r.rejected || [])
+          .map((x) => x.key + '（' + (REASON[x.reason] || x.reason) + '）').join('、');
         const e = new Error('以下设置未生效：' + keys);
         e.code = -1;
         throw e;

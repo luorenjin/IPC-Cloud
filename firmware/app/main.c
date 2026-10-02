@@ -49,6 +49,26 @@ static void usage(const char *argv0)
         argv0, DEFAULT_PORT, DEFAULT_PERSIST);
 }
 
+/** 按 `time.timezone` 设置**本进程**的 TZ（POSIX TZ 串；缺省 CST-8，与
+ *  console_internal.h 的 CONSOLE_TZ_DEFAULT 同值）。
+ *
+ *  为什么必须有这一步：控制台的显示口径（`/system/time`、定时重启、日夜定时切换）
+ *  都是「epoch + 偏移」自己算的，与进程 TZ 无关；而 **OSD 的时间叠加**走 HAL 的
+ *  `strftime + localtime_r`（每秒自刷新，见 hal_osd.h），板端又没有 `/etc/TZ` ——
+ *  不设进程 TZ 的话，OSD 上的时间会与页面显示差一整个时区（真机实测差 8 小时：
+ *  页面 22:34 / 画面上 14:34）。在编排层设一次，两边口径就一致了。
+ *  运行期改 `time.timezone` 由 PUT /system/time 经 console_apply_timezone
+ *  立即生效（两者都走 os_set_timezone），**不必重启** ipc_app。 */
+static void apply_process_timezone(void)
+{
+    char tz[64] = "CST-8";
+
+    if (cfg_get_str("time.timezone", tz, sizeof(tz)) != HAL_OK || tz[0] == '\0')
+        snprintf(tz, sizeof(tz), "CST-8");
+    os_set_timezone(tz);
+    LOGI("app", "进程时区已设为 %s（OSD 时间与页面显示同源）", tz);
+}
+
 /* 读取 profile 文件到堆内存，调用方负责 free */
 static char *read_profile(const char *path)
 {
@@ -126,6 +146,10 @@ int main(int argc, char **argv)
             LOGI("app", "按配置使用 HTTP 端口 %d", port);
         }
     }
+
+    /* 进程时区（见 apply_process_timezone 的说明）：必须在任何线程（OSD 的每秒
+       strftime）起来之前设好，否则 OSD 上的时间会与页面显示差一个时区。 */
+    apply_process_timezone();
 
     /* 评审 Ruling 21（I-5）：生产启动流程此前完全没有调用 event_bus_init，
        导致 EVT_BIND_ACTIVATED 等事件在真机上从未被真正初始化过的总线上

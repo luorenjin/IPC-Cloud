@@ -91,7 +91,10 @@ void http_ws_on_readable(http_conn_t *c);
 void http_ws_flush(http_conn_t *c);
 
 /** conn_close 现有的 free(c->rbuf)/free(c->sbuf) 之前、c->is_ws 为真时调用：
- *  释放环形缓冲内存与锁，避免泄漏。 */
+ *  摘掉连接持有的那份引用并置 c->ws = NULL，注册表条目同时摘除；真正的
+ *  ws_state 内存在**引用计数归零时**才释放（在途的 http_ws_send 会把释放
+ *  推迟到它自己 ws_release）——因此本函数与生产者线程的发送不可能重叠，
+ *  见 http_ws.c 的“生命周期”一节。 */
 void http_ws_conn_cleanup(http_conn_t *c);
 
 /** 事件循环每轮无条件调用一次（两个平台各自的 while 循环体内各加一行，紧跟

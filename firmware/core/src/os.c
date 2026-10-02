@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <time.h>
 
 #ifdef _WIN32
 /* ============================ Windows ============================ */
@@ -243,4 +244,16 @@ int os_file_write_atomic(const char *path, const void *data, size_t len)
     fclose(fp);
     if (os_file_replace(tmp, path) != 0) { remove(tmp); return -1; }
     return 0;
+}
+
+void os_set_timezone(const char *tz)
+{
+    if (!tz || !tz[0]) return;
+#ifdef _WIN32
+    _putenv_s("TZ", tz);
+    _tzset();
+#else
+    setenv("TZ", tz, 1);
+    tzset();
+#endif
 }

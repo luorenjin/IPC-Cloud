@@ -32,7 +32,7 @@ firmware/
 ├── tests/core_test/          core 层单元测试
 ├── tests/console_test/       控制台/API 单测（仅 IPC_PLATFORM=mock）
 ├── tests/platform_gk_test/   GK 平台 /proc 解析与 ops 单测（主机构建 IPC_PLATFORM=gk7205v200）
-├── tools/                    board.py（串口 + TFTP 免断电部署/冒烟）、console_e2e.py（真机浏览器验收）
+├── tools/                    board.py（串口 + TFTP 免断电部署/冒烟）、console_e2e.py（真机浏览器验收）、board_osd.py（无头读写 OSD 配置）
 ├── docker/                   GOKE SDK 交叉编译与 rootfs 打包（见 docker/README.md）
 │   ├── rootfs-overlay/       开机脚本 S81dhcp（固定 MAC、DHCP/静态）、S90ipcapp
 │   └── flash/                刷机分区表与 bootargs 的唯一受控源 + 烧录指南.md
@@ -68,7 +68,7 @@ firmware\build-gkhost\tests\platform_gk_test\Debug\platform_gk_test.exe
 
 GK 上 `hal_conformance` 有已知失败（看门狗 / OTA / 视频未实现），门禁是**失败数不高于改动前**，不是 0。
 
-真机：`python tools/board.py deploy-app|reflash-rootfs|smoke|shell "<cmd>"`、`python tools/console_e2e.py`（见 `tools/README.md`；串口默认 COM6）。
+真机：`python tools/board.py deploy-app|reflash-rootfs|smoke|shell "<cmd>"`、`python tools/console_e2e.py`、`python tools/board_osd.py show|set`（见 `tools/README.md`；串口默认 COM6）。
 
 单独运行某个测试套件：直接执行 `firmware/build*/tests/<套件名>/`（MSVC 下为 `.../Debug/<套件名>.exe`）下生成的可执行文件，传入对应 profile JSON 路径作为参数，不必通过 `ctest` 过滤器。
 

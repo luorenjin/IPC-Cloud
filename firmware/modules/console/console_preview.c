@@ -46,6 +46,20 @@
 #define PREVIEW_SUB_CH      1        /**< HAL 码流通道：0=主 1=子 */
 #define PREVIEW_MAIN_CH     0
 #define PREVIEW_WAIT_MS     500      /**< 取帧超时（同时也是退出检查节拍） */
+/** 连续多久拿不到帧就重建整条视频通路（HAL 内部已有一层“通道级”自愈，
+ *  这里是通路级兜底）。2026-10-01 真机出过一次“预览永久黑屏”：连接不断、
+ *  日志干净、取流永远回 BUSY，只有整机重启才恢复——重建一次通路（几百 ms）
+ *  远比让用户拔电好。
+ *  ⚠️ 判据只能衡量**有消费者时**的卡死：无消费者时（用户不在预览页）工作线
+ *  本来就不取帧，若不刷新基准，用户离开 8 秒以上再回来、第一次 get_frame
+ *  只要稍慢就会被误判成“通路坏了”，进而 close/open 整条视频通路。 */
+#define PREVIEW_STALL_REBUILD_US (8ull * 1000000ull)
+/** 首次 open 失败的重试次数与间隔：真机日志反复出现 "VB 池初始化失败" 后
+ *  几百毫秒内重试即成功（MPP 的 VB/MMZ 会被上一次部分初始化的 v_open 影响，
+ *  而 v_open 内部已有回滚）。重试比把刚建立的预览连接直接踢掉好：后者会让
+ *  浏览器看到“画面已断开，正在重连…”并重新握手，用户观感就是“切个页面就断流”。 */
+#define PREVIEW_VIDEO_OPEN_RETRY      3
+#define PREVIEW_VIDEO_OPEN_RETRY_MS   300
 
 /* ---------------------------------------------------------------- 状态 */
 
@@ -57,6 +71,11 @@ static http_conn_t *s_conn;          /**< 当前预览连接；NULL = 无消费�
 static bool         s_video_up;      /**< 视频是否已 open（懒启动） */
 static int          s_ch = PREVIEW_SUB_CH;  /**< 当前连接请求的通道 */
 static int          s_video_ch = -1;        /**< 已 start 的通道；-1 = 无 */
+/** 连接代数：每登记一个新连接 +1（在 s_mu 下递增）。工作线程拿它判断
+ *  "这是一条还没要过关键帧的新连接"——用指针比对不安全（连接对象释放后
+ *  分配器可能把同一地址交给下一条连接）。 */
+static uint32_t     s_conn_seq;
+static uint32_t     s_idr_seq;       /**< 已为哪一代连接要过关键帧 */
 
 /* ---------------------------------------------------------------- 连接事件 */
 
@@ -98,27 +117,49 @@ static void preview_video_down(void)
 static void preview_thread(void *arg)
 {
     (void)arg;
+    uint64_t last_ok_us = os_monotonic_us();   /**< 上次成功取到帧的时刻（自愈判据） */
 
     for (;;) {
         http_conn_t *conn;
         int ch;
+        uint32_t seq;
 
         os_mutex_lock(s_mu);
         if (s_stop) { os_mutex_unlock(s_mu); break; }
         if (!s_conn) {
-            /* 无消费者：阻塞等唤醒（超时兜底，防止极端情况下漏掉 signal） */
+            /* 无消费者：阻塞等唤醒（超时兜底，防止极端情况下漏掉 signal）。
+               同时把“上次成功取帧”基准刷新到现在：下面的 8 秒无帧自愈判据
+               只能衡量**有消费者时**的卡死——空闲期间本来就不取帧，不刷新
+               基准就会把“用户离开预览页多久”误当成“通路卡死多久”（见
+               PREVIEW_STALL_REBUILD_US 注释）。 */
+            last_ok_us = os_monotonic_us();
             os_cond_wait(s_cv, s_mu, 1000);
             os_mutex_unlock(s_mu);
             continue;
         }
         conn = s_conn;
         ch = s_ch;
+        seq = s_conn_seq;
         os_mutex_unlock(s_mu);
 
         /* 首次预览才初始化视频（会打开 sensor i2c / MIPI / ISP，耗时数百毫秒），
-         * 放在工作线程里做，不能拖住事件循环。 */
+         * 放在工作线程里做，不能拖住事件循环。偶发失败（真机实测：“VB 池初始化
+         * 失败”→ 几百毫秒后重试即成功）就地重试，不要把用户刚建立的连接踢掉。 */
         if (!s_video_up) {
             hal_err_t e = preview_video_up();
+            int tries = 0;
+            while (e != HAL_OK && e != HAL_ENOTSUP && tries < PREVIEW_VIDEO_OPEN_RETRY) {
+                bool gone;
+                tries++;
+                LOGE(MOD, "预览启动失败（视频初始化）: %d，%dms 后重试（第 %d 次）",
+                     (int)e, PREVIEW_VIDEO_OPEN_RETRY_MS, tries);
+                os_sleep_ms(PREVIEW_VIDEO_OPEN_RETRY_MS);
+                os_mutex_lock(s_mu);
+                gone = s_stop || (s_conn != conn);
+                os_mutex_unlock(s_mu);
+                if (gone) break;   /* 消费者已走/已换代：不必再为它开硬件 */
+                e = preview_video_up();
+            }
             if (e != HAL_OK) {
                 LOGE(MOD, "预览启动失败（视频初始化）: %d", (int)e);
                 os_mutex_lock(s_mu);
@@ -148,7 +189,17 @@ static void preview_thread(void *arg)
             /* 新连接上来先要一个关键帧：H.264 必须从 IDR 起播，否则前端要么
                一直黑屏，要么干等一个完整 GOP（本平台 GOP=50，@30fps 近 2 秒）。 */
             if (hal()->video->request_idr) hal()->video->request_idr(ch);
+            s_idr_seq = seq;
             LOGI(MOD, "预览已启动（%s）", ch == PREVIEW_MAIN_CH ? "H.264/main" : "MJPEG/sub");
+        } else if (s_idr_seq != seq) {
+            /* 通道没变、但来的是**新连接**（退出→再登录、刷新页面、切页回来）：
+               编码器在上一个消费者断开后并不会停，上面的 start 分支不会走，
+               也就没人再要关键帧——前端只能干等自然 GOP 才拿得到 SPS/PPS/IDR。
+               2026-09-29 真机实测：重新登录后前 80 帧全是 'P'，约 5 秒才出图；
+               在这里补一次 request_idr 后应在百毫秒级起播。 */
+            if (hal()->video->request_idr) hal()->video->request_idr(ch);
+            s_idr_seq = seq;
+            LOGD(MOD, "预览新连接已请求关键帧（通道 %d 保持运行）", ch);
         }
 
         hal_frame_t f;
@@ -174,7 +225,14 @@ static void preview_thread(void *arg)
                 }
             }
 
-            /* 持 s_mu 发送：与 preview_on_close 串行化，保证 conn 仍有效 */
+            /* 持 s_mu 发送。这里 s_mu 的作用有两条：
+               ① 与 preview_on_close 串行化，令连接槽位在本帧发送期间不可能
+                  被 accept 复用（槽位复用要先走完 conn_close，而 conn_close
+                  会经 preview_on_close 等 s_mu）；
+               ② 保证同一时刻只有一次发送在飞。
+               http_ws_send 自身还有一层引用计数保护（http_ws.c 的“生命周期”
+               一节，2026-10-01 真机崩溃修复）：即便这份 WS 状态此刻正在被事件
+               循环销毁，也只会返回 HAL_EINVAL，不会踩到已释放内存。 */
             os_mutex_lock(s_mu);
             if (s_conn != conn) {
                 conn = NULL;   /* 连接已被换掉/关闭，本帧丢弃 */
@@ -186,11 +244,31 @@ static void preview_thread(void *arg)
             os_mutex_unlock(s_mu);
             free(pkt);
             if (hal()->video->release_frame) hal()->video->release_frame(&f);
+            last_ok_us = os_monotonic_us();
             if (!conn) continue;
         } else if (e == HAL_EAGAIN) {
-            continue;          /* 暂时无帧：立刻再试 */
+            /* 暂时无帧：立刻再试。但若**长时间**一帧都没有，说明编码器不是
+               慢，而是坏了（真机见过：GetStream 永远回 BUSY、连接不报错、
+               /var/log/ipc_app.log 干净，用户看到的就是永久黑屏）——重建一次
+               视频通路自愈，代价是几百毫秒的重启通道。 */
+            if (os_monotonic_us() - last_ok_us > PREVIEW_STALL_REBUILD_US) {
+                LOGE(MOD, "预览连续 8 秒无帧，重建视频通路（通道 %d）", ch);
+                preview_video_down();
+                last_ok_us = os_monotonic_us();
+                s_video_up = false;
+                continue;      /* 下一轮循环会重新 open + start(ch) 并请求关键帧 */
+            }
+            continue;
         } else {
-            os_sleep_ms(50);   /* 硬错误：退避，避免空转打满 CPU */
+            /* 硬错误：退避，避免空转打满 CPU；同样受上面的“无帧时长”兜底 */
+            os_sleep_ms(50);
+            if (os_monotonic_us() - last_ok_us > PREVIEW_STALL_REBUILD_US) {
+                LOGE(MOD, "预览连续 8 秒取帧失败（err=%d），重建视频通路", (int)e);
+                preview_video_down();
+                last_ok_us = os_monotonic_us();
+                s_video_up = false;
+                continue;
+            }
         }
     }
 }
@@ -252,6 +330,7 @@ static int console_preview_handler(http_req_t *req, void *user)
     os_mutex_lock(s_mu);
     s_conn = req->conn;
     s_ch = ch;
+    s_conn_seq++;       /* 新一代连接：工作线程据此再要一个关键帧 */
     os_cond_signal(s_cv);
     os_mutex_unlock(s_mu);
 

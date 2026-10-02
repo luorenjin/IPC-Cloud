@@ -41,6 +41,14 @@ uint64_t os_monotonic_us(void);
 int64_t  os_wallclock_ms(void);       /**< UTC 毫秒 */
 void     os_sleep_ms(uint32_t ms);
 
+/**
+ * 设置**本进程**时区（POSIX TZ 串，如 "CST-8" / "UTC-5:30"）。
+ * 只影响本进程的 localtime/strftime（OSD 时间叠加、定时重启换算、日志时间戳），
+ * 不影响同机其它进程（串口 `date` 是 busybox，另进程另环境）。调用后立即生效，
+ * 无需重启；`_WIN32` 分支用 _putenv_s/_tzset（core 是唯一允许出现 _WIN32 的地方）。
+ */
+void os_set_timezone(const char *tz);
+
 /** 原子替换：将 tmp_path 重命名为 dst_path（覆盖）。成功 0，失败 -1 */
 int os_file_replace(const char *tmp_path, const char *dst_path);
 /** 读取整个文件到 malloc 缓冲（NUL 结尾）；失败返回 NULL */

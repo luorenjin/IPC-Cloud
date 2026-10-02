@@ -85,7 +85,21 @@
       switchStream(false);
       applyRatio();
     };
-    $('#v-scene').onchange = (e) => toast(e.target.value);
+    $('#v-scene').onchange = (e) => {
+      /* 预览页顶栏的「场景」= 图像页的「监控场景」，同一个真键 image.scene
+         （取值对齐实机 image_scene_mode_common，映射在 core.js 的 SCENE_MAP）。
+         早先这里只弹一句 toast，选了设备毫无反应——现在真下发。 */
+      const v = IPC.SCENE_MAP[e.target.value];
+      if (!v) return;
+      IPC.api('POST', '/api/v1/image/params', { scene: v })
+        .then(() => refreshScene())
+        .catch((err) => toast('场景下发失败：' + ((err && err.message) || err)));
+    };
+    const refreshScene = () => IPC.api('GET', '/api/v1/image/params').then((d) => {
+      const label = IPC.SCENE_BACK[d.scene];
+      if (label) $('#v-scene').value = label;
+    }).catch(() => { /* 读不到就保持当前显示，不打扰预览 */ });
+    refreshScene();
 
     /* ---- 画面比例（对齐实机 #widthHeightSel）----
        语义已在实机量化（可用区 1110×657，四档均改播放容器自身尺寸）：
@@ -95,8 +109,13 @@
          100% = 铺满可用区（margin 0）。
        我方不动 .video-box 布局（断流提示层与全屏都依赖它），只在这里算出画面
        盒的尺寸、inline 写给 img/video，由 CSS 的 .video-box[data-ratio] 负责居中
-       与 object-fit:cover 填充——cover 保证变比例时不拉伸变形（实机是 canvas
-       fill 自绘，照抄 fill 会把 16:9 拉成 4:3）。纯显示层，不进 cfg/协议。 */
+       与**按原比例完整装入（contain）**。
+       ⚠️ 不能用 cover 填满：OSD 是设备烧进码流的，cover 会在元素内部再裁一次，
+       4:3 档每侧裁 12.5%、100% 档每侧裁 4.6% → 默认左对齐（x=2%）的通道名与
+       时间串被切（真机实测：4:3 档通道名整块消失）；且静默丢掉两侧视野。
+       代价：4:3 / 100% 档会留黑边（100% 的盒子就是可用区，contain 后观感与 1x
+       接近）——宁可留边也不切字、不丢画面。详见 style.css 同名注释。
+       纯显示层，不进 cfg/协议。 */
     const vbox = $('.preview-wrap .video-box');
     const RATIOS = { '4:3': 4 / 3, '16:9': 16 / 9 };
     const srcRatio = () => {

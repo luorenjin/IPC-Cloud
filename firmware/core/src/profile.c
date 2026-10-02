@@ -109,6 +109,7 @@ static hal_err_t fill(const json_t *r, profile_t *out)
         pc->max_w = (uint32_t)json_int(json_get(mx, "w"), 0); pc->max_h = (uint32_t)json_int(json_get(mx, "h"), 0);
         pc->max_fps = (uint32_t)json_int(json_get(mx, "fps"), 0);
         pc->def_codec = codec_of(json_string(json_get(df, "codec"), NULL));
+        pc->def_smart_enc = json_bool(json_get(df, "smart_enc"), false);
         pc->def_w = (uint32_t)json_int(json_get(df, "w"), 0); pc->def_h = (uint32_t)json_int(json_get(df, "h"), 0);
         pc->def_fps = (uint32_t)json_int(json_get(df, "fps"), 0); pc->def_kbps = (uint32_t)json_int(json_get(df, "kbps"), 0);
         pc->def_gop = (uint32_t)json_int(json_get(df, "gop"), pc->def_fps * 2);

@@ -248,22 +248,80 @@ class E2E:
             self.case("E6", "设备名称持久化", e6)
 
             def e7():
-                self.go("系统设置", "基本设置", "时间校对")
-                self.pg.select_option("#tm-mode", "manual")
-                self.pg.wait_for_timeout(300)
-                self.pg.click("#tm-pc")
-                self.pg.wait_for_timeout(1500)
-                t = self.page_api("/api/v1/system/time")
-                diff = abs(t["utc"] - time.time())
-                self.expect(diff < 5, f"设备与本机相差 {diff:.1f}s")
-                return f"相差 {diff:.1f}s"
+                # ⚠️ 本用例会把设备切到「手动校时」——那等于**关掉 NTP**（见
+                # system.js：`#tm-pc` 下发 {"ntp_enable":false,...}），而本机
+                # **无 RTC**：NTP 关掉后下一次重启墙钟就回到 1970-01-01，且不会
+                # 自己恢复（2026-10-01 真机踩过：E7 未还原 + E12 重启 → 板端
+                # 系统时间变成 1970，用户报“板端系统时间不对”）。所以必须像 E6
+                # 处理设备名称那样，先记下原值，用例结束（含断言失败）一律还原。
+                before = self.page_api("/api/v1/system/time")
+                prev_en = bool(before.get("ntp_enable"))
+                prev_srv = before.get("ntp_server") or "ntp.aliyun.com"
+                prev_tz = before.get("timezone") or "CST-8"
+
+                def put_time(body):
+                    return self.pg.evaluate(
+                        "(b) => fetch('/api/v1/system/time',{method:'PUT',credentials:'include',"
+                        "headers:{'Content-Type':'application/json'},body:JSON.stringify(b)})"
+                        ".then(r=>r.text())", body)
+                try:
+                    self.go("系统设置", "基本设置", "时间校对")
+
+                    # 时区（本项目新增）：先做，且当前是 NTP 分支——顺带覆盖"两种校时
+                    # 方式下都能改时区"。必须是**设备时区**、不能是浏览器时区：本用例主机
+                    # 在 UTC+8，UTC-07:00 差 15 小时，浏览器时区实现会立刻被这条断言抓住。
+                    # ⚠️ 保存后设备会触发 1.5s 延迟重绘（system.js 的 put()），重绘会按接口
+                    # 值重建下拉——所以每轮都重新 select 再点保存，避免点在新旧 DOM 之间。
+                    for _ in range(2):
+                        self.pg.select_option("#tm-tz", "UTC+7")
+                        self.pg.wait_for_timeout(200)
+                        self.pg.click("#body .btn.primary")
+                        self.pg.wait_for_timeout(1800)
+                        tz_now = self.page_api("/api/v1/system/time")
+                        if tz_now.get("timezone") == "UTC+7":
+                            break
+                    self.expect(tz_now.get("timezone") == "UTC+7",
+                                f"时区未生效：{tz_now.get('timezone')}")
+                    clock = self.pg.inner_text("#sys-clock")
+                    want = time.strftime("%Y-%m-%d %H:%M", time.gmtime(tz_now["utc"] - 7 * 3600))
+                    self.expect(clock.startswith(want),
+                                f"页面时钟未按设备时区（UTC-07:00）显示：{clock} ≠ {want}…")
+
+                    self.pg.select_option("#tm-mode", "manual")
+                    self.pg.wait_for_timeout(300)
+                    self.pg.click("#tm-pc")
+                    self.pg.wait_for_timeout(1500)
+                    t = self.page_api("/api/v1/system/time")
+                    diff = abs(t["utc"] - time.time())
+                    self.expect(diff < 5, f"设备与本机相差 {diff:.1f}s")
+                    return (f"相差 {diff:.1f}s，时区回读 UTC+7 且页面时钟符；"
+                            f"已还原 NTP={prev_en} 时区={prev_tz}")
+                finally:
+                    # 还原（失败也要还原：否则设备停在“无 NTP 且无 RTC”的死状态）
+                    try:
+                        put_time({"ntp_enable": prev_en, "ntp_server": prev_srv, "timezone": prev_tz})
+                        self.pg.wait_for_timeout(800)
+                        if not prev_en:
+                            print("[e2e] WARN E7：跑之前设备就是「手动校时」（NTP 关），已按原样还原；"
+                                  "本机无 RTC，这种状态重启后时间会回到 1970-01-01", flush=True)
+                    except Exception:  # noqa: BLE001 会话已丢时还原无意义，交由用例失败汇总
+                        pass
             self.case("E7", "与计算机时间同步", e7)
 
             def e8():
                 self.go("系统设置", "系统配置", "系统日志")
                 self.pg.wait_for_timeout(1000)
                 total = self.pg.inner_text("#log-total")
-                self.expect(total != "共 0 条", "日志为空")
+                # 失败时把接口原始信息一并报出来：页面按「utc + 单调毫秒」把行首毫秒换算成
+                # 设备本地时间，锚点缺失/为 0 会让时间范围把所有行滤掉（显示"共 0 条"），
+                # 只看 DOM 无法区分是"设备没日志"还是"锚点不对"。
+                if total == "共 0 条":
+                    raw = self.page_api("/api/v1/system/log?lines=1000")
+                    raise AssertionError(
+                        f"日志为空：接口 lines={len(raw.get('lines') or [])} utc={raw.get('utc')} "
+                        f"mono_ms={raw.get('mono_ms')} 时间范围="
+                        f"{self.pg.input_value('#log-d1')} {self.pg.input_value('#log-t1')} ~ "
+                        f"{self.pg.input_value('#log-d2')} {self.pg.input_value('#log-t2')}")
                 with self.pg.expect_download() as dl:
                     self.pg.click("#log-out")
                 return f"{total}，导出 {dl.value.suggested_filename}"
@@ -352,6 +410,183 @@ class E2E:
                     self.expect(self.pg.is_visible("#shell"), "出厂后重新激活失败")
                     return f"约 {cost:.0f}s 回到未激活，已重新激活"
                 self.case("E13", "恢复出厂", e13)
+
+            def e14():
+                # 日夜定时切换的 24h 时间轴（对齐参照实机 #controlDayNight）：
+                # 用**真实鼠标**拖指针，验证几何（720px 轨道 / 11×20 指针）、吸附与
+                # 「松开才下发」——设备侧必须真的变，且拖回后与开跑前一致。
+                self.go("摄像头", "画面显示", "图像")
+                mode0 = self.pg.input_value("select[data-key=daynight]")
+                self.pg.select_option("select[data-key=daynight]", "日夜定时切换")
+                self.pg.wait_for_timeout(1200)
+                self.expect(self.pg.is_visible("#dn-tl"), "选定时段档后未展开时间轴")
+                self.pg.locator("#dn-tl").scroll_into_view_if_needed()
+                self.pg.wait_for_timeout(300)
+                tr = self.pg.locator("#dn-track").bounding_box()
+                self.expect(abs(tr["width"] - 720) < 2, f"轨道宽 {tr['width']:.1f}px（应 720）")
+                sizes = self.pg.eval_on_selector_all(
+                    ".dn-ptr", "e=>e.map(x=>{const b=x.getBoundingClientRect();return b.width+'x'+b.height})")
+                self.expect(sizes == ["11x20", "11x20"], f"指针尺寸 {sizes}（应 11x20）")
+                x0 = tr["x"] + 11 / 2 + (360 / 1440) * (tr["width"] - 11)     # 06:00 位
+                x9 = tr["x"] + 11 / 2 + (540 / 1440) * (tr["width"] - 11)     # 09:00 位
+
+                def drag(to_x):
+                    cy = self.pg.locator("#dn-ptr-day").bounding_box()["y"] + 10
+                    self.pg.mouse.move(x0 if to_x > x0 else x9, cy)
+                    self.pg.mouse.down()
+                    self.pg.mouse.move(to_x, cy, steps=8)
+                    self.pg.mouse.up()
+                    self.pg.wait_for_timeout(1200)
+
+                drag(x9)
+                got = self.pg.inner_text("#dn-lab-day")
+                self.expect(got == "09:00", f"拖动后白天开始显示 {got}（应 09:00）")
+                p1 = self.pg.locator("#dn-ptr-day").bounding_box()
+                self.expect(abs(p1["x"] + p1["width"] / 2 - x9) <= 2,
+                            f"指针中心 {p1['x'] + p1['width'] / 2:.1f} 未落在 09:00 位置 {x9:.1f}")
+                api1 = self.page_api("/api/v1/image/params")
+                self.expect(api1["daynight_day_start"] == "09:00",
+                            f"设备侧白天开始为 {api1['daynight_day_start']}（应 09:00）")
+                drag(x0)
+                api2 = self.page_api("/api/v1/image/params")
+                self.expect(api2["daynight_day_start"] == "06:00",
+                            f"拖回后设备侧为 {api2['daynight_day_start']}（应 06:00）")
+
+                # ── 月亮/太阳开关（日夜两套配置，2026-09-29）：几何照实机 + 点击切编辑目标 ──
+                sw = self.pg.locator("#dn-sw")
+                self.expect(sw.is_visible(), "开关行未显示（定时档应显示）")
+                box = sw.bounding_box()
+                self.expect(abs(box["width"] - 120) < 1 and abs(box["height"] - 28) < 1,
+                            f"开关应 120×28，实际 {box['width']:.0f}×{box['height']:.0f}")
+                g0 = self.page_api("/api/v1/image/params")
+                day0, night0 = g0["brightness"], g0["night"]["brightness"]
+                # 点月亮：选中态与时间轴配色跟着翻转（蓝＝正在编辑的那套对应的时段）
+                self.pg.click("#dn-sw li[data-p=night]")
+                self.pg.wait_for_timeout(300)
+                self.expect(self.pg.get_attribute("#dn-sw li[data-p=night]", "aria-checked") == "true",
+                            "点月亮后夜晚套未选中")
+                self.expect(self.pg.get_attribute("#dn-tl", "data-period") == "night",
+                            "时间轴配色未跟随开关翻转")
+                # 夜晚套写 63：只动夜晚套，白天套原值不动（两套独立的真机闭环）
+                num = self.pg.locator("input[data-key=bright][type=number]")
+                num.fill("63")
+                num.press("Tab")
+                self.pg.wait_for_timeout(900)
+                g1 = self.page_api("/api/v1/image/params")
+                self.expect(g1["night"]["brightness"] == 63,
+                            f"夜晚套应为 63，实际 {g1['night']['brightness']}")
+                self.expect(g1["brightness"] == day0,
+                            f"白天套不该被改（{day0}），实际 {g1['brightness']}")
+                # 切回白天：配色翻回 + 回填白天原值（缓存随 POST 并回，不会跳回旧值）
+                self.pg.click("#dn-sw li[data-p=day]")
+                self.pg.wait_for_timeout(300)
+                self.expect(self.pg.get_attribute("#dn-tl", "data-period") == "day",
+                            "切回白天后配色未翻回")
+                self.expect(num.input_value() == str(day0),
+                            f"切回白天应回填 {day0}，实际 {num.input_value()}")
+                # 还原两套原值，别把测试值留给后续用例/用户
+                self.pg.evaluate(
+                    """async ([d, n]) => {
+                        const post = (b) => fetch('/api/v1/image/params', { method: 'POST',
+                          headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b) });
+                        await post({ period: 'day', brightness: d });
+                        await post({ period: 'night', brightness: n });
+                    }""", [day0, night0])
+                g2 = self.page_api("/api/v1/image/params")
+                self.expect(g2["brightness"] == day0 and g2["night"]["brightness"] == night0,
+                            f"还原失败：白天 {g2['brightness']} 夜晚 {g2['night']['brightness']}")
+
+                self.pg.select_option("select[data-key=daynight]", mode0)   # 档位也还原
+                self.pg.wait_for_timeout(800)
+                self.shot("E14-timeline")
+                return (f"轨道 {tr['width']:.0f}px、指针 11x20；06:00↔09:00 拖动设备同步；"
+                        f"月亮/太阳 120×28 配色翻转、双套 {day0}/{night0} 独立写入并还原")
+            self.case("E14", "日夜时间轴与两套开关", e14)
+
+            def e15():
+                # OSD 叠加层：**点选 + 拖动定位**（对齐实机——在预览画面上直接拖 OSD 文字）。
+                # 用真实鼠标拖：按下出现选中态、移动跟手、**松手**才把落点写回归一化坐标，
+                # 点「保存」才下发；设备侧必须真的换了位置，跑完还原回去。
+                self.go("摄像头", "画面显示", "OSD")
+                for _ in range(30):                      # 主码流 MSE 起流要几秒
+                    if self.pg.evaluate("() => { const v=document.querySelector('.video-box video');"
+                                        " return !!(v && v.videoWidth); }"):
+                        break
+                    self.pg.wait_for_timeout(500)
+                self.expect(self.pg.evaluate(
+                    "() => { const v=document.querySelector('.video-box video'); return !!(v && v.videoWidth); }"),
+                    "OSD 页预览未出图，无法验证拖动")
+
+                before = self.page_api("/api/v1/osd")
+                tx0, ty0 = before["time_x"], before["time_y"]
+
+                # 先勾「日期」（= 时间区域总开关）并**保存一次**：设备里这才有了一份真 OSD，
+                # 也才能验证"叠加层先擦掉它、再画新效果"。E13 恢复出厂后设备上本来是干净的，
+                # 那种情况下没有东西可擦——第一版用例就把它误判成失败了。
+                self.pg.check("#osd-date")
+                self.pg.wait_for_timeout(600)
+                self.pg.click("#osd-save")
+                self.pg.wait_for_timeout(1600)
+                self.expect(self.page_api("/api/v1/osd")["time_enable"],
+                            "保存后设备侧时间 OSD 未开启，后续擦除断言无从谈起")
+
+                # 再动一个（勾「星期」）制造未保存改动 → 叠加层必须擦掉码流里那份旧 OSD。
+                # 勾选本身就带 dirty 态，比依赖 hover 更稳。
+                self.pg.check("#osd-week")
+                self.pg.wait_for_timeout(1200)
+                items = self.pg.eval_on_selector_all(
+                    ".osd-live .osd-item",
+                    "e=>e.map(x=>({role:x.dataset.role,left:x.style.left,top:x.style.top,"
+                    "pe:getComputedStyle(x).pointerEvents,cursor:getComputedStyle(x).cursor}))")
+                self.expect([i["role"] for i in items] == ["time"],
+                            f"叠加层应只有 time 一块（通道名未勾选），实际 {[i['role'] for i in items]}")
+                self.expect(items and items[0]["pe"] == "auto",
+                            "OSD 块收不到指针事件（叠加层整体 pointer-events:none，块必须放行）")
+                wipes = self.pg.eval_on_selector_all(".osd-live canvas.osd-wipe", "e=>e.length")
+                self.expect(wipes >= 1, "未先擦掉设备已烧进码流的 OSD（保存前会看到双份文字）")
+
+                blk = self.pg.locator(".osd-live .osd-item[data-role=time]")
+                r0 = blk.bounding_box()
+                l0 = float(blk.evaluate("e => parseFloat(e.style.left)"))
+                t0 = float(blk.evaluate("e => parseFloat(e.style.top)"))
+                dx, dy = 200, -60        # 往上拖：时间块本来贴底，往下会被画面下沿夹住
+                self.pg.mouse.move(r0["x"] + 10, r0["y"] + 10)
+                self.pg.mouse.down()
+                self.pg.mouse.move(r0["x"] + 10 + dx, r0["y"] + 10 + dy, steps=10)
+                self.expect(blk.evaluate("e => e.classList.contains('sel')"), "按下后未显示选中态")
+                self.pg.mouse.up()
+                self.pg.wait_for_timeout(700)
+                l1 = float(blk.evaluate("e => parseFloat(e.style.left)"))
+                t1 = float(blk.evaluate("e => parseFloat(e.style.top)"))
+                self.expect(abs(l1 - (l0 + dx)) < 2 and abs(t1 - (t0 + dy)) < 2,
+                            f"拖动位移不对：({l0:.0f},{t0:.0f}) → ({l1:.0f},{t1:.0f})，应 +{dx}/{dy}")
+
+                self.pg.click("#osd-save")
+                self.pg.wait_for_timeout(1600)
+                mid = self.page_api("/api/v1/osd")
+                self.expect(mid["time_x"] > tx0, f"保存后设备 time_x 没变大：{tx0} → {mid['time_x']}")
+                self.expect(mid["time_y"] < ty0, f"保存后设备 time_y 没变小：{ty0} → {mid['time_y']}")
+                # 拖 200px 对应设备归一化 ≈ 200/显示区宽×100（视频区 704px 宽时约 28）
+                moved_pct = mid["time_x"] - tx0
+                self.expect(20 <= moved_pct <= 36,
+                            f"横向位移换算不合理：{tx0} → {mid['time_x']}（+{moved_pct}%）")
+                self.shot("E15-osd-drag")
+
+                # 还原：位置写回原值 + 关掉时间 OSD（回到出厂默认），别把测试值留给用户
+                self.pg.evaluate(
+                    """async ([x, y]) => { await fetch('/api/v1/osd', { method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ time_x: x, time_y: y, time_enable: false,
+                                               time_date: false, time_week: false }) }); }""",
+                    [tx0, ty0])
+                self.pg.wait_for_timeout(1300)
+                back = self.page_api("/api/v1/osd")
+                self.expect(back["time_x"] == tx0 and back["time_y"] == ty0,
+                            f"位置未还原：{back['time_x']},{back['time_y']}（应 {tx0},{ty0}）")
+                self.expect(not back["time_enable"], "时间 OSD 未还原为关闭")
+                return (f"叠加层 1 块可点选、{wipes} 块擦除；真实鼠标拖 +{dx}/{dy}px → 设备 "
+                        f"{tx0},{ty0} → {mid['time_x']},{mid['time_y']}（+{moved_pct}%）；已还原")
+            self.case("E15", "OSD 叠加层拖动定位", e15)
 
             self.browser.close()
 

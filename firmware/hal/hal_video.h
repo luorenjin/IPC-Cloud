@@ -75,6 +75,8 @@ typedef struct {
     uint32_t             gop;         /**< 关键帧间隔（帧数） */
     uint32_t             max_qp;      /**< 0 表示使用平台默认 */
     uint32_t             min_qp;
+    bool                 smart_enc;   /**< 是否启用智能编码（H.264+ / H.265+，SmartP/LTR） */
+    uint32_t             bg_interval; /**< SmartP 背景关键帧间隔（0 使用平台默认，如 250） */
 } hal_enc_cfg_t;
 
 /** 图像参数，范围 0~100；-1 表示不修改 */

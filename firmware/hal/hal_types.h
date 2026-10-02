@@ -82,6 +82,7 @@ typedef enum {
 #define HAL_FRAME_FLAG_CONFIG   (1u << 1)   /**< 含 SPS/PPS/VPS 等参数集 */
 #define HAL_FRAME_FLAG_EOS      (1u << 2)   /**< 流结束（回放/文件读取用） */
 #define HAL_FRAME_FLAG_DISCONT  (1u << 3)   /**< 时间戳不连续 */
+#define HAL_FRAME_FLAG_VI       (1u << 4)   /**< SmartP 中的虚拟/背景参考帧 (Virtual I) */
 
 /**
  * 编码后帧。由 HAL 分配、业务层持有引用、用完调用 release_frame。
